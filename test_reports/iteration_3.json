@@ -1,0 +1,41 @@
+{
+  "summary": "Phase 3 (Media + Playlists + Schedules + Public Signage Player) backend + frontend testing complete. Backend: 28/28 new Phase 3 pytest pass (media upload/list/update/soft-delete/serve, MIME + 50MB rejects, cross-tenant isolation, playlist validation against caller-owned media, schedule playlist validation, public player payload for valid/invalid pair codes, schedule day matching + inactive fallback to latest playlist per zone, playlist-delete cascades schedules, role enforcement for admin/dealer on /client/{media|playlists|schedules}, device.status flips to paired after first /public/player hit). Full regression: 92/92 across all 3 phase files. Frontend: Media upload (tiny PNG) → grid render, zone tabs, Playlists create+chip+duration+save, Schedules page loads, /play/{pairCode} invalid shows correct error. ONE CRITICAL UI BUG: client sidebar is missing the new Media / Playlists / Schedule nav entries (routes exist, pages work via direct URL).",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "Layout.jsx (CLIENT_NAV)", "issue": "Client sidebar does NOT include Media, Playlists, Schedule nav items. Routes /client/media, /client/playlists, /client/schedules exist and pages render correctly via direct URL, but the sidebar in /app/frontend/src/components/Layout.jsx lists only Dashboard, Devices, Templates, Storefront. ImageIcon, ListMusic, Calendar icons are imported on line 5 but never used. Fix: append 3 entries to CLIENT_NAV array (~lines 24-29).", "selector": "aside nav", "priority": "HIGH"}
+    ],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Client Media page", "issues": ["File input <input multiple> + React StrictMode appears to fire upload twice during dev (observed 2 media cards after a single file selection in test environment); recommend guarding upload() against re-entry while uploading state is true, or de-dup by content hash. Not a blocker in production builds but worth checking."]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_phase3.py",
+    "/app/test_reports/pytest/phase3_results.xml",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [
+    "Add Media/Playlists/Schedule entries to CLIENT_NAV in /app/frontend/src/components/Layout.jsx. Icons (ImageIcon, ListMusic, Calendar) are already imported. Example: { to: '/client/media', label: 'Media', Icon: ImageIcon }, { to: '/client/playlists', label: 'Playlists', Icon: ListMusic }, { to: '/client/schedules', label: 'Schedule', Icon: Calendar }",
+    "(Optional) Investigate double-upload in dev mode on /client/media (React StrictMode double-fire on onChange). Adding `if (uploading) return;` early in upload() is the simplest fix."
+  ],
+  "critical_code_review_comments": [
+    "Public player payload uses datetime.now(timezone.utc).weekday() for schedule day matching. Schedules saved with days_of_week in user's local timezone would not match correctly near midnight. Acceptable for v1 but should be documented or made TZ-aware later.",
+    "/api/media/serve/{id} is public (by design per problem statement). It currently loads the entire file into memory via get_object and wraps in BytesIO. For large videos (up to 50MB), consider streaming via httpx.stream() to reduce backend memory pressure under concurrent player polls.",
+    "gen_pair_code() truncates uuid.int to 6 chars without uniqueness index on pair_code (already raised in iter 2). Phase 3 player uses pair_code as primary lookup, increasing the impact — a collision would let one device hijack another's playlist.",
+    "Object storage init_storage() returns 503 on failure (good), but the storage_key is module-global with no expiry refresh besides 403 retry. If the key silently expires for a different reason, uploads/serves will hang on the timeout (120s).",
+    "Dealer-delete cascade does NOT clean up media/playlists/schedules of orphaned clients (problem statement explicitly notes this is acceptable). Confirmed in test_phase3 — no cross-tenant leakage occurs because /api/client/* always filters by client_id=user['id'].",
+    "ClientPlaylists picker filters available media by `form.zone`. Backend allows any zone media in a playlist of any zone, so a user wanting to mix is silently blocked by UI. Minor UX nit.",
+    "ClientMedia upload: missing client-side size/MIME validation. Relies entirely on backend 400, which means a 50MB file is fully transferred before rejection. Add a pre-flight check on file.size and file.type."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_phase3.py (new, 28 tests)"
+  ],
+  "success_rate": {"backend": "100% (28/28 phase3, 92/92 cumulative)", "frontend": "~85% — all pages and flows function via direct URL; client sidebar nav incomplete (3 missing items)"},
+  "test_credentials": "admin@admin.com/admin123, dealer@demo.com/dealer123. UI test client created for phase 3: uitest_ph3_1778491604@x.com / uipass1234 (id=1c790d15-8383-4055-a6cf-287e27113f58). Phase 2 leftovers: uidoc_357030@x.com/docpass still exists.",
+  "seed_data_creation": "Backend tests create TEST_-prefixed clients/media/playlists/schedules/devices and clean them up. UI client uitest_ph3_1778491604@x.com left for retest with 2 uploaded media + 1 playlist (zone=main) for direct verification of the sidebar fix.",
+  "retest_needed": true,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Phase 3 backend is fully verified — re-run: pytest /app/backend/tests/test_phase3.py -v. The only frontend issue is the missing 3 nav items in Layout.jsx CLIENT_NAV. After main agent adds them, retest by logging in as uitest_ph3_1778491604@x.com / uipass1234 and confirming the sidebar shows Media, Playlists, Schedule links (they already work via /client/media, /client/playlists, /client/schedules direct URL).",
+  "rca of the issue": "Layout.jsx imports ImageIcon, ListMusic, Calendar lucide-react icons on line 5 and registers /client/media|/playlists|/schedules routes in App.js, but the CLIENT_NAV array (lines 24-29) was not extended to include them — likely an oversight when Phase 3 sidebar was wired. Reproduction: login as any client → sidebar shows only Dashboard/Devices/Templates/Storefront. Fix: append three { to, label, Icon } entries to CLIENT_NAV."
+}

@@ -1,0 +1,94 @@
+{
+  "theme": "light",
+  "archetype": "4 (Swiss & High-Contrast)",
+  "design_philosophy": "Objective, rigid, and functional. High-contrast typography with a structural grayscale base. Color is used purely for function, categorization, and status.",
+  "colors": {
+    "background": "#FFFFFF",
+    "surface": "#F9FAFB",
+    "surface_hover": "#F3F4F6",
+    "border": "#E5E7EB",
+    "text_primary": "#111827",
+    "text_secondary": "#6B7280",
+    "accent_cloud_plan": "#002FA7",
+    "accent_usb_plan": "#F59E0B",
+    "accent_hybrid_plan": "#10B981",
+    "danger": "#EF4444",
+    "success": "#10B981"
+  },
+  "typography": {
+    "heading_font": "Cabinet Grotesk",
+    "body_font": "IBM Plex Sans",
+    "h1": "text-4xl sm:text-5xl font-extrabold tracking-tighter text-[#111827] leading-none",
+    "h2": "text-2xl sm:text-3xl font-bold tracking-tight text-[#111827]",
+    "h3": "text-xl font-bold tracking-tight text-[#111827]",
+    "body": "text-sm text-[#4B5563] leading-relaxed",
+    "label_overline": "text-xs font-semibold uppercase tracking-[0.2em] text-[#6B7280]"
+  },
+  "layout_and_spacing": {
+    "grid_system": "Control Room Mode",
+    "grid_classes": "grid grid-cols-1 md:grid-cols-3 lg:grid-cols-4 gap-4",
+    "card_padding": "p-6",
+    "container_padding": "p-8",
+    "border_radius": "rounded-sm"
+  },
+  "components": {
+    "sidebar": "bg-white border-r border-[#E5E7EB] w-64 flex flex-col h-screen fixed",
+    "kpi_card": "bg-white border border-[#E5E7EB] rounded-sm p-6 hover:-translate-y-1 hover:shadow-lg transition-all duration-200",
+    "button_primary": "bg-[#111827] text-white rounded-sm px-4 py-2 hover:bg-[#374151] hover:text-white transition-colors text-sm font-medium focus:ring-2 focus:ring-[#111827] focus:ring-offset-2",
+    "button_secondary": "bg-white border border-[#E5E7EB] text-[#111827] rounded-sm px-4 py-2 hover:bg-[#F3F4F6] transition-colors text-sm font-medium",
+    "table": "w-full text-sm text-left border-collapse",
+    "table_header": "bg-[#F9FAFB] border-y border-[#E5E7EB] text-[#6B7280] font-semibold text-xs uppercase tracking-wider py-3 px-4",
+    "table_row": "border-b border-[#E5E7EB] hover:bg-[#F9FAFB] transition-colors",
+    "badge_cloud": "bg-[#002FA7]/10 text-[#002FA7] border border-[#002FA7]/20 rounded-sm px-2 py-1 text-xs font-semibold",
+    "badge_usb": "bg-[#F59E0B]/10 text-[#F59E0B] border border-[#F59E0B]/20 rounded-sm px-2 py-1 text-xs font-semibold",
+    "badge_hybrid": "bg-[#10B981]/10 text-[#10B981] border border-[#10B981]/20 rounded-sm px-2 py-1 text-xs font-semibold"
+  },
+  "motion_and_interaction": {
+    "hover_state": "transition-colors duration-200 ease-in-out",
+    "active_state": "scale-[0.98]",
+    "focus_state": "focus:outline-none focus:ring-2 focus:ring-[#111827] focus:ring-offset-2"
+  },
+  "media": {
+    "images": [
+      {
+        "category": "avatar_admin",
+        "description": "Admin user profile avatar",
+        "url": "https://images.unsplash.com/photo-1762522926157-bcc04bf0b10a?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjAzMjh8MHwxfHNlYXJjaHwyfHxwcm9mZXNzaW9uYWwlMjBoZWFkc2hvdCUyMHBvcnRyYWl0fGVufDB8fHx8MTc3ODMxMjgwMXww&ixlib=rb-4.1.0&q=85"
+      },
+      {
+        "category": "avatar_dealer",
+        "description": "Dealer user profile avatar",
+        "url": "https://images.pexels.com/photos/14589344/pexels-photo-14589344.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940"
+      },
+      {
+        "category": "template_thumbnail_1",
+        "description": "Digital signage menu board",
+        "url": "https://images.unsplash.com/photo-1686362060774-1786ef7bf4db?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NTYxODl8MHwxfHNlYXJjaHw0fHxkaWdpdGFsJTIwc2lnbmFnZSUyMG1lbnUlMjBib2FyZCUyMHNjcmVlbnxlbnwwfHx8fDE3Nzg0ODA0NTB8MA&ixlib=rb-4.1.0&q=85"
+      },
+      {
+        "category": "template_thumbnail_2",
+        "description": "Retail store display signage",
+        "url": "https://images.unsplash.com/photo-1764795850248-97a5e986b242?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NTYxODl8MHwxfHNlYXJjaHwxfHxkaWdpdGFsJTIwc2lnbmFnZSUyMG1lbnUlMjBib2FyZCUyMHNjcmVlbnxlbnwwfHx8fDE3Nzg0ODA0NTB8MA&ixlib=rb-4.1.0&q=85"
+      },
+      {
+        "category": "template_thumbnail_3",
+        "description": "Black and white menu list",
+        "url": "https://images.unsplash.com/photo-1599250300435-b9693f21830d?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NTYxODl8MHwxfHNlYXJjaHwyfHxkaWdpdGFsJTIwc2lnbmFnZSUyMG1lbnUlMjBib2FyZCUyMHNjcmVlbnxlbnwwfHx8fDE3Nzg0ODA0NTB8MA&ixlib=rb-4.1.0&q=85"
+      },
+      {
+        "category": "template_thumbnail_4",
+        "description": "White and red menu board",
+        "url": "https://images.unsplash.com/photo-1629341948402-42a2d20577a6?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NTYxODl8MHwxfHNlYXJjaHwzfHxkaWdpdGFsJTIwc2lnbmFnZSUyMG1lbnUlMjBib2FyZCUyMHNjcmVlbnxlbnwwfHx8fDE3Nzg0ODA0NTB8MA&ixlib=rb-4.1.0&q=85"
+      }
+    ]
+  },
+  "instructions_to_main_agent": [
+    "Strictly follow the 'Control Room' dense grid approach. No large, empty soft shadow cards. Use sharp, 1px border cards with `rounded-sm`.",
+    "Do not use generic Inter font. Apply Cabinet Grotesk for headings and IBM Plex Sans for body. Add via Google Fonts in index.html.",
+    "Data Tables are critical: include robust filters, search bars, and distinct plan badges (Cloud: Blue, USB: Amber, Hybrid: Emerald) using the colors defined.",
+    "For modals/dialogs, maintain the sharp-edged, high-contrast aesthetic. Dimmed backgrounds should be `bg-black/50 backdrop-blur-sm`.",
+    "All interactive elements MUST include a `data-testid` attribute (e.g., `data-testid=\"dealer-create-submit\"`).",
+    "Use Phosphor Icons (via @phosphor-icons/react) for a sharp, technical look matching the dashboard aesthetic.",
+    "Ensure hover states explicitly declare text colors to maintain contrast."
+  ]
+}
