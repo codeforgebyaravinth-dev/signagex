@@ -9,6 +9,18 @@ export default function ClientTemplates() {
   const [items, setItems] = useState([]);
   useEffect(() => { api.get("/client/templates").then((r) => setItems(r.data)).catch(() => {}); }, []);
 
+  const zoneLabels = (template) => {
+    const zones = template?.layout?.zones || [];
+    if (Array.isArray(zones) && zones.length > 0) {
+      return zones.map((zone) => zone.name || zone.id).filter(Boolean);
+    }
+    const labels = [];
+    if (template?.layout?.main) labels.push(template.layout.main || "Main");
+    if (template?.layout?.sidebar) labels.push(template.layout.sidebar || "Sidebar");
+    if (template?.layout?.ticker) labels.push(template.layout.ticker || "Ticker");
+    return labels;
+  };
+
   return (
     <div data-testid="client-templates-page">
       <PageHeader overline="Client / Templates" title="Your layouts." subtitle="Templates assigned by your dealer — pick one for each screen in Devices." />
@@ -30,11 +42,11 @@ export default function ClientTemplates() {
                 <span className="text-[10px] uppercase tracking-wider text-[#9CA3AF]">{t.category}</span>
               </div>
               <div className="font-display font-bold text-base text-[#111827] truncate">{t.name}</div>
-              {t.layout && (t.layout.main || t.layout.sidebar || t.layout.ticker) && (
+              {zoneLabels(t).length > 0 && (
                 <div className="mt-3 pt-3 border-t border-[#E5E7EB] grid grid-cols-3 gap-1 text-[10px] uppercase tracking-wider font-semibold text-[#6B7280]">
-                  <div className="bg-[#F3F4F6] px-2 py-1 rounded-sm truncate" title={t.layout.main}>Main</div>
-                  <div className="bg-[#F3F4F6] px-2 py-1 rounded-sm truncate" title={t.layout.sidebar}>Sidebar</div>
-                  <div className="bg-[#F3F4F6] px-2 py-1 rounded-sm truncate" title={t.layout.ticker}>Ticker</div>
+                  {zoneLabels(t).slice(0, 3).map((label, index) => (
+                    <div key={`${t.id}-zone-${index}`} className="bg-[#F3F4F6] px-2 py-1 rounded-sm truncate" title={label}>{label}</div>
+                  ))}
                 </div>
               )}
             </div>

@@ -11,7 +11,7 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigge
 import { Plus, MoreVertical, Pencil, Trash2, Monitor, ExternalLink, Copy } from "lucide-react";
 import { toast } from "sonner";
 
-const empty = { name: "", location: "", pair_code: "", template_id: "" };
+const empty = { name: "", location: "", pair_code: "", template_id: "", orientation: "auto", brightness: 100 };
 
 export default function ClientDevices() {
   const [items, setItems] = useState([]);
@@ -29,12 +29,12 @@ export default function ClientDevices() {
   useEffect(() => { load(); }, []);
 
   const openCreate = () => { setEditing(null); setForm(empty); setOpen(true); };
-  const openEdit = (d) => { setEditing(d); setForm({ ...empty, ...d, template_id: d.template_id || "" }); setOpen(true); };
+  const openEdit = (d) => { setEditing(d); setForm({ ...empty, ...d, template_id: d.template_id || "", orientation: d.orientation || "auto", brightness: Number(d.brightness ?? 100) }); setOpen(true); };
 
   const submit = async (e) => {
     e.preventDefault();
     try {
-      const payload = { ...form, template_id: form.template_id || null };
+      const payload = { ...form, template_id: form.template_id || null, brightness: Number(form.brightness ?? 100) };
       if (editing) await api.put(`/client/devices/${editing.id}`, payload);
       else await api.post("/client/devices", payload);
       toast.success(editing ? "Device updated" : "Device added");
@@ -62,17 +62,21 @@ export default function ClientDevices() {
         <Table>
           <TableHeader>
             <TableRow className="bg-[#F9FAFB] hover:bg-[#F9FAFB]">
+              <TableHead className="text-[11px] uppercase tracking-wider text-[#6B7280]">ID</TableHead>
               <TableHead className="text-[11px] uppercase tracking-wider text-[#6B7280]">Device</TableHead>
               <TableHead className="text-[11px] uppercase tracking-wider text-[#6B7280]">Pair Code</TableHead>
               <TableHead className="text-[11px] uppercase tracking-wider text-[#6B7280]">Template</TableHead>
+              <TableHead className="text-[11px] uppercase tracking-wider text-[#6B7280]">Orientation</TableHead>
+              <TableHead className="text-[11px] uppercase tracking-wider text-[#6B7280] text-right">Brightness</TableHead>
               <TableHead className="text-[11px] uppercase tracking-wider text-[#6B7280]">Status</TableHead>
               <TableHead className="w-12"></TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
-            {items.length === 0 && <TableRow><TableCell colSpan={5} className="text-center py-10 text-sm text-[#6B7280]">No devices yet.</TableCell></TableRow>}
+            {items.length === 0 && <TableRow><TableCell colSpan={8} className="text-center py-10 text-sm text-[#6B7280]">No devices yet.</TableCell></TableRow>}
             {items.map((d) => (
               <TableRow key={d.id} data-testid={`device-row-${d.id}`}>
+                <TableCell className="font-mono text-[11px] text-[#6B7280]">{d.id}</TableCell>
                 <TableCell>
                   <div className="flex items-center gap-2">
                     <Monitor className="w-4 h-4 text-[#6B7280]" />
@@ -89,6 +93,8 @@ export default function ClientDevices() {
                   </div>
                 </TableCell>
                 <TableCell className="text-sm">{tplName(d.template_id)}</TableCell>
+                <TableCell className="text-sm capitalize">{d.orientation || "auto"}</TableCell>
+                <TableCell className="text-right font-mono text-xs">{Number(d.brightness ?? 100)}%</TableCell>
                 <TableCell><span className="text-[11px] uppercase tracking-wider font-semibold text-[#374151]">{d.status}</span></TableCell>
                 <TableCell>
                   <a href={`/play/${d.pair_code}`} target="_blank" rel="noreferrer" className="inline-flex items-center text-xs px-2 py-1 border border-[#E5E7EB] rounded-sm hover:bg-[#F3F4F6] mr-1" data-testid={`open-player-${d.id}`}>
@@ -137,6 +143,23 @@ export default function ClientDevices() {
                   {templates.map((t) => <SelectItem key={t.id} value={t.id}>{t.name}</SelectItem>)}
                 </SelectContent>
               </Select>
+            </div>
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <Label className="text-xs uppercase tracking-wider text-[#6B7280]">Orientation</Label>
+                <Select value={form.orientation || "auto"} onValueChange={(v) => setForm({ ...form, orientation: v })}>
+                  <SelectTrigger className="rounded-sm" data-testid="device-orientation"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="auto">Auto</SelectItem>
+                    <SelectItem value="landscape">Landscape</SelectItem>
+                    <SelectItem value="portrait">Portrait</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <div>
+                <Label className="text-xs uppercase tracking-wider text-[#6B7280]">Brightness</Label>
+                <Input type="number" min="0" max="100" value={form.brightness} onChange={(e) => setForm({ ...form, brightness: Number(e.target.value || 100) })} className="rounded-sm" data-testid="device-brightness" />
+              </div>
             </div>
             <DialogFooter>
               <Button type="button" variant="outline" onClick={() => setOpen(false)} className="rounded-sm">Cancel</Button>

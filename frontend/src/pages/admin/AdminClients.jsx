@@ -67,6 +67,7 @@ export default function AdminClients() {
         <Table>
           <TableHeader>
             <TableRow className="bg-[#F9FAFB] hover:bg-[#F9FAFB]">
+              <TableHead className="text-[11px] uppercase tracking-wider text-[#6B7280]">Client ID</TableHead>
               <TableHead className="text-[11px] uppercase tracking-wider text-[#6B7280]">Client</TableHead>
               <TableHead className="text-[11px] uppercase tracking-wider text-[#6B7280]">Dealer</TableHead>
               <TableHead className="text-[11px] uppercase tracking-wider text-[#6B7280]">GST</TableHead>
@@ -77,9 +78,10 @@ export default function AdminClients() {
             </TableRow>
           </TableHeader>
           <TableBody>
-            {filtered.length === 0 && <TableRow><TableCell colSpan={7} className="text-center py-10 text-sm text-[#6B7280]">No clients found.</TableCell></TableRow>}
+            {filtered.length === 0 && <TableRow><TableCell colSpan={8} className="text-center py-10 text-sm text-[#6B7280]">No clients found.</TableCell></TableRow>}
             {filtered.map((c) => (
               <TableRow key={c.id} data-testid={`admin-client-row-${c.id}`}>
+                <TableCell className="font-mono text-[11px] text-[#6B7280]">{c.id}</TableCell>
                 <TableCell>
                   <div className="font-semibold">{c.name}</div>
                   <div className="text-xs text-[#6B7280]">{c.email}</div>

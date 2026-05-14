@@ -2,10 +2,10 @@ import { useEffect, useState } from "react";
 import { api } from "../../lib/api";
 import PageHeader from "../../components/PageHeader";
 import KpiCard from "../../components/KpiCard";
-import { Monitor, FileVideo, Wallet, CalendarCheck, Package, Building } from "lucide-react";
+import { Monitor, FileVideo, Wallet, CalendarCheck, Package, Building, HardDrive } from "lucide-react";
 import { useAuth } from "../../context/AuthContext";
 
-const VERTICAL_LABELS = { general: "General", doctor: "Doctor", retailer: "Retailer", society: "Society" };
+const VERTICAL_LABELS = { general: "General", doctor: "Doctor", salon: "Salon", retailer: "Retailer", society: "Society" };
 
 export default function ClientDashboard() {
   const { user } = useAuth();
@@ -20,7 +20,8 @@ export default function ClientDashboard() {
         <KpiCard label="Devices" value={stats?.devices ?? "—"} hint={`${stats?.paired ?? 0} paired`} Icon={Monitor} accent="#002FA7" testid="kpi-devices" />
         <KpiCard label="Templates" value={stats?.templates ?? "—"} hint="Available layouts" Icon={FileVideo} accent="#F59E0B" testid="kpi-templates" />
         <KpiCard label="Wallet" value={`₹ ${stats?.wallet_balance?.toLocaleString?.() ?? 0}`} hint="Balance available" Icon={Wallet} accent="#10B981" testid="kpi-wallet" />
-        {stats?.vertical === "doctor" && (
+        <KpiCard label="Storage" value={`${stats?.storage_used_gb ?? 0} / ${stats?.storage_limit_gb ?? 0} GB`} hint={`${stats?.storage_remaining_gb ?? 0} GB remaining`} Icon={HardDrive} accent="#7C3AED" testid="kpi-storage" />
+        {(stats?.vertical === "doctor" || stats?.vertical === "salon") && (
           <KpiCard label="Appointments today" value={stats?.appointments_today ?? 0} hint="Live queue" Icon={CalendarCheck} testid="kpi-apts" />
         )}
         {stats?.vertical === "retailer" && (

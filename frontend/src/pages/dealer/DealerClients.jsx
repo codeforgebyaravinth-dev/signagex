@@ -27,6 +27,7 @@ const empty = {
 const VERTICALS = [
   { value: "general", label: "General signage" },
   { value: "doctor", label: "Doctor / Clinic" },
+  { value: "salon", label: "Salon / Spa" },
   { value: "retailer", label: "Retailer" },
   { value: "society", label: "Society / Apartment" },
 ];

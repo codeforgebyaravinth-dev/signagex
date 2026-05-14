@@ -17,16 +17,16 @@ export default function PublicBooking() {
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [confirmed, setConfirmed] = useState(null);
-  const [form, setForm] = useState({ patient_name: "", patient_phone: "", notes: "" });
+  const [form, setForm] = useState({ patient_name: "", patient_phone: "", preferred_time: "", service_name: "", notes: "" });
 
   useEffect(() => {
-    axios.get(`${BASE}/doctors/${clientId}`).then((r) => setDoc(r.data)).catch(() => setDoc(false)).finally(() => setLoading(false));
+    axios.get(`${BASE}/providers/${clientId}`).then((r) => setDoc(r.data)).catch(() => setDoc(false)).finally(() => setLoading(false));
   }, [clientId]);
 
   const submit = async (e) => {
     e.preventDefault(); setBusy(true);
     try {
-      const { data } = await axios.post(`${BASE}/doctors/${clientId}/book`, form);
+      const { data } = await axios.post(`${BASE}/providers/${clientId}/book`, form);
       setConfirmed(data);
       toast.success(`Token #${data.token} confirmed`);
     } catch (e) { toast.error(formatErr(e.response?.data?.detail)); }
@@ -34,10 +34,13 @@ export default function PublicBooking() {
   };
 
   if (loading) return <div className="min-h-screen flex items-center justify-center text-sm text-[#6B7280] font-mono uppercase tracking-widest">Loading...</div>;
-  if (!doc) return <div className="min-h-screen flex items-center justify-center"><div className="text-center"><CircleSlash className="w-10 h-10 text-[#9CA3AF] mx-auto mb-3" /><h2 className="font-display text-2xl font-extrabold">Doctor not found</h2><p className="text-sm text-[#6B7280] mt-1">This booking link is invalid.</p></div></div>;
+  if (!doc) return <div className="min-h-screen flex items-center justify-center"><div className="text-center"><CircleSlash className="w-10 h-10 text-[#9CA3AF] mx-auto mb-3" /><h2 className="font-display text-2xl font-extrabold">Provider not found</h2><p className="text-sm text-[#6B7280] mt-1">This booking link is invalid.</p></div></div>;
 
   const profile = doc.profile || {};
   const isOpen = profile.is_open !== false;
+  const isSalon = doc.vertical === "salon";
+  const providerLabel = isSalon ? "Salon" : "Clinic";
+  const serviceLabel = isSalon ? "service" : "appointment";
 
   if (confirmed) {
     return (
@@ -47,8 +50,8 @@ export default function PublicBooking() {
           <div className="text-[11px] font-semibold uppercase tracking-[0.2em] text-[#6B7280] mb-2">Booking confirmed</div>
           <h2 className="font-display text-3xl font-extrabold tracking-tighter">Your token</h2>
           <div className="font-display text-7xl font-extrabold tracking-tighter my-6">#{confirmed.token}</div>
-          <p className="text-sm text-[#6B7280]">Visit <strong>{doc.name}</strong> on <strong>{confirmed.date}</strong>. Show this token at the clinic.</p>
-          <Button onClick={() => { setConfirmed(null); setForm({ patient_name: "", patient_phone: "", notes: "" }); }} variant="outline" className="rounded-sm mt-6" data-testid="book-another">Book another</Button>
+          <p className="text-sm text-[#6B7280]">Visit <strong>{doc.name}</strong> on <strong>{confirmed.date}</strong>. Show this token at the {providerLabel.toLowerCase()}.</p>
+          <Button onClick={() => { setConfirmed(null); setForm({ patient_name: "", patient_phone: "", preferred_time: "", service_name: "", notes: "" }); }} variant="outline" className="rounded-sm mt-6" data-testid="book-another">Book another</Button>
         </div>
       </div>
     );
@@ -64,9 +67,11 @@ export default function PublicBooking() {
       </header>
       <div className="max-w-3xl mx-auto p-6 grid grid-cols-1 md:grid-cols-2 gap-6">
         <div className="bg-white border border-[#E5E7EB] rounded-sm p-6">
-          <div className="text-[11px] font-semibold uppercase tracking-[0.2em] text-[#6B7280] mb-2">Clinic</div>
+          <div className="text-[11px] font-semibold uppercase tracking-[0.2em] text-[#6B7280] mb-2">{providerLabel}</div>
           <h1 className="font-display text-3xl font-extrabold tracking-tighter mb-2">{doc.name}</h1>
+          {profile.image_url && <img src={profile.image_url} alt={doc.name} className="w-full h-36 object-cover rounded-sm mb-4 border border-[#E5E7EB]" />}
           {profile.specialty && <p className="text-sm text-[#374151] mb-4">{profile.specialty}</p>}
+          {profile.description && <p className="text-sm text-[#374151] mb-4">{profile.description}</p>}
           <ul className="space-y-2 text-sm text-[#374151]">
             {profile.qualifications && <li className="flex items-center gap-2"><Stethoscope className="w-4 h-4 text-[#6B7280]" /> {profile.qualifications}</li>}
             {profile.hours && <li className="flex items-center gap-2"><Clock className="w-4 h-4 text-[#6B7280]" /> {profile.hours}</li>}
@@ -84,13 +89,17 @@ export default function PublicBooking() {
         </div>
 
         <form onSubmit={submit} className="bg-white border border-[#E5E7EB] rounded-sm p-6">
-          <div className="text-[11px] font-semibold uppercase tracking-[0.2em] text-[#6B7280] mb-2">Book appointment</div>
+          <div className="text-[11px] font-semibold uppercase tracking-[0.2em] text-[#6B7280] mb-2">Book {serviceLabel}</div>
           <h2 className="font-display text-2xl font-extrabold tracking-tight mb-4">Get your token.</h2>
           <div className="space-y-4">
             <div><Label className="text-xs uppercase tracking-wider text-[#6B7280]">Your name</Label>
               <Input value={form.patient_name} onChange={(e) => setForm({ ...form, patient_name: e.target.value })} required className="rounded-sm" data-testid="book-name" /></div>
             <div><Label className="text-xs uppercase tracking-wider text-[#6B7280]">Phone</Label>
               <Input value={form.patient_phone} onChange={(e) => setForm({ ...form, patient_phone: e.target.value })} required className="rounded-sm" data-testid="book-phone" /></div>
+            <div><Label className="text-xs uppercase tracking-wider text-[#6B7280]">Preferred time</Label>
+              <Input value={form.preferred_time} onChange={(e) => setForm({ ...form, preferred_time: e.target.value })} placeholder="10:30 AM" className="rounded-sm" /></div>
+            <div><Label className="text-xs uppercase tracking-wider text-[#6B7280]">Service</Label>
+              <Input value={form.service_name} onChange={(e) => setForm({ ...form, service_name: e.target.value })} placeholder={isSalon ? "Haircut" : "General consultation"} className="rounded-sm" /></div>
             <div><Label className="text-xs uppercase tracking-wider text-[#6B7280]">Note (optional)</Label>
               <Textarea value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} rows={2} className="rounded-sm" data-testid="book-notes" /></div>
           </div>

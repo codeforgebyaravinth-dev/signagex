@@ -15,6 +15,7 @@ import bcrypt
 import boto3
 import jwt
 import requests
+import xml.etree.ElementTree as ET
 from fastapi import FastAPI, APIRouter, HTTPException, Request, Response, Depends, UploadFile, File, Form
 from fastapi.responses import StreamingResponse
 from starlette.middleware.cors import CORSMiddleware
@@ -22,6 +23,7 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, Field, EmailStr
 from botocore.exceptions import ClientError, BotoCoreError
 import io
+import base64
 
 mongo_url = os.environ['MONGO_URL']
 client = AsyncIOMotorClient(mongo_url)
@@ -34,7 +36,7 @@ public_api = APIRouter(prefix="/api/public")
 
 JWT_ALGO = "HS256"
 PLAN_TYPES = ("cloud", "usb", "hybrid")
-VERTICALS = ("general", "doctor", "retailer", "society")
+VERTICALS = ("general", "doctor", "salon", "retailer", "society")
 
 # ---------------- Auth ----------------
 def hash_password(pw: str) -> str:
@@ -140,14 +142,18 @@ class LoginIn(BaseModel):
 class PlanIn(BaseModel):
     name: str
     type: Literal["cloud", "usb", "hybrid"]
+    billing_cycle: Literal["monthly", "yearly"] = "monthly"
     price: float = 0.0
+    storage_limit_gb: float = 0.0
     description: str = ""
     features: List[str] = []
 
 class PlanUpdate(BaseModel):
     name: Optional[str] = None
     type: Optional[Literal["cloud", "usb", "hybrid"]] = None
+    billing_cycle: Optional[Literal["monthly", "yearly"]] = None
     price: Optional[float] = None
+    storage_limit_gb: Optional[float] = None
     description: Optional[str] = None
     features: Optional[List[str]] = None
 
@@ -170,13 +176,20 @@ class TemplateZone(BaseModel):
     """Represents a single zone in a template layout."""
     id: str  # unique zone identifier
     name: str  # e.g., "Main Screen 1", "Main Screen 2", "Sidebar"
+    x: Optional[int] = None  # left offset in pixels for composition layouts
+    y: Optional[int] = None  # top offset in pixels for composition layouts
+    width_px: Optional[int] = None  # pixel width for composition layouts
+    height_px: Optional[int] = None  # pixel height for composition layouts
     width: Optional[str] = None  # CSS width or grid column span
     height: Optional[str] = None  # CSS height or grid row span
     position: Optional[str] = None  # CSS grid position or flex order
 
 class TemplateLayout(BaseModel):
-    # New: dynamic zones array
-    zones: List[TemplateZone] = []
+    # New: dynamic zones array plus composition metadata
+    canvas_width: int = 1920
+    canvas_height: int = 1080
+    use_grid: bool = True
+    zones: List[TemplateZone] = Field(default_factory=list)
     # Legacy (kept for backward compatibility): old string fields
     main: str = ""
     sidebar: str = ""
@@ -200,7 +213,7 @@ class ClientCreate(BaseModel):
     name: str; email: EmailStr; password: str
     phone: str = ""; gst_number: str = ""; address: str = ""
     plan: Literal["cloud", "usb", "hybrid"] = "cloud"
-    vertical: Literal["general", "doctor", "retailer", "society"] = "general"
+    vertical: Literal["general", "doctor", "salon", "retailer", "society"] = "general"
     wallet_balance: float = 0.0
     assigned_template_ids: List[str] = []
 
@@ -210,7 +223,7 @@ class ClientUpdate(BaseModel):
     phone: Optional[str] = None; gst_number: Optional[str] = None
     address: Optional[str] = None
     plan: Optional[Literal["cloud", "usb", "hybrid"]] = None
-    vertical: Optional[Literal["general", "doctor", "retailer", "society"]] = None
+    vertical: Optional[Literal["general", "doctor", "salon", "retailer", "society"]] = None
     assigned_template_ids: Optional[List[str]] = None
     status: Optional[Literal["active", "suspended", "pending"]] = None
     dealer_id: Optional[str] = None
@@ -223,12 +236,16 @@ class DeviceCreate(BaseModel):
     location: str = ""
     pair_code: Optional[str] = None
     template_id: Optional[str] = None
+    orientation: Optional[Literal["auto", "landscape", "portrait"]] = "auto"
+    brightness: Optional[int] = 100
 
 class DeviceUpdate(BaseModel):
     name: Optional[str] = None
     location: Optional[str] = None
     status: Optional[Literal["paired", "unpaired", "offline"]] = None
     template_id: Optional[str] = None
+    orientation: Optional[Literal["auto", "landscape", "portrait"]] = None
+    brightness: Optional[int] = None
 
 # Doctor models
 class DoctorProfile(BaseModel):
@@ -237,11 +254,16 @@ class DoctorProfile(BaseModel):
     fee: float = 0.0
     hours: str = ""
     is_open: bool = True
+    image_url: str = ""
+    description: str = ""
+    slot_minutes: int = 15
 
 class AppointmentCreate(BaseModel):
     patient_name: str
     patient_phone: str
     notes: str = ""
+    preferred_time: str = ""
+    service_name: str = ""
 
 # Retailer
 class ProductIn(BaseModel):
@@ -259,6 +281,16 @@ class RoomUpdate(BaseModel):
     room_no: Optional[str] = None; user_name: Optional[str] = None
     mobile: Optional[str] = None; notes: Optional[str] = None
 
+class NoticeIn(BaseModel):
+    title: str
+    body: str = ""
+    image_url: str = ""
+
+class NoticeUpdate(BaseModel):
+    title: Optional[str] = None
+    body: Optional[str] = None
+    image_url: Optional[str] = None
+
 # ---------------- Helpers ----------------
 def now_iso(): return datetime.now(timezone.utc).isoformat()
 def clean(d): d.pop("_id", None); d.pop("password_hash", None); return d
@@ -270,7 +302,17 @@ async def hydrate_client(c: dict) -> dict:
     if c.get("dealer_id"):
         d = await db.users.find_one({"id": c["dealer_id"]}, {"_id": 0, "name": 1})
         c["dealer_name"] = d["name"] if d else ""
+    c.setdefault("doctor_profile", {})
+    c.setdefault("salon_profile", {})
     return c
+
+
+def _service_profile_field(vertical: str) -> str:
+    return f"{vertical}_profile"
+
+
+def _service_label(vertical: str) -> str:
+    return "Doctor" if vertical == "doctor" else "Salon" if vertical == "salon" else vertical.title()
 
 # ---------------- Auth Endpoints ----------------
 @api.post("/auth/login")
@@ -460,7 +502,7 @@ async def create_client(body: ClientCreate, user: dict = Depends(require_role("d
            "phone": body.phone, "gst_number": body.gst_number, "address": body.address,
            "plan": body.plan, "vertical": body.vertical, "wallet_balance": float(body.wallet_balance),
            "dealer_id": user["id"], "dealer_name": user["name"],
-           "assigned_template_ids": safe, "doctor_profile": {},
+            "assigned_template_ids": safe, "doctor_profile": {}, "salon_profile": {},
            "status": "pending", "created_at": now_iso()}
     await db.clients.insert_one(doc); return clean(doc)
 
@@ -539,15 +581,27 @@ async def client_stats(user: dict = Depends(require_role("client"))):
     paired = await db.devices.count_documents({"client_id": user["id"], "status": "paired"})
     tpls = len(c.get("assigned_template_ids", [])) if c else 0
     extras = {}
-    if c and c.get("vertical") == "doctor":
+    if c and c.get("vertical") in ("doctor", "salon"):
         extras["appointments_today"] = await db.appointments.count_documents({"client_id": user["id"], "date": datetime.now(timezone.utc).date().isoformat()})
     elif c and c.get("vertical") == "retailer":
         extras["products"] = await db.products.count_documents({"client_id": user["id"]})
     elif c and c.get("vertical") == "society":
         extras["rooms"] = await db.rooms.count_documents({"client_id": user["id"]})
+
+    limit_bytes, limit_gb, plan = await _get_client_storage_quota(c or {})
+    used_bytes = await _get_media_usage_bytes(user["id"])
+    used_gb = used_bytes / (1024 * 1024 * 1024)
+    remaining_gb = max(0.0, limit_gb - used_gb) if limit_gb > 0 else 0.0
+
     return {"devices": devices, "paired": paired, "templates": tpls,
             "wallet_balance": round(c.get("wallet_balance", 0) if c else 0, 2),
-            "vertical": c.get("vertical", "general") if c else "general", **extras}
+            "vertical": c.get("vertical", "general") if c else "general",
+            "storage_used_gb": round(used_gb, 2),
+            "storage_limit_gb": round(limit_gb, 2),
+            "storage_remaining_gb": round(remaining_gb, 2),
+            "storage_usage_pct": round((used_gb / limit_gb) * 100, 2) if limit_gb > 0 else 0,
+            "plan_name": plan.get("name") if plan else "",
+            **extras}
 
 @api.get("/client/templates")
 async def client_templates(user: dict = Depends(require_role("client"))):
@@ -567,6 +621,7 @@ async def create_device(body: DeviceCreate, user: dict = Depends(require_role("c
            "pair_code": pair_code, "status": "paired" if body.pair_code else "unpaired",
            "client_id": user["id"], "dealer_id": c.get("dealer_id", ""),
            "template_id": body.template_id, "paired_at": now_iso() if body.pair_code else None,
+        "orientation": body.orientation or "auto", "brightness": int(body.brightness or 100),
            "created_at": now_iso()}
     await db.devices.insert_one(doc); return clean(doc)
 
@@ -577,6 +632,11 @@ async def update_device(did: str, body: DeviceUpdate, user: dict = Depends(requi
         c = await db.clients.find_one({"id": user["id"]}, {"_id": 0, "assigned_template_ids": 1})
         if upd["template_id"] not in (c.get("assigned_template_ids") or []):
             raise HTTPException(status_code=400, detail="Template not assigned to you")
+    if "brightness" in upd:
+        try:
+            upd["brightness"] = max(0, min(100, int(upd["brightness"])))
+        except Exception:
+            upd.pop("brightness", None)
     if not upd: raise HTTPException(status_code=400, detail="Nothing to update")
     r = await db.devices.find_one_and_update({"id": did, "client_id": user["id"]}, {"$set": upd}, return_document=True, projection={"_id": 0})
     if not r: raise HTTPException(status_code=404, detail="Device not found")
@@ -620,25 +680,89 @@ async def get_device_zones(did: str, user: dict = Depends(require_role("client")
                 {"id": "ticker", "name": "Ticker"}
             ]
         return {"zones": [], "legacy_zones": [z["id"] for z in legacy], "legacy_zone_names": {z["id"]: z["name"] for z in legacy}}
-    
+
     return {"zones": zones, "legacy_zones": []}
 
-# ----------- Doctor vertical -----------
+
+@public_api.get("/rss")
+async def public_rss(url: str):
+    """Proxy an RSS/Atom feed so the player can render ticker headlines without CORS issues."""
+    if not url:
+        raise HTTPException(status_code=400, detail="url is required")
+    try:
+        r = requests.get(url, timeout=15, headers={"User-Agent": "Mozilla/5.0 SignageOS"})
+        r.raise_for_status()
+        root = ET.fromstring(r.text)
+        items = []
+        for node in root.findall(".//item"):
+            title = (node.findtext("title") or "").strip()
+            link = (node.findtext("link") or "").strip()
+            if title:
+                items.append({"title": title, "link": link})
+        if not items:
+            for entry in root.findall(".//{http://www.w3.org/2005/Atom}entry"):
+                title = (entry.findtext("{http://www.w3.org/2005/Atom}title") or "").strip()
+                link_node = entry.find("{http://www.w3.org/2005/Atom}link")
+                link = (link_node.attrib.get("href") if link_node is not None else "") or ""
+                if title:
+                    items.append({"title": title, "link": link})
+        return {"items": items[:50]}
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"RSS fetch failed: {exc}")
+
+# ----------- Doctor / Salon vertical -----------
+async def _update_service_profile(vertical: str, body: DoctorProfile, user: dict):
+    field = _service_profile_field(vertical)
+    r = await db.clients.find_one_and_update(
+        {"id": user["id"], "vertical": vertical},
+        {"$set": {field: body.model_dump()}},
+        return_document=True,
+        projection={"_id": 0, "password_hash": 0},
+    )
+    if not r:
+        raise HTTPException(status_code=403, detail=f"Not a {_service_label(vertical).lower()} account")
+    return r.get(field, {})
+
+
+async def _list_service_appointments(user: dict):
+    return await db.appointments.find({"client_id": user["id"]}, {"_id": 0}).sort("created_at", -1).to_list(500)
+
+
+async def _set_service_appointment_status(aid: str, status: str, user: dict):
+    r = await db.appointments.find_one_and_update({"id": aid, "client_id": user["id"]}, {"$set": {"status": status}}, return_document=True, projection={"_id": 0})
+    if not r:
+        raise HTTPException(status_code=404, detail="Appointment not found")
+    return r
+
+
 @api.put("/client/doctor/profile")
 async def update_doc_profile(body: DoctorProfile, user: dict = Depends(require_role("client"))):
-    r = await db.clients.find_one_and_update({"id": user["id"], "vertical": "doctor"}, {"$set": {"doctor_profile": body.model_dump()}}, return_document=True, projection={"_id": 0, "password_hash": 0})
-    if not r: raise HTTPException(status_code=403, detail="Not a doctor account")
-    return r.get("doctor_profile", {})
+    return await _update_service_profile("doctor", body, user)
+
+
+@api.put("/client/salon/profile")
+async def update_salon_profile(body: DoctorProfile, user: dict = Depends(require_role("client"))):
+    return await _update_service_profile("salon", body, user)
+
 
 @api.get("/client/doctor/appointments")
 async def list_appointments(user: dict = Depends(require_role("client"))):
-    return await db.appointments.find({"client_id": user["id"]}, {"_id": 0}).sort("created_at", -1).to_list(500)
+    return await _list_service_appointments(user)
+
+
+@api.get("/client/salon/appointments")
+async def list_salon_appointments(user: dict = Depends(require_role("client"))):
+    return await _list_service_appointments(user)
+
 
 @api.post("/client/doctor/appointments/{aid}/status")
 async def set_apt_status(aid: str, status: Literal["pending", "called", "done", "cancelled"], user: dict = Depends(require_role("client"))):
-    r = await db.appointments.find_one_and_update({"id": aid, "client_id": user["id"]}, {"$set": {"status": status}}, return_document=True, projection={"_id": 0})
-    if not r: raise HTTPException(status_code=404, detail="Appointment not found")
-    return r
+    return await _set_service_appointment_status(aid, status, user)
+
+
+@api.post("/client/salon/appointments/{aid}/status")
+async def set_salon_apt_status(aid: str, status: Literal["pending", "called", "done", "cancelled"], user: dict = Depends(require_role("client"))):
+    return await _set_service_appointment_status(aid, status, user)
 
 # ----------- Retailer vertical -----------
 @api.get("/client/products")
@@ -688,26 +812,96 @@ async def delete_room(rid: str, user: dict = Depends(require_role("client"))):
     if r.deleted_count == 0: raise HTTPException(status_code=404, detail="Room not found")
     return {"ok": True}
 
-# ---------------- Public: Doctor booking ----------------
+
+@api.get("/client/notices")
+async def list_notices(user: dict = Depends(require_role("client"))):
+    return await db.notices.find({"client_id": user["id"]}, {"_id": 0}).sort("created_at", -1).to_list(1000)
+
+
+@api.post("/client/notices")
+async def create_notice(body: NoticeIn, user: dict = Depends(require_role("client"))):
+    doc = {"id": str(uuid.uuid4()), "client_id": user["id"], **body.model_dump(), "created_at": now_iso()}
+    await db.notices.insert_one(doc)
+    return clean(doc)
+
+
+@api.put("/client/notices/{nid}")
+async def update_notice(nid: str, body: NoticeUpdate, user: dict = Depends(require_role("client"))):
+    upd = {k: v for k, v in body.model_dump(exclude_none=True).items()}
+    if not upd:
+        raise HTTPException(status_code=400, detail="Nothing to update")
+    r = await db.notices.find_one_and_update({"id": nid, "client_id": user["id"]}, {"$set": upd}, return_document=True, projection={"_id": 0})
+    if not r:
+        raise HTTPException(status_code=404, detail="Notice not found")
+    return r
+
+
+@api.delete("/client/notices/{nid}")
+async def delete_notice(nid: str, user: dict = Depends(require_role("client"))):
+    r = await db.notices.delete_one({"id": nid, "client_id": user["id"]})
+    if r.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Notice not found")
+    return {"ok": True}
+
+# ---------------- Public: Doctor / Salon booking ----------------
+async def _public_service_profile(cid: str):
+    c = await db.clients.find_one({"id": cid, "vertical": {"$in": ["doctor", "salon"]}}, {"_id": 0, "password_hash": 0, "wallet_balance": 0})
+    if not c:
+        raise HTTPException(status_code=404, detail="Service provider not found")
+    profile_field = _service_profile_field(c.get("vertical", "doctor"))
+    pending = await db.appointments.count_documents({"client_id": cid, "status": "pending", "date": datetime.now(timezone.utc).date().isoformat()})
+    return {
+        "id": c["id"],
+        "name": c["name"],
+        "vertical": c.get("vertical", "doctor"),
+        "phone": c.get("phone", ""),
+        "address": c.get("address", ""),
+        "profile": c.get(profile_field, {}),
+        "queue_length": pending,
+    }
+
+
+async def _book_service(cid: str, body: AppointmentCreate):
+    c = await db.clients.find_one({"id": cid, "vertical": {"$in": ["doctor", "salon"]}}, {"_id": 0})
+    if not c:
+        raise HTTPException(status_code=404, detail="Service provider not found")
+    today = datetime.now(timezone.utc).date().isoformat()
+    token = await db.appointments.count_documents({"client_id": cid, "date": today}) + 1
+    doc = {
+        "id": str(uuid.uuid4()),
+        "client_id": cid,
+        "date": today,
+        "token": token,
+        "patient_name": body.patient_name,
+        "patient_phone": body.patient_phone,
+        "notes": body.notes,
+        "preferred_time": body.preferred_time,
+        "service_name": body.service_name,
+        "status": "pending",
+        "created_at": now_iso(),
+    }
+    await db.appointments.insert_one(doc)
+    return clean(doc)
+
+
+@public_api.get("/providers/{cid}")
+async def public_provider_profile(cid: str):
+    return await _public_service_profile(cid)
+
+
+@public_api.post("/providers/{cid}/book")
+async def public_provider_book(cid: str, body: AppointmentCreate):
+    return await _book_service(cid, body)
+
+
 @public_api.get("/doctors/{cid}")
 async def public_doctor_profile(cid: str):
-    c = await db.clients.find_one({"id": cid, "vertical": "doctor"}, {"_id": 0, "password_hash": 0, "wallet_balance": 0})
-    if not c: raise HTTPException(status_code=404, detail="Doctor not found")
-    pending = await db.appointments.count_documents({"client_id": cid, "status": "pending", "date": datetime.now(timezone.utc).date().isoformat()})
-    return {"id": c["id"], "name": c["name"], "phone": c.get("phone", ""), "address": c.get("address", ""),
-            "profile": c.get("doctor_profile", {}), "queue_length": pending}
+    return await _public_service_profile(cid)
+
 
 @public_api.post("/doctors/{cid}/book")
 async def public_doctor_book(cid: str, body: AppointmentCreate):
-    c = await db.clients.find_one({"id": cid, "vertical": "doctor"}, {"_id": 0})
-    if not c: raise HTTPException(status_code=404, detail="Doctor not found")
-    today = datetime.now(timezone.utc).date().isoformat()
-    token = await db.appointments.count_documents({"client_id": cid, "date": today}) + 1
-    doc = {"id": str(uuid.uuid4()), "client_id": cid, "date": today,
-           "token": token, "patient_name": body.patient_name, "patient_phone": body.patient_phone,
-           "notes": body.notes, "status": "pending", "created_at": now_iso()}
-    await db.appointments.insert_one(doc)
-    return clean(doc)
+    return await _book_service(cid, body)
 
 
 # ==================== Object Storage ====================
@@ -760,6 +954,45 @@ def get_object(path: str):
         raise HTTPException(status_code=503, detail=f"S3 read failed: {e}")
 
 # ==================== Media ====================
+async def _resolve_storage_plan_for_client(client: dict) -> Optional[dict]:
+    """Resolve the effective subscription plan used for client storage quota checks."""
+    if not client:
+        return None
+
+    candidate_ids = []
+    if client.get("plan_id"):
+        candidate_ids.append(client["plan_id"])
+    if client.get("dealer_id"):
+        dealer = await db.users.find_one({"id": client["dealer_id"]}, {"_id": 0, "plan_id": 1, "plan": 1})
+        if dealer:
+            if dealer.get("plan_id"):
+                candidate_ids.append(dealer["plan_id"])
+            if dealer.get("plan"):
+                candidate_ids.append(dealer["plan"])
+    if client.get("plan"):
+        candidate_ids.append(client["plan"])
+
+    for candidate in candidate_ids:
+        plan = await db.plans.find_one({"$or": [{"id": candidate}, {"type": candidate}]}, {"_id": 0})
+        if plan:
+            return plan
+    return None
+
+
+async def _get_media_usage_bytes(client_id: str) -> int:
+    agg = await db.media.aggregate([
+        {"$match": {"client_id": client_id, "is_deleted": False}},
+        {"$group": {"_id": None, "total": {"$sum": "$size"}}},
+    ]).to_list(1)
+    return int(agg[0]["total"] if agg else 0)
+
+
+async def _get_client_storage_quota(client: dict) -> tuple[int, float, Optional[dict]]:
+    plan = await _resolve_storage_plan_for_client(client)
+    limit_gb = float((plan or {}).get("storage_limit_gb", 0) or 0)
+    return int(limit_gb * 1024 * 1024 * 1024), limit_gb, plan
+
+# ==================== Media ====================
 class MediaUpdate(BaseModel):
     name: Optional[str] = None
     zone: Optional[str] = None
@@ -779,6 +1012,15 @@ async def upload_media(
     data = await file.read()
     if len(data) > MAX_UPLOAD_MB * 1024 * 1024:
         raise HTTPException(status_code=400, detail=f"File exceeds {MAX_UPLOAD_MB}MB limit")
+
+    client_doc = await db.clients.find_one({"id": user["id"]}, {"_id": 0, "dealer_id": 1, "plan": 1, "plan_id": 1})
+    limit_bytes, limit_gb, _plan = await _get_client_storage_quota(client_doc or {})
+    if limit_bytes > 0:
+        used_bytes = await _get_media_usage_bytes(user["id"])
+        if used_bytes + len(data) > limit_bytes:
+            remaining_gb = max(0.0, (limit_bytes - used_bytes) / (1024 * 1024 * 1024))
+            raise HTTPException(status_code=413, detail=f"Storage limit exceeded. Remaining {remaining_gb:.2f} GB on your plan.")
+
     ext = (file.filename or "bin").rsplit(".", 1)[-1].lower() if "." in (file.filename or "") else "bin"
     file_id = str(uuid.uuid4())
     path = f"{APP_NAME}/{user['id']}/{file_id}.{ext}"
@@ -787,7 +1029,8 @@ async def upload_media(
     doc = {"id": file_id, "client_id": user["id"], "zone": zone, "folder": folder or "default",
            "name": name or file.filename or "untitled",
            "original_filename": file.filename, "kind": kind,
-           "content_type": content_type, "storage_path": result.get("path", path),
+            "content_type": content_type, "storage_path": result.get("path", path),
+            "public_url": result.get("public_url", ""),
            "size": len(data), "is_deleted": False, "created_at": now_iso()}
     await db.media.insert_one(doc)
     return clean(doc)
@@ -818,9 +1061,104 @@ async def serve_media(mid: str):
     """Public-readable media stream — signage players read this without auth."""
     rec = await db.media.find_one({"id": mid, "is_deleted": False}, {"_id": 0})
     if not rec: raise HTTPException(status_code=404, detail="Media not found")
-    data, ctype = get_object(rec["storage_path"])
-    return StreamingResponse(io.BytesIO(data), media_type=rec.get("content_type") or ctype,
-                             headers={"Cache-Control": "public, max-age=3600"})
+    try:
+        data, ctype = get_object(rec["storage_path"])
+        return StreamingResponse(io.BytesIO(data), media_type=rec.get("content_type") or ctype,
+                                 headers={"Cache-Control": "public, max-age=3600"})
+    except HTTPException as e:
+        logger.warning(f"Media serve via S3 client failed for {mid}: {e.detail}")
+
+    # Fallback path for dev/local where S3 credentials may be missing:
+    # fetch from public object URL if available.
+    public_url = rec.get("public_url") or ""
+    if not public_url and rec.get("storage_path"):
+        public_url = f"{SUPABASE_PROJECT_URL}/storage/v1/object/public/{S3_BUCKET}/{quote(rec['storage_path'], safe='/')}"
+
+    if public_url:
+        try:
+            r = requests.get(public_url, timeout=15)
+            if r.ok:
+                return StreamingResponse(
+                    io.BytesIO(r.content),
+                    media_type=rec.get("content_type") or r.headers.get("Content-Type", "application/octet-stream"),
+                    headers={"Cache-Control": "public, max-age=3600"},
+                )
+            logger.warning(f"Media serve public URL failed for {mid}: HTTP {r.status_code}")
+        except Exception as ex:
+            logger.warning(f"Media serve public URL exception for {mid}: {ex}")
+
+    raise HTTPException(status_code=503, detail="Storage unavailable")
+
+
+@api.get("/debug/media/{mid}")
+async def debug_media(mid: str, _: dict = Depends(get_current_user)):
+    """Diagnose why a media asset may be returning 503 on /media/serve/{mid}."""
+    rec = await db.media.find_one({"id": mid}, {"_id": 0})
+    if not rec:
+        raise HTTPException(status_code=404, detail="Media not found")
+
+    result = {
+        "id": rec.get("id"),
+        "is_deleted": rec.get("is_deleted", False),
+        "content_type": rec.get("content_type", ""),
+        "storage_path": rec.get("storage_path", ""),
+        "public_url_stored": rec.get("public_url", ""),
+        "s3_credentials_present": bool(S3_ACCESS_KEY_ID and S3_SECRET_ACCESS_KEY),
+        "s3_endpoint": S3_ENDPOINT_URL,
+        "bucket": S3_BUCKET,
+        "checks": {},
+    }
+
+    # Check S3 SDK path
+    try:
+        data, ctype = get_object(rec.get("storage_path", ""))
+        result["checks"]["s3_get_object"] = {
+            "ok": True,
+            "bytes": len(data),
+            "content_type": ctype,
+        }
+    except HTTPException as e:
+        result["checks"]["s3_get_object"] = {
+            "ok": False,
+            "status": e.status_code,
+            "detail": str(e.detail),
+        }
+    except Exception as ex:
+        result["checks"]["s3_get_object"] = {
+            "ok": False,
+            "status": 500,
+            "detail": str(ex),
+        }
+
+    # Check public URL path
+    public_url = rec.get("public_url") or ""
+    if not public_url and rec.get("storage_path"):
+        public_url = f"{SUPABASE_PROJECT_URL}/storage/v1/object/public/{S3_BUCKET}/{quote(rec['storage_path'], safe='/')}"
+    result["computed_public_url"] = public_url
+
+    if public_url:
+        try:
+            r = requests.get(public_url, timeout=15)
+            result["checks"]["public_url_get"] = {
+                "ok": bool(r.ok),
+                "status": r.status_code,
+                "content_type": r.headers.get("Content-Type", ""),
+                "bytes": len(r.content or b""),
+            }
+        except Exception as ex:
+            result["checks"]["public_url_get"] = {
+                "ok": False,
+                "status": 500,
+                "detail": str(ex),
+            }
+    else:
+        result["checks"]["public_url_get"] = {
+            "ok": False,
+            "status": 404,
+            "detail": "No public URL available",
+        }
+
+    return result
 
 # ==================== Playlists (template-driven zones) ====================
 class PlaylistItem(BaseModel):
@@ -852,29 +1190,85 @@ async def _validate_media(ids: List[str], client_id: str):
     if owned != len(set(ids)):
         raise HTTPException(status_code=400, detail="Invalid media in playlist")
 
+
+async def _get_template_zone_ids(template_id: Optional[str]):
+    """Return ordered list of zone ids for a template. Falls back to legacy order."""
+    if not template_id:
+        return ["main", "sidebar", "ticker"]
+    tpl = await db.templates.find_one({"id": template_id}, {"_id": 0, "layout": 1})
+    if not tpl:
+        return ["main", "sidebar", "ticker"]
+    layout = tpl.get("layout", {}) or {}
+    zones = layout.get("zones") or []
+    if zones and isinstance(zones, list) and len(zones) > 0:
+        return [z.get("id") or (z.get("name") or "").lower().replace(" ", "_") for z in zones]
+    # fallback: if legacy names are present on layout, prefer them
+    legacy = []
+    if layout.get("main"): legacy.append("main")
+    if layout.get("sidebar"): legacy.append("sidebar")
+    if layout.get("ticker"): legacy.append("ticker")
+    return legacy if legacy else ["main", "sidebar", "ticker"]
+
+
+def _remap_legacy_buckets_to_zone_ids(zone_ids: List[str], legacy_buckets: List[List[dict]]):
+    """Map legacy ordered buckets (main, sidebar, ticker) into concrete zone ids by position."""
+    out = {}
+    for idx, zid in enumerate(zone_ids):
+        out[zid] = legacy_buckets[idx] if idx < len(legacy_buckets) else []
+    return out
+
+
 @api.get("/client/playlists")
 async def list_playlists(user: dict = Depends(require_role("client"))):
     return await db.playlists.find({"client_id": user["id"]}, {"_id": 0}).sort("created_at", -1).to_list(1000)
 
 @api.post("/client/playlists")
 async def create_playlist(body: PlaylistIn, user: dict = Depends(require_role("client"))):
+    # Canonicalize incoming payload to the template's zone ids
     zone_items = body.zone_items or {}
-    if not zone_items and (body.main_items or body.sidebar_items or body.ticker_messages):
-        zone_items = {
-            "main": body.main_items or [],
-            "sidebar": body.sidebar_items or [],
-            "ticker": [],
-        }
-    if body.items and body.zone:
-        zone_items[body.zone] = body.items
-    all_media_ids = [item.media_id for zone_list in zone_items.values() for item in zone_list]
+    template_zone_ids = await _get_template_zone_ids(body.template_id)
+
+    # If explicit zone_items provided, ensure keys match template zone ids (map legacy keys if needed)
+    if zone_items:
+        # If any key matches template zone ids, keep those; otherwise, try remapping legacy buckets
+        has_matching = any(k in template_zone_ids for k in zone_items.keys())
+        if not has_matching:
+            # treat zone_items as legacy buckets array-like object and remap by order
+            legacy_buckets = [zone_items.get(k) or [] for k in ["main", "sidebar", "ticker"]]
+            zone_items = _remap_legacy_buckets_to_zone_ids(template_zone_ids, legacy_buckets)
+        else:
+            # normalize: ensure keys in returned map are template zone ids
+            normalized = {k: v for k, v in zone_items.items() if k in template_zone_ids}
+            # also map any legacy keys present into first available template ids
+            legacy_buckets = [zone_items.get(k) or [] for k in ["main", "sidebar", "ticker"]]
+            for idx, zid in enumerate(template_zone_ids):
+                if zid not in normalized:
+                    normalized[zid] = legacy_buckets[idx] if idx < len(legacy_buckets) else []
+            zone_items = normalized
+    else:
+        # No explicit zone_items -> check legacy fields and single-item fields
+        if (body.main_items or body.sidebar_items or body.ticker_messages):
+            legacy_buckets = [body.main_items or [], body.sidebar_items or [], body.ticker_messages or []]
+            zone_items = _remap_legacy_buckets_to_zone_ids(template_zone_ids, legacy_buckets)
+        elif body.items and body.zone:
+            # single-zone add: map body.zone (may be legacy) to template zone id
+            if body.zone in template_zone_ids:
+                zone_items = {zid: [] for zid in template_zone_ids}
+                zone_items[body.zone] = body.items
+            else:
+                # map legacy name to first template zone if necessary
+                zone_items = {zid: [] for zid in template_zone_ids}
+                zone_items[template_zone_ids[0]] = body.items
+
+    all_media_ids = [item.media_id for zone_list in zone_items.values() for item in (zone_list or [])]
     await _validate_media(all_media_ids, user["id"])
     doc = {
         "id": str(uuid.uuid4()),
         "client_id": user["id"],
         "name": body.name,
         "template_id": body.template_id,
-        "zone_items": {zone: [item.model_dump() for item in items] for zone, items in zone_items.items()},
+        "zone_items": {zone: [item.model_dump() for item in (items or [])] for zone, items in zone_items.items()},
+        # keep legacy fields for backward compatibility but prefer zone_items
         "main_items": [i.model_dump() for i in (body.main_items or [])],
         "sidebar_items": [i.model_dump() for i in (body.sidebar_items or [])],
         "ticker_messages": body.ticker_messages or [],
@@ -889,8 +1283,26 @@ async def update_playlist(pid: str, body: PlaylistUpdate, user: dict = Depends(r
     if body.name is not None: upd["name"] = body.name
     if body.template_id is not None: upd["template_id"] = body.template_id
     if body.zone_items is not None:
-        upd["zone_items"] = {zone: [item.model_dump() for item in items] for zone, items in body.zone_items.items()}
-        all_media_ids = [item.media_id for items in body.zone_items.values() for item in items]
+        # Ensure zone_items keys match the template's zone ids if possible
+        tpl_id = body.template_id
+        if not tpl_id:
+            existing = await db.playlists.find_one({"id": pid, "client_id": user["id"]}, {"_id": 0, "template_id": 1})
+            tpl_id = existing.get("template_id") if existing else None
+        template_zone_ids = await _get_template_zone_ids(tpl_id)
+        incoming = body.zone_items or {}
+        has_match = any(k in template_zone_ids for k in incoming.keys())
+        if not has_match:
+            legacy_buckets = [incoming.get(k) or [] for k in ["main", "sidebar", "ticker"]]
+            zone_items = _remap_legacy_buckets_to_zone_ids(template_zone_ids, legacy_buckets)
+        else:
+            normalized = {k: v for k, v in incoming.items() if k in template_zone_ids}
+            legacy_buckets = [incoming.get(k) or [] for k in ["main", "sidebar", "ticker"]]
+            for idx, zid in enumerate(template_zone_ids):
+                if zid not in normalized:
+                    normalized[zid] = legacy_buckets[idx] if idx < len(legacy_buckets) else []
+            zone_items = normalized
+        upd["zone_items"] = {zone: [item.model_dump() for item in (items or [])] for zone, items in zone_items.items()}
+        all_media_ids = [item.media_id for items in zone_items.values() for item in (items or [])]
         await _validate_media(all_media_ids, user["id"])
     else:
         legacy_zone_items: Dict[str, List[PlaylistItem]] = {}
@@ -903,7 +1315,12 @@ async def update_playlist(pid: str, body: PlaylistUpdate, user: dict = Depends(r
         if body.ticker_messages is not None:
             upd["ticker_messages"] = body.ticker_messages
         if legacy_zone_items:
-            upd["zone_items"] = {zone: [item.model_dump() for item in items] for zone, items in legacy_zone_items.items()}
+            existing = await db.playlists.find_one({"id": pid, "client_id": user["id"]}, {"_id": 0, "template_id": 1})
+            tpl_id = existing.get("template_id") if existing else None
+            template_zone_ids = await _get_template_zone_ids(tpl_id)
+            legacy_buckets = [legacy_zone_items.get(k) or [] for k in ["main", "sidebar", "ticker"]]
+            zone_items = _remap_legacy_buckets_to_zone_ids(template_zone_ids, legacy_buckets)
+            upd["zone_items"] = {zone: [item.model_dump() for item in items] for zone, items in zone_items.items()}
             await _validate_media([item.media_id for items in legacy_zone_items.values() for item in items], user["id"])
     if not upd: raise HTTPException(status_code=400, detail="Nothing to update")
     r = await db.playlists.find_one_and_update({"id": pid, "client_id": user["id"]}, {"$set": upd}, return_document=True, projection={"_id": 0})
@@ -1013,6 +1430,7 @@ async def player_payload(pair_code: str):
             m = await db.media.find_one({"id": item["media_id"], "is_deleted": False}, {"_id": 0})
             if not m: continue
             out.append({"id": m["id"], "kind": m["kind"],
+                        "content_type": m.get("content_type", ""),
                         "url": f"/api/media/serve/{m['id']}",
                         "duration": item.get("duration", 10),
                         "name": m.get("name", "")})
@@ -1021,22 +1439,47 @@ async def player_payload(pair_code: str):
     async def _ingest(pl: dict):
         if pl is None: return
         zone_items = pl.get("zone_items") or {}
+        ticker_zone_id = next((z["id"] for z in zone_defs if "ticker" in (z.get("id", "") + " " + z.get("name", "")).lower()), "ticker")
         if zone_items:
             for zone_id, items in zone_items.items():
                 zones.setdefault(zone_id, []).extend(await _hydrate_items(items))
         else:
-            # legacy single-zone schema
-            if pl.get("main_items"):
-                target_zone = "main" if "main" in zones else next(iter(zones.keys()), "main")
-                zones.setdefault(target_zone, []).extend(await _hydrate_items(pl.get("main_items")))
-            if pl.get("sidebar_items"):
-                target_zone = "sidebar" if "sidebar" in zones else next(iter(zones.keys()), "main")
-                zones.setdefault(target_zone, []).extend(await _hydrate_items(pl.get("sidebar_items")))
-            for t in pl.get("ticker_messages") or []:
-                zones.setdefault("ticker", []).append({"kind": "text", "text": t.get("text", ""), "duration": 1})
+            # Legacy single-zone schema: remap ordered legacy buckets into template zone ids
+            template_zone_ids = [z["id"] for z in zone_defs]
+            legacy_buckets = [pl.get("main_items") or [], pl.get("sidebar_items") or [], pl.get("ticker_messages") or []]
+            remapped = _remap_legacy_buckets_to_zone_ids(template_zone_ids, legacy_buckets)
+            # hydrate media items and ticker messages appropriately
+            for zid, items in remapped.items():
+                # ticker messages might be dicts with 'text' keys
+                if zid == "ticker" or any(isinstance(it, dict) and it.get("text") for it in (items or [])):
+                    for t in items or []:
+                        if isinstance(t, dict) and t.get("text"):
+                            zones.setdefault(zid, []).append({"kind": "text", "text": t.get("text", ""), "duration": 1})
+                else:
+                    zones.setdefault(zid, []).extend(await _hydrate_items(items))
+            # also support legacy single "items"+"zone" pairing
             if pl.get("items") and pl.get("zone"):
                 entries = await _hydrate_items(pl.get("items"))
-                zones.setdefault(pl["zone"], []).extend(entries)
+                # map provided zone name to actual zone id if present, else use first template zone
+                target = pl.get("zone") if pl.get("zone") in zones else (template_zone_ids[0] if template_zone_ids else "main")
+                zones.setdefault(target, []).extend(entries)
+
+        for msg in pl.get("ticker_messages") or []:
+            if isinstance(msg, dict):
+                msg_type = (msg.get("type") or msg.get("kind") or "text").lower()
+                if msg_type == "rss" and msg.get("url"):
+                    zones.setdefault(ticker_zone_id, []).append({
+                        "kind": "rss",
+                        "url": msg.get("url", ""),
+                        "title": msg.get("title") or msg.get("text") or "RSS Feed",
+                        "duration": int(msg.get("duration", 6) or 6),
+                    })
+                else:
+                    text = msg.get("text") or msg.get("message") or msg.get("title") or ""
+                    if text:
+                        zones.setdefault(ticker_zone_id, []).append({"kind": "text", "text": text, "duration": int(msg.get("duration", 6) or 6)})
+            elif isinstance(msg, str) and msg.strip():
+                zones.setdefault(ticker_zone_id, []).append({"kind": "text", "text": msg.strip(), "duration": 6})
 
     seen = set()
     for s in active_schedules:
@@ -1053,6 +1496,8 @@ async def player_payload(pair_code: str):
 
     return {"device_id": device["id"], "device_name": device["name"],
             "client_id": device["client_id"],
+            "orientation": device.get("orientation", "auto"),
+            "brightness": int(device.get("brightness", 100) or 100),
             "zones": zones, "template": template,
             "poll_after_seconds": 60}
 
@@ -1332,3 +1777,4 @@ app.add_middleware(CORSMiddleware, allow_origins=origins or ["*"],
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+

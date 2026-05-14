@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, formatErr, API_BASE } from "../../lib/api";
 import PageHeader from "../../components/PageHeader";
 import { Button } from "../../components/ui/button";
@@ -16,24 +16,27 @@ export default function ClientMedia() {
   const [uploading, setUploading] = useState(false);
   const fileRef = useRef(null);
 
-  useEffect(() => {
-    const loadMedia = async () => {
-      try {
-        const res = await api.get("/client/media");
-        const items = res.data || [];
-        setMedia(items);
-        const derivedFolders = Array.from(new Set(items.map((item) => item.folder || DEFAULT_FOLDER)));
-        setFolders(derivedFolders.length ? derivedFolders : [DEFAULT_FOLDER]);
-        setCurrentFolder((prev) => (derivedFolders.includes(prev) ? prev : (derivedFolders[0] || DEFAULT_FOLDER)));
-      } catch {}
-    };
-    loadMedia();
+  const loadMedia = useCallback(async () => {
+    try {
+      const res = await api.get("/client/media");
+      const items = res.data || [];
+      setMedia(items);
+      const derivedFolders = Array.from(new Set(items.map((item) => item.folder || DEFAULT_FOLDER)));
+      setFolders(derivedFolders.length ? derivedFolders : [DEFAULT_FOLDER]);
+      setCurrentFolder((prev) => (derivedFolders.includes(prev) ? prev : (derivedFolders[0] || DEFAULT_FOLDER)));
+    } catch {}
   }, []);
+
+  useEffect(() => {
+    loadMedia();
+  }, [loadMedia]);
 
   const filtered = useMemo(
     () => media.filter((item) => (item.folder || DEFAULT_FOLDER) === currentFolder),
     [media, currentFolder],
   );
+
+  const isImageMedia = (item) => item?.kind === "image" || (item?.content_type || "").startsWith("image/") || /\.(png|jpe?g|webp|gif|bmp|svg)$/i.test(item?.original_filename || item?.name || "");
 
   const createFolder = () => {
     const name = newFolder.trim();
@@ -157,8 +160,8 @@ export default function ClientMedia() {
             {filtered.map((m) => (
               <div key={m.id} className="dense-card bg-white border border-[#E5E7EB] rounded-sm overflow-hidden group relative" data-testid={`media-${m.id}`}>
                 <div className="aspect-square bg-[#F3F4F6] overflow-hidden">
-                  {m.kind === "image" ? (
-                    <img src={`${API_BASE}/media/serve/${m.id}`} alt={m.name} className="w-full h-full object-cover" />
+                  {isImageMedia(m) ? (
+                    <img src={`${API_BASE}/media/serve/${m.id}`} alt={m.name} className="w-full h-full object-cover" onError={(e) => { e.currentTarget.style.display = "none"; }} />
                   ) : (
                     <div className="w-full h-full flex items-center justify-center bg-[#111827]">
                       <Film className="w-10 h-10 text-white/50" />
@@ -167,7 +170,7 @@ export default function ClientMedia() {
                 </div>
                 <div className="p-2">
                   <div className="flex items-center gap-1.5">
-                    {m.kind === "image" ? <ImageIcon className="w-3 h-3 text-[#6B7280]" /> : <Film className="w-3 h-3 text-[#6B7280]" />}
+                    {isImageMedia(m) ? <ImageIcon className="w-3 h-3 text-[#6B7280]" /> : <Film className="w-3 h-3 text-[#6B7280]" />}
                     <div className="text-xs font-semibold truncate flex-1">{m.name}</div>
                   </div>
                   <div className="text-[10px] text-[#9CA3AF] font-mono mt-1">{(m.size / 1024).toFixed(1)} KB</div>
@@ -184,3 +187,6 @@ export default function ClientMedia() {
     </div>
   );
 }
+
+
+

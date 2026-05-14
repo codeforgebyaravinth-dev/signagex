@@ -11,7 +11,7 @@ import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from ".
 import { Plus, Pencil, Trash2, IndianRupee, Check } from "lucide-react";
 import { toast } from "sonner";
 
-const empty = { name: "", type: "cloud", price: 0, description: "", features: [] };
+const empty = { name: "", type: "cloud", billing_cycle: "monthly", price: 0, storage_limit_gb: 0, description: "", features: [] };
 
 export default function AdminPlans() {
   const [items, setItems] = useState([]);
@@ -80,8 +80,11 @@ export default function AdminPlans() {
             <div className="flex items-baseline gap-1 mt-2 mb-4">
               <IndianRupee className="w-5 h-5 text-[#111827]" />
               <span className="font-display text-4xl font-extrabold tracking-tighter">{p.price?.toLocaleString?.()}</span>
-              <span className="text-sm text-[#6B7280]">/ mo</span>
+              <span className="text-sm text-[#6B7280]">/ {p.billing_cycle === "yearly" ? "yr" : "mo"}</span>
             </div>
+              <div className="text-xs text-[#6B7280] mb-2">
+                Server space limit: <span className="font-semibold text-[#111827]">{Number(p.storage_limit_gb || 0)} GB</span>
+              </div>
             {p.description && <p className="text-sm text-[#6B7280] mb-4">{p.description}</p>}
             {p.features?.length > 0 && (
               <ul className="space-y-1.5 pt-4 border-t border-[#E5E7EB]">
@@ -120,6 +123,22 @@ export default function AdminPlans() {
               <div>
                 <Label className="text-xs uppercase tracking-wider text-[#6B7280]">Price (₹)</Label>
                 <Input type="number" min="0" value={form.price} onChange={(e) => setForm({ ...form, price: parseFloat(e.target.value || 0) })} className="rounded-sm" data-testid="plan-price" />
+              </div>
+            </div>
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <Label className="text-xs uppercase tracking-wider text-[#6B7280]">Billing Cycle</Label>
+                <Select value={form.billing_cycle || "monthly"} onValueChange={(v) => setForm({ ...form, billing_cycle: v })}>
+                  <SelectTrigger className="rounded-sm" data-testid="plan-cycle"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="monthly">Monthly</SelectItem>
+                    <SelectItem value="yearly">Yearly</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <div>
+                <Label className="text-xs uppercase tracking-wider text-[#6B7280]">Server Space Limit (GB)</Label>
+                <Input type="number" min="0" step="0.1" value={form.storage_limit_gb} onChange={(e) => setForm({ ...form, storage_limit_gb: parseFloat(e.target.value || 0) })} className="rounded-sm" data-testid="plan-storage-limit" />
               </div>
             </div>
             <div>

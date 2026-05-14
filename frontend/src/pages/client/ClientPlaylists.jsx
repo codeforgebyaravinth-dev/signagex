@@ -22,7 +22,53 @@ const FALLBACK_TEMPLATE = {
   },
 };
 
-const emptyForm = { name: "", template_id: "", zone_items: {} };
+const emptyForm = { name: "", template_id: "", zone_items: {}, ticker_messages: [] };
+
+const legacyZoneOrder = ["main", "sidebar", "ticker"];
+
+// Extract and normalize zones from a template's layout
+const extractZonesFromTemplate = (template) => {
+  if (!template) return [];
+  const layoutZones = template.layout?.zones || [];
+  if (Array.isArray(layoutZones) && layoutZones.length > 0) {
+    return layoutZones.map(z => ({ id: z.id || z.name?.toLowerCase().replace(/\s+/g, '_'), name: z.name || z.id }));
+  }
+  const layout = template.layout || {};
+  const legacyZones = [];
+  if (layout.main) legacyZones.push({ id: "main", name: layout.main || "Main" });
+  if (layout.sidebar) legacyZones.push({ id: "sidebar", name: layout.sidebar || "Sidebar" });
+  if (layout.ticker) legacyZones.push({ id: "ticker", name: layout.ticker || "Ticker" });
+  return legacyZones.length > 0 ? legacyZones : [];
+};
+
+const normalizeZoneItems = (zoneItems = {}) => {
+  if (!zoneItems || typeof zoneItems !== "object") return {};
+  return Object.fromEntries(Object.entries(zoneItems).filter(([, items]) => Array.isArray(items)));
+};
+
+const remapLegacyItemsToZones = (zoneDefs, existingZoneItems = {}) => {
+  const cleaned = normalizeZoneItems(existingZoneItems);
+  const nextZoneItems = {};
+
+  if (zoneDefs.length === 0) return nextZoneItems;
+
+  const hasMatchingKeys = zoneDefs.some((zone) => cleaned[zone.id]);
+  if (hasMatchingKeys) {
+    zoneDefs.forEach((zone) => {
+      nextZoneItems[zone.id] = cleaned[zone.id] || [];
+    });
+    return nextZoneItems;
+  }
+
+  const legacyBuckets = legacyZoneOrder.map((key) => cleaned[key] || []);
+  zoneDefs.forEach((zone, index) => {
+    nextZoneItems[zone.id] = legacyBuckets[index] || [];
+  });
+
+  return nextZoneItems;
+};
+
+const isTickerZone = (zone) => /ticker/i.test(`${zone?.id || ""} ${zone?.name || ""}`);
 
 function ZonePicker({ media, items, setItems }) {
   const add = (id) => {
@@ -85,6 +131,82 @@ function ZonePicker({ media, items, setItems }) {
   );
 }
 
+function TickerEditor({ items, setItems }) {
+  const normalized = Array.isArray(items) ? items : [];
+  const addItem = (type) => {
+    const next = type === "rss"
+      ? { type: "rss", title: "RSS Feed", url: "", duration: 6 }
+      : { type: "text", text: "Ticker message", duration: 6 };
+    setItems([...normalized, next]);
+  };
+
+  const updateItem = (index, patch) => {
+    setItems(normalized.map((item, itemIndex) => (itemIndex === index ? { ...item, ...patch } : item)));
+  };
+
+  const removeItem = (index) => setItems(normalized.filter((_, itemIndex) => itemIndex !== index));
+
+  return (
+    <div className="grid gap-4 lg:grid-cols-[1.2fr_0.8fr]">
+      <div>
+        <div className="flex items-center justify-between mb-2">
+          <div className="text-[10px] uppercase tracking-wider font-semibold text-[#6B7280]">Ticker items</div>
+          <div className="flex gap-2">
+            <Button type="button" variant="outline" size="sm" onClick={() => addItem("text")} className="rounded-sm">+ Text</Button>
+            <Button type="button" variant="outline" size="sm" onClick={() => addItem("rss")} className="rounded-sm">+ RSS</Button>
+          </div>
+        </div>
+        <div className="border border-[#E5E7EB] rounded-sm bg-[#F9FAFB] p-2 space-y-2 max-h-[420px] overflow-y-auto">
+          {normalized.length === 0 && <div className="text-xs text-[#9CA3AF] text-center p-6">Add scrolling text or RSS feeds for this ticker zone.</div>}
+          {normalized.map((item, index) => {
+            const type = item?.type || item?.kind || "text";
+            return (
+              <div key={index} className="bg-white border border-[#E5E7EB] rounded-sm p-3 space-y-2">
+                <div className="flex items-center justify-between gap-2">
+                  <Select value={type} onValueChange={(v) => updateItem(index, v === "rss" ? { type: "rss", title: item.title || "RSS Feed", url: item.url || "" } : { type: "text", text: item.text || item.title || "Ticker message" })}>
+                    <SelectTrigger className="h-8 w-28 rounded-sm text-xs" data-testid={`ticker-type-${index}`}>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="text">Text</SelectItem>
+                      <SelectItem value="rss">RSS</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <div className="flex items-center gap-2">
+                    <Input type="number" min="1" value={item.duration || 6} onChange={(e) => updateItem(index, { duration: parseInt(e.target.value || 6, 10) })} className="h-8 w-20 rounded-sm text-xs" />
+                    <Button type="button" variant="ghost" size="sm" onClick={() => removeItem(index)} className="text-red-600 h-8 px-2">Remove</Button>
+                  </div>
+                </div>
+                {type === "rss" ? (
+                  <>
+                    <Input value={item.title || ""} onChange={(e) => updateItem(index, { title: e.target.value })} placeholder="Feed label" className="rounded-sm" data-testid={`ticker-title-${index}`} />
+                    <Input value={item.url || ""} onChange={(e) => updateItem(index, { url: e.target.value })} placeholder="https://example.com/feed.xml" className="rounded-sm font-mono" data-testid={`ticker-url-${index}`} />
+                  </>
+                ) : (
+                  <Input value={item.text || item.title || ""} onChange={(e) => updateItem(index, { text: e.target.value, title: e.target.value })} placeholder="Scrolling message" className="rounded-sm" data-testid={`ticker-text-${index}`} />
+                )}
+              </div>
+            );
+          })}
+        </div>
+      </div>
+      <div className="rounded-sm border border-[#E5E7EB] bg-black text-white p-4 overflow-hidden">
+        <div className="text-[10px] uppercase tracking-wider font-semibold text-white/50 mb-3">Ticker preview</div>
+        <div className="h-20 flex items-center overflow-hidden border border-white/10 rounded-sm bg-black/80">
+          <div className="whitespace-nowrap animate-marquee inline-flex gap-8 px-4 text-sm font-semibold text-white">
+            {(normalized.length ? normalized : [{ type: "text", text: "Ticker message" }]).map((item, index) => (
+              <span key={index} className="inline-flex items-center gap-2">
+                <span className="text-white/40 uppercase text-[10px]">{(item.type || item.kind || "text").toUpperCase()}</span>
+                <span>{item.text || item.title || item.url || "Message"}</span>
+              </span>
+            ))}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function ClientPlaylists() {
   const [playlists, setPlaylists] = useState([]);
   const [media, setMedia] = useState([]);
@@ -107,14 +229,9 @@ export default function ClientPlaylists() {
 
   const activeTemplate = useMemo(() => templates.find((t) => t.id === form.template_id) || null, [templates, form.template_id]);
   const zoneDefs = useMemo(() => {
-    const layoutZones = activeTemplate?.layout?.zones || [];
-    if (layoutZones.length > 0) return layoutZones;
-    const legacy = [];
-    const layout = activeTemplate?.layout || {};
-    if (layout.main) legacy.push({ id: "main", name: layout.main || "Main" });
-    if (layout.sidebar) legacy.push({ id: "sidebar", name: layout.sidebar || "Sidebar" });
-    if (layout.ticker) legacy.push({ id: "ticker", name: layout.ticker || "Ticker" });
-    return legacy.length > 0 ? legacy : FALLBACK_TEMPLATE.layout.zones;
+     if (!activeTemplate) return FALLBACK_TEMPLATE.layout.zones;
+     const extracted = extractZonesFromTemplate(activeTemplate);
+     return extracted.length > 0 ? extracted : FALLBACK_TEMPLATE.layout.zones;
   }, [activeTemplate]);
 
   useEffect(() => {
@@ -126,12 +243,12 @@ export default function ClientPlaylists() {
 
   const applyTemplate = (templateId, existingZoneItems = {}) => {
     const tpl = templates.find((t) => t.id === templateId);
-    const zones = tpl?.layout?.zones || FALLBACK_TEMPLATE.layout.zones;
-    const nextZoneItems = {};
-    zones.forEach((zone) => {
-      nextZoneItems[zone.id] = existingZoneItems[zone.id] || [];
-    });
-    setForm((prev) => ({ ...prev, template_id: templateId, zone_items: nextZoneItems }));
+    const zones = tpl ? extractZonesFromTemplate(tpl) : FALLBACK_TEMPLATE.layout.zones;
+    const { ticker_messages: existingTickerMessages, ...zoneSource } = existingZoneItems || {};
+    const nextZoneItems = remapLegacyItemsToZones(zones, zoneSource);
+    const nextTickerMessages = Array.isArray(existingTickerMessages) ? existingTickerMessages : Array.isArray(zoneSource.ticker) ? zoneSource.ticker : [];
+    delete nextZoneItems.ticker;
+    setForm((prev) => ({ ...prev, template_id: templateId, zone_items: nextZoneItems, ticker_messages: nextTickerMessages }));
   };
 
   const openCreate = () => {
@@ -146,15 +263,16 @@ export default function ClientPlaylists() {
   const openEdit = (playlist) => {
     setEditing(playlist);
     const templateId = playlist.template_id || templates[0]?.id || "";
-    const legacyZoneItems = playlist.zone_items || {};
-    const mappedZoneItems = { ...legacyZoneItems };
+    const mappedZoneItems = normalizeZoneItems(playlist.zone_items);
+    const tickerMessages = Array.isArray(playlist.ticker_messages) ? playlist.ticker_messages : mappedZoneItems.ticker || [];
+    delete mappedZoneItems.ticker;
     if (!Object.keys(mappedZoneItems).length) {
       if (playlist.main_items) mappedZoneItems.main = playlist.main_items;
       if (playlist.sidebar_items) mappedZoneItems.sidebar = playlist.sidebar_items;
     }
-    setForm({ name: playlist.name, template_id: templateId, zone_items: mappedZoneItems });
+    setForm({ name: playlist.name, template_id: templateId, zone_items: mappedZoneItems, ticker_messages: tickerMessages });
     setOpen(true);
-    if (templateId) applyTemplate(templateId, mappedZoneItems);
+    if (templateId) applyTemplate(templateId, { ...mappedZoneItems, ticker_messages: tickerMessages });
     setActiveZone(zoneDefs[0]?.id || "main");
   };
 
@@ -165,6 +283,7 @@ export default function ClientPlaylists() {
         name: form.name,
         template_id: form.template_id || null,
         zone_items: form.zone_items,
+        ticker_messages: form.ticker_messages || [],
       };
       if (editing) await api.put(`/client/playlists/${editing.id}`, payload);
       else await api.post("/client/playlists", payload);
@@ -204,7 +323,7 @@ export default function ClientPlaylists() {
         )}
         {playlists.map((p) => {
           const zoneItems = p.zone_items || {};
-          const total = Object.values(zoneItems).reduce((sum, list) => sum + (list?.length || 0), 0);
+          const total = Object.values(zoneItems).reduce((sum, list) => sum + (list?.length || 0), 0) + (p.ticker_messages?.length || 0);
           return (
             <div key={p.id} className="dense-card bg-white border border-[#E5E7EB] rounded-sm p-5" data-testid={`playlist-${p.id}`}>
               <div className="flex items-start justify-between mb-3">
@@ -215,7 +334,7 @@ export default function ClientPlaylists() {
                 </div>
               </div>
               <div className="text-xs text-[#6B7280] mb-3">Template: <span className="font-semibold text-[#111827]">{templates.find((t) => t.id === p.template_id)?.name || "Default"}</span></div>
-              <div className="text-xs text-[#6B7280] mb-3">{total} media item(s) across {Object.keys(zoneItems).length || 0} zone(s)</div>
+              <div className="text-xs text-[#6B7280] mb-3">{total} item(s) across {Object.keys(zoneItems).length || 0} zone(s){(p.ticker_messages?.length || 0) ? ` + ${p.ticker_messages.length} ticker item(s)` : ""}</div>
               <div className="space-y-2">
                 {Object.entries(zoneItems).map(([zoneId, list]) => (
                   <div key={zoneId} className="bg-[#F9FAFB] rounded-sm p-2 border border-[#E5E7EB]">
@@ -242,7 +361,7 @@ export default function ClientPlaylists() {
               </div>
               <div>
                 <Label className="text-xs uppercase tracking-wider text-[#6B7280]">Template</Label>
-                <Select value={form.template_id || ""} onValueChange={(value) => applyTemplate(value, form.zone_items)}>
+                <Select value={form.template_id || ""} onValueChange={(value) => applyTemplate(value, { ...form.zone_items, ticker_messages: form.ticker_messages })}>
                   <SelectTrigger className="rounded-sm" data-testid="playlist-template-select">
                     <SelectValue placeholder="Choose template..." />
                   </SelectTrigger>
@@ -271,17 +390,24 @@ export default function ClientPlaylists() {
                 {zoneDefs.map((zone) => (
                   <TabsTrigger key={zone.id} value={zone.id} className="rounded-sm data-[state=active]:bg-[#111827] data-[state=active]:text-white" data-testid={`zone-tab-${zone.id}`}>
                     {zone.name}
-                    <span className="ml-2 text-[10px] font-mono opacity-70">{(form.zone_items?.[zone.id] || []).length}</span>
+                    <span className="ml-2 text-[10px] font-mono opacity-70">{isTickerZone(zone) ? (form.ticker_messages || []).length : (form.zone_items?.[zone.id] || []).length}</span>
                   </TabsTrigger>
                 ))}
               </TabsList>
               {zoneDefs.map((zone) => (
                 <TabsContent key={zone.id} value={zone.id}>
-                  <ZonePicker
-                    media={media}
-                    items={form.zone_items?.[zone.id] || []}
-                    setItems={(nextItems) => setForm({ ...form, zone_items: { ...form.zone_items, [zone.id]: nextItems } })}
-                  />
+                  {isTickerZone(zone) ? (
+                    <TickerEditor
+                      items={form.ticker_messages || []}
+                      setItems={(nextItems) => setForm({ ...form, ticker_messages: nextItems })}
+                    />
+                  ) : (
+                    <ZonePicker
+                      media={media}
+                      items={form.zone_items?.[zone.id] || []}
+                      setItems={(nextItems) => setForm({ ...form, zone_items: { ...form.zone_items, [zone.id]: nextItems } })}
+                    />
+                  )}
                 </TabsContent>
               ))}
             </Tabs>
