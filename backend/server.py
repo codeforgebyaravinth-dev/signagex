@@ -2,7 +2,10 @@ from dotenv import load_dotenv
 from pathlib import Path
 
 ROOT_DIR = Path(__file__).parent
-load_dotenv(ROOT_DIR / '.env')
+if (ROOT_DIR / ".env.docker").exists():
+    load_dotenv(ROOT_DIR / ".env.docker")
+elif (ROOT_DIR / ".env").exists():
+    load_dotenv(ROOT_DIR / ".env")
 
 import os
 import logging
@@ -248,6 +251,16 @@ class DeviceUpdate(BaseModel):
     brightness: Optional[int] = None
 
 # Doctor models
+class ServiceItem(BaseModel):
+    id: Optional[str] = None
+    name: str = ""
+    price: float = 0.0
+    duration_mins: int = 30
+    description: str = ""
+    image_url: str = ""
+    active: bool = True
+
+
 class DoctorProfile(BaseModel):
     specialty: str = ""
     qualifications: str = ""
@@ -257,6 +270,7 @@ class DoctorProfile(BaseModel):
     image_url: str = ""
     description: str = ""
     slot_minutes: int = 15
+    services: List[ServiceItem] = Field(default_factory=list)
 
 class AppointmentCreate(BaseModel):
     patient_name: str
@@ -264,6 +278,9 @@ class AppointmentCreate(BaseModel):
     notes: str = ""
     preferred_time: str = ""
     service_name: str = ""
+    service_id: Optional[str] = None
+    service_price: float = 0.0
+    source: Literal["public", "manual"] = "public"
 
 # Retailer
 class ProductIn(BaseModel):
@@ -296,14 +313,36 @@ def now_iso(): return datetime.now(timezone.utc).isoformat()
 def clean(d): d.pop("_id", None); d.pop("password_hash", None); return d
 def gen_pair_code(): return str(uuid.uuid4().int)[:6]
 
+async def gen_dealer_code() -> str:
+    """Generate next dealer code like RP-D101, RP-D102, etc."""
+    counter = await db.counters.find_one_and_update(
+        {"_id": "dealer_code"},
+        {"$inc": {"next": 1}},
+        upsert=True,
+        return_document=True
+    )
+    num = counter["next"]
+    return f"RP-D{num:03d}"
+
+async def gen_client_code() -> str:
+    """Generate next client code like RP-C101, RP-C102, etc."""
+    counter = await db.counters.find_one_and_update(
+        {"_id": "client_code"},
+        {"$inc": {"next": 1}},
+        upsert=True,
+        return_document=True
+    )
+    num = counter["next"]
+    return f"RP-C{num:03d}"
+
 async def hydrate_client(c: dict) -> dict:
     if not c: return c
     c.pop("_id", None); c.pop("password_hash", None)
     if c.get("dealer_id"):
         d = await db.users.find_one({"id": c["dealer_id"]}, {"_id": 0, "name": 1})
         c["dealer_name"] = d["name"] if d else ""
-    c.setdefault("doctor_profile", {})
-    c.setdefault("salon_profile", {})
+    c.setdefault("doctor_profile", {"services": []})
+    c.setdefault("salon_profile", {"services": []})
     return c
 
 
@@ -313,6 +352,26 @@ def _service_profile_field(vertical: str) -> str:
 
 def _service_label(vertical: str) -> str:
     return "Doctor" if vertical == "doctor" else "Salon" if vertical == "salon" else vertical.title()
+
+
+def _normalize_service_catalog(profile: dict, vertical: str) -> dict:
+    normalized = dict(profile or {})
+    services = normalized.get("services") or []
+    if not isinstance(services, list):
+        services = []
+    if not services:
+        fallback_name = normalized.get("specialty") or f"{_service_label(vertical)} service"
+        services = [{
+            "id": "featured",
+            "name": fallback_name,
+            "price": float(normalized.get("fee", 0) or 0),
+            "duration_mins": int(normalized.get("slot_minutes", 15) or 15),
+            "description": normalized.get("description", ""),
+            "image_url": normalized.get("image_url", ""),
+            "active": True,
+        }]
+    normalized["services"] = services
+    return normalized
 
 # ---------------- Auth Endpoints ----------------
 @api.post("/auth/login")
@@ -383,10 +442,12 @@ async def list_dealers(_: dict = Depends(require_role("admin"))):
 async def create_dealer(body: DealerCreate, _: dict = Depends(require_role("admin"))):
     email = body.email.lower()
     if await db.users.find_one({"email": email}): raise HTTPException(status_code=400, detail="Email already exists")
+    dealer_code = await gen_dealer_code()
     doc = {"id": str(uuid.uuid4()), "email": email, "name": body.name, "role": "dealer",
            "password_hash": hash_password(body.password),
            "gst_number": body.gst_number, "address": body.address, "phone": body.phone,
            "plan": body.plan, "plan_id": body.plan_id, "wallet_balance": float(body.wallet_balance),
+           "dealer_code": dealer_code,
            "created_at": now_iso()}
     await db.users.insert_one(doc); return clean(doc)
 
@@ -497,11 +558,13 @@ async def create_client(body: ClientCreate, user: dict = Depends(require_role("d
         raise HTTPException(status_code=400, detail="Email already exists")
     valid = set([t["id"] for t in await db.templates.find({"assigned_dealer_ids": user["id"]}, {"_id": 0, "id": 1}).to_list(1000)])
     safe = [t for t in body.assigned_template_ids if t in valid]
+    client_code = await gen_client_code()
     doc = {"id": str(uuid.uuid4()), "name": body.name, "email": email,
            "password_hash": hash_password(body.password),
            "phone": body.phone, "gst_number": body.gst_number, "address": body.address,
            "plan": body.plan, "vertical": body.vertical, "wallet_balance": float(body.wallet_balance),
            "dealer_id": user["id"], "dealer_name": user["name"],
+           "client_code": client_code,
             "assigned_template_ids": safe, "doctor_profile": {}, "salon_profile": {},
            "status": "pending", "created_at": now_iso()}
     await db.clients.insert_one(doc); return clean(doc)
@@ -713,9 +776,12 @@ async def public_rss(url: str):
 # ----------- Doctor / Salon vertical -----------
 async def _update_service_profile(vertical: str, body: DoctorProfile, user: dict):
     field = _service_profile_field(vertical)
+    existing = await db.clients.find_one({"id": user["id"], "vertical": vertical}, {"_id": 0, field: 1})
+    current = existing.get(field, {}) if existing else {}
+    merged = {**(current or {}), **body.model_dump()}
     r = await db.clients.find_one_and_update(
         {"id": user["id"], "vertical": vertical},
-        {"$set": {field: body.model_dump()}},
+        {"$set": {field: merged}},
         return_document=True,
         projection={"_id": 0, "password_hash": 0},
     )
@@ -845,26 +911,79 @@ async def delete_notice(nid: str, user: dict = Depends(require_role("client"))):
 
 # ---------------- Public: Doctor / Salon booking ----------------
 async def _public_service_profile(cid: str):
-    c = await db.clients.find_one({"id": cid, "vertical": {"$in": ["doctor", "salon"]}}, {"_id": 0, "password_hash": 0, "wallet_balance": 0})
+    c = await db.clients.find_one({"id": cid}, {"_id": 0, "password_hash": 0, "wallet_balance": 0})
     if not c:
-        raise HTTPException(status_code=404, detail="Service provider not found")
-    profile_field = _service_profile_field(c.get("vertical", "doctor"))
-    pending = await db.appointments.count_documents({"client_id": cid, "status": "pending", "date": datetime.now(timezone.utc).date().isoformat()})
-    return {
+        raise HTTPException(status_code=404, detail="Provider not found")
+    vertical = c.get("vertical", "general")
+    base = {
         "id": c["id"],
         "name": c["name"],
-        "vertical": c.get("vertical", "doctor"),
+        "vertical": vertical,
         "phone": c.get("phone", ""),
         "address": c.get("address", ""),
-        "profile": c.get(profile_field, {}),
-        "queue_length": pending,
     }
 
+    # Doctor / Salon: include profile and live queue
+    if vertical in ("doctor", "salon"):
+        profile_field = _service_profile_field(vertical)
+        profile = _normalize_service_catalog(c.get(profile_field, {}), vertical)
+        today = datetime.now(timezone.utc).date().isoformat()
+        pending_filter = {"client_id": cid, "status": "pending", "date": today}
+        pending = await db.appointments.find(pending_filter, {"_id": 0}).sort([("token", 1), ("created_at", 1)]).to_list(50)
+        queue_minutes = 0
+        queue_preview = []
+        for item in pending:
+            duration = int(item.get("service_duration_mins") or profile.get("slot_minutes", 15) or 15)
+            queue_preview.append({
+                "token": item.get("token"),
+                "service_name": item.get("service_name", ""),
+                "service_duration_mins": duration,
+                "preferred_time": item.get("preferred_time", ""),
+                "source": item.get("source", "public"),
+                "wait_after_mins": queue_minutes,
+            })
+            queue_minutes += max(5, duration)
+        return {
+            **base,
+            "profile": profile,
+            "queue_length": len(pending),
+            "queue_total_minutes": queue_minutes,
+            "queue_preview": queue_preview[:8],
+        }
 
-async def _book_service(cid: str, body: AppointmentCreate):
+    # Retailer: include product catalog
+    if vertical == "retailer":
+        products = await db.products.find({"client_id": cid}, {"_id": 0}).sort("created_at", -1).to_list(1000)
+        return {**base, "products": products}
+
+    # Society: include notices and rooms
+    if vertical == "society":
+        notices = await db.notices.find({"client_id": cid, "is_deleted": {"$ne": True}}, {"_id": 0}).sort("created_at", -1).to_list(500)
+        rooms = await db.rooms.find({"client_id": cid}, {"_id": 0}).sort("room_no", 1).to_list(1000)
+        return {**base, "notices": notices, "rooms": rooms}
+
+    # Default generic provider
+    return base
+
+
+async def _resolve_service_snapshot(profile: dict, body: AppointmentCreate):
+    services = profile.get("services") or []
+    chosen = None
+    if body.service_id:
+      chosen = next((s for s in services if str(s.get("id", "")) == str(body.service_id)), None)
+    if not chosen and body.service_name:
+      chosen = next((s for s in services if (s.get("name") or "").strip().lower() == body.service_name.strip().lower()), None)
+    if not chosen and services:
+      chosen = services[0]
+    return chosen or {}
+
+
+async def _book_service(cid: str, body: AppointmentCreate, source: Optional[str] = None):
     c = await db.clients.find_one({"id": cid, "vertical": {"$in": ["doctor", "salon"]}}, {"_id": 0})
     if not c:
         raise HTTPException(status_code=404, detail="Service provider not found")
+    profile = _normalize_service_catalog(c.get(_service_profile_field(c.get("vertical", "doctor")), {}), c.get("vertical", "doctor"))
+    service = await _resolve_service_snapshot(profile, body)
     today = datetime.now(timezone.utc).date().isoformat()
     token = await db.appointments.count_documents({"client_id": cid, "date": today}) + 1
     doc = {
@@ -876,7 +995,12 @@ async def _book_service(cid: str, body: AppointmentCreate):
         "patient_phone": body.patient_phone,
         "notes": body.notes,
         "preferred_time": body.preferred_time,
-        "service_name": body.service_name,
+        "service_id": service.get("id", body.service_id or ""),
+        "service_name": service.get("name", body.service_name or ""),
+        "service_price": float(service.get("price", body.service_price or 0) or 0),
+        "service_duration_mins": int(service.get("duration_mins", c.get(_service_profile_field(c.get("vertical", "doctor")), {}).get("slot_minutes", 15)) or 15),
+        "service_image_url": service.get("image_url", ""),
+        "source": source or body.source,
         "status": "pending",
         "created_at": now_iso(),
     }
@@ -891,7 +1015,7 @@ async def public_provider_profile(cid: str):
 
 @public_api.post("/providers/{cid}/book")
 async def public_provider_book(cid: str, body: AppointmentCreate):
-    return await _book_service(cid, body)
+    return await _book_service(cid, body, source="public")
 
 
 @public_api.get("/doctors/{cid}")
@@ -901,7 +1025,16 @@ async def public_doctor_profile(cid: str):
 
 @public_api.post("/doctors/{cid}/book")
 async def public_doctor_book(cid: str, body: AppointmentCreate):
-    return await _book_service(cid, body)
+    return await _book_service(cid, body, source="public")
+
+
+@api.post("/client/{vertical}/appointments")
+async def create_service_appointment(vertical: Literal["doctor", "salon"], body: AppointmentCreate, user: dict = Depends(require_role("client"))):
+    c = await db.clients.find_one({"id": user["id"], "vertical": vertical}, {"_id": 0})
+    if not c:
+        raise HTTPException(status_code=403, detail=f"Not a {_service_label(vertical).lower()} account")
+    body.source = "manual"
+    return await _book_service(user["id"], body, source="manual")
 
 
 # ==================== Object Storage ====================
@@ -910,6 +1043,7 @@ S3_SECRET_ACCESS_KEY = os.environ.get("AWS_SECRET_ACCESS_KEY") or os.environ.get
 S3_REGION = os.environ.get("AWS_REGION") or os.environ.get("S3_REGION", "ap-southeast-2")
 S3_ENDPOINT_URL = os.environ.get("S3_ENDPOINT_URL", "https://xztrjsqymgyltfivpgdj.storage.supabase.co/storage/v1/s3")
 SUPABASE_PROJECT_URL = os.environ.get("SUPABASE_URL") or os.environ.get("NEXT_PUBLIC_SUPABASE_URL", "https://xztrjsqymgyltfivpgdj.supabase.co")
+PUBLIC_APP_URL = os.environ.get("PUBLIC_APP_URL") or os.environ.get("FRONTEND_URL", "")
 S3_BUCKET = os.environ.get("S3_BUCKET", "bucket")
 APP_NAME = "signageos"
 ALLOWED_MIME = {"image/jpeg", "image/png", "image/webp", "image/gif", "video/mp4", "video/webm"}
@@ -931,6 +1065,17 @@ def init_storage() -> Optional[str]:
             endpoint_url=S3_ENDPOINT_URL,
             config=boto3.session.Config(s3={"addressing_style": "path"}),
         )
+    try:
+        _s3_client.head_bucket(Bucket=S3_BUCKET)
+    except ClientError as e:
+        status = e.response.get("ResponseMetadata", {}).get("HTTPStatusCode")
+        if status in (400, 404):
+            create_args = {"Bucket": S3_BUCKET}
+            if S3_REGION and S3_REGION != "us-east-1":
+                create_args["CreateBucketConfiguration"] = {"LocationConstraint": S3_REGION}
+            _s3_client.create_bucket(**create_args)
+        else:
+            raise
     return S3_BUCKET
 
 def put_object(path: str, data: bytes, content_type: str) -> dict:
@@ -1026,12 +1171,22 @@ async def upload_media(
     path = f"{APP_NAME}/{user['id']}/{file_id}.{ext}"
     result = put_object(path, data, content_type)
     kind = "video" if content_type.startswith("video/") else "image"
-    doc = {"id": file_id, "client_id": user["id"], "zone": zone, "folder": folder or "default",
-           "name": name or file.filename or "untitled",
-           "original_filename": file.filename, "kind": kind,
-            "content_type": content_type, "storage_path": result.get("path", path),
-            "public_url": result.get("public_url", ""),
-           "size": len(data), "is_deleted": False, "created_at": now_iso()}
+    public_url = f"{PUBLIC_APP_URL.rstrip('/')}/api/media/serve/{file_id}" if PUBLIC_APP_URL else f"/api/media/serve/{file_id}"
+    doc = {
+        "id": file_id,
+        "client_id": user["id"],
+        "zone": zone,
+        "folder": folder or "default",
+        "name": name or file.filename or "untitled",
+        "original_filename": file.filename,
+        "kind": kind,
+        "content_type": content_type,
+        "storage_path": result.get("path", path),
+        "public_url": public_url,
+        "size": len(data),
+        "is_deleted": False,
+        "created_at": now_iso(),
+    }
     await db.media.insert_one(doc)
     return clean(doc)
 
@@ -1162,8 +1317,13 @@ async def debug_media(mid: str, _: dict = Depends(get_current_user)):
 
 # ==================== Playlists (template-driven zones) ====================
 class PlaylistItem(BaseModel):
-    media_id: str
-    duration: int = 10  # seconds; videos play their natural length
+    # Support multiple item types: media (old), text (new), youtube (new)
+    type: Optional[str] = None  # "media", "text", "youtube"
+    media_id: Optional[str] = None  # for media items
+    content: Optional[str] = None  # for text items
+    url: Optional[str] = None  # for youtube items
+    fit: Optional[Literal["cover", "contain"]] = "cover"  # for media items
+    duration: int = 10  # seconds
 
 class PlaylistIn(BaseModel):
     name: str
@@ -1185,7 +1345,9 @@ class PlaylistUpdate(BaseModel):
     ticker_messages: Optional[List[dict]] = None
 
 async def _validate_media(ids: List[str], client_id: str):
-    if not ids: return
+    ids = [mid for mid in ids if mid]
+    if not ids:
+        return
     owned = await db.media.count_documents({"id": {"$in": ids}, "client_id": client_id, "is_deleted": False})
     if owned != len(set(ids)):
         raise HTTPException(status_code=400, detail="Invalid media in playlist")
@@ -1427,13 +1589,23 @@ async def player_payload(pair_code: str):
     async def _hydrate_items(items):
         out = []
         for item in items or []:
-            m = await db.media.find_one({"id": item["media_id"], "is_deleted": False}, {"_id": 0})
-            if not m: continue
-            out.append({"id": m["id"], "kind": m["kind"],
-                        "content_type": m.get("content_type", ""),
-                        "url": f"/api/media/serve/{m['id']}",
-                        "duration": item.get("duration", 10),
-                        "name": m.get("name", "")})
+            # New format with explicit type field
+            if item.get("type") == "text":
+                out.append({"type": "text", "content": item.get("content", ""), 
+                           "duration": item.get("duration", 10)})
+            elif item.get("type") == "youtube":
+                out.append({"type": "youtube", "url": item.get("url", ""),
+                           "duration": item.get("duration", 10)})
+            elif item.get("type") == "media" or item.get("media_id"):
+                # Media item - fetch from database
+                media_id = item.get("media_id")
+                m = await db.media.find_one({"id": media_id, "is_deleted": False}, {"_id": 0})
+                if not m: continue
+                out.append({"type": "media", "id": m["id"], "kind": m["kind"],
+                           "content_type": m.get("content_type", ""),
+                           "url": f"/api/media/serve/{m['id']}",
+                           "duration": item.get("duration", 10),
+                           "name": m.get("name", ""), "media_id": m["id"]})
         return out
 
     async def _ingest(pl: dict):
@@ -1759,19 +1931,26 @@ async def on_startup():
 async def on_shutdown():
     client.close()
 
+
+@app.get("/api/health")
+async def health_check():
+    return {"ok": True}
+
 app.include_router(api)
 app.include_router(public_api)
 
 frontend = os.environ.get("FRONTEND_URL", "")
-origins = [
-    o for o in [
-        frontend,
-        "http://localhost:3000",
-        "http://localhost:4000",
-        "http://127.0.0.1:3000",
-        "http://127.0.0.1:4000",
-    ] if o
-]
+origins = []
+for item in frontend.split(",") if frontend else []:
+    origin = item.strip()
+    if origin:
+        origins.append(origin)
+origins.extend([
+    "http://localhost:3000",
+    "http://localhost:4000",
+    "http://127.0.0.1:3000",
+    "http://127.0.0.1:4000",
+])
 app.add_middleware(CORSMiddleware, allow_origins=origins or ["*"],
                    allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 

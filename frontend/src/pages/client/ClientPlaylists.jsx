@@ -4,7 +4,7 @@ import PageHeader from "../../components/PageHeader";
 import { Button } from "../../components/ui/button";
 import { Input } from "../../components/ui/input";
 import { Label } from "../../components/ui/label";
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "../../components/ui/dialog";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "../../components/ui/dialog";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "../../components/ui/tabs";
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from "../../components/ui/select";
 import { Plus, Pencil, Trash2, Film } from "lucide-react";
@@ -71,11 +71,38 @@ const remapLegacyItemsToZones = (zoneDefs, existingZoneItems = {}) => {
 const isTickerZone = (zone) => /ticker/i.test(`${zone?.id || ""} ${zone?.name || ""}`);
 
 function ZonePicker({ media, items, setItems }) {
-  const add = (id) => {
-    if (!items.some((i) => i.media_id === id)) setItems([...items, { media_id: id, duration: 10 }]);
+  const [addType, setAddType] = useState(""); // for managing add dialog
+  const [textValue, setTextValue] = useState("");
+  const [youtubeUrl, setYoutubeUrl] = useState("");
+  const [newDuration, setNewDuration] = useState(10);
+
+  const addMedia = (id) => {
+    if (!items.some((i) => i.type === "media" && i.media_id === id)) {
+      setItems([...items, { type: "media", media_id: id, fit: "cover", duration: 10 }]);
+    }
   };
+
+  const addText = () => {
+    if (textValue.trim()) {
+      setItems([...items, { type: "text", content: textValue, duration: newDuration }]);
+      setTextValue("");
+      setNewDuration(10);
+      setAddType("");
+    }
+  };
+
+  const addYoutube = () => {
+    if (youtubeUrl.trim()) {
+      setItems([...items, { type: "youtube", url: youtubeUrl, duration: newDuration }]);
+      setYoutubeUrl("");
+      setNewDuration(10);
+      setAddType("");
+    }
+  };
+
   const remove = (idx) => setItems(items.filter((_, i) => i !== idx));
   const setDur = (idx, d) => setItems(items.map((it, i) => (i === idx ? { ...it, duration: d } : it)));
+  const setFit = (idx, fit) => setItems(items.map((it, i) => (i === idx ? { ...it, fit } : it)));
   const move = (idx, dir) => {
     const j = idx + dir;
     if (j < 0 || j >= items.length) return;
@@ -84,42 +111,99 @@ function ZonePicker({ media, items, setItems }) {
     setItems(c);
   };
   const mediaById = (id) => media.find((m) => m.id === id);
+  const getYoutubeId = (url) => {
+    const regex = /(?:youtube\.com\/watch\?v=|youtu\.be\/)([\w-]+)/;
+    const match = url.match(regex);
+    return match ? match[1] : null;
+  };
 
   return (
     <div className="grid grid-cols-2 gap-3">
       <div>
-        <div className="text-[10px] uppercase tracking-wider font-semibold text-[#6B7280] mb-2">Library</div>
-        <div className="border border-[#E5E7EB] rounded-sm max-h-60 overflow-y-auto p-2 grid grid-cols-3 gap-2 bg-[#F9FAFB]">
-          {media.length === 0 && <div className="col-span-3 text-xs text-[#9CA3AF] text-center p-4">No media uploaded. Visit Media to add files.</div>}
-          {media.map((m) => (
-            <button key={m.id} type="button" onClick={() => add(m.id)} className="aspect-square bg-white border border-[#E5E7EB] rounded-sm overflow-hidden hover:border-[#111827] relative" data-testid={`pl-add-${m.id}`}>
-              {m.kind === "image" ? <img src={`${API_BASE}/media/serve/${m.id}`} className="w-full h-full object-cover" alt={m.name} /> : <div className="w-full h-full flex items-center justify-center bg-[#111827]"><Film className="w-5 h-5 text-white/50" /></div>}
-              <div className="absolute bottom-0 inset-x-0 bg-black/60 text-white text-[9px] truncate px-1">{m.name}</div>
-            </button>
-          ))}
+        <div className="text-[10px] uppercase tracking-wider font-semibold text-[#6B7280] mb-2">Add Content</div>
+        <div className="border border-[#E5E7EB] rounded-sm max-h-80 overflow-y-auto p-3 bg-[#F9FAFB] space-y-3">
+          {/* Media Library Tab */}
+          <div>
+            <div className="text-[9px] font-semibold uppercase text-[#6B7280] mb-2">📁 Media Library</div>
+            <div className="grid grid-cols-3 gap-2">
+              {media.length === 0 && <div className="col-span-3 text-xs text-[#9CA3AF] text-center p-2">No media uploaded.</div>}
+              {media.map((m) => (
+                <button key={m.id} type="button" onClick={() => addMedia(m.id)} className="aspect-square bg-white border border-[#E5E7EB] rounded-sm overflow-hidden hover:border-[#111827] relative text-[9px]" data-testid={`pl-add-${m.id}`}>
+                  {m.kind === "image" ? <img src={`${API_BASE}/media/serve/${m.id}`} className="w-full h-full object-cover" alt={m.name} /> : <div className="w-full h-full flex items-center justify-center bg-[#111827]"><Film className="w-4 h-4 text-white/50" /></div>}
+                  <div className="absolute bottom-0 inset-x-0 bg-black/60 text-white text-[8px] truncate px-1">{m.name}</div>
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Text Input */}
+          <div>
+            <div className="text-[9px] font-semibold uppercase text-[#6B7280] mb-2">📝 Text</div>
+            <div className="space-y-1">
+              <Input value={textValue} onChange={(e) => setTextValue(e.target.value)} placeholder="Enter text..." className="rounded-sm text-xs h-8" />
+              <div className="flex gap-1">
+                <Input type="number" min="1" max="60" value={newDuration} onChange={(e) => setNewDuration(parseInt(e.target.value || 10))} className="rounded-sm text-xs h-8 w-16" />
+                <Button type="button" onClick={addText} className="rounded-sm bg-blue-600 hover:bg-blue-700 text-white text-xs h-8 flex-1" disabled={!textValue.trim()}>Add Text</Button>
+              </div>
+            </div>
+          </div>
+
+          {/* YouTube URL Input */}
+          <div>
+            <div className="text-[9px] font-semibold uppercase text-[#6B7280] mb-2">🎥 YouTube</div>
+            <div className="space-y-1">
+              <Input value={youtubeUrl} onChange={(e) => setYoutubeUrl(e.target.value)} placeholder="https://youtube.com/watch?v=..." className="rounded-sm text-xs h-8" />
+              <div className="flex gap-1">
+                <Input type="number" min="1" max="600" value={newDuration} onChange={(e) => setNewDuration(parseInt(e.target.value || 10))} className="rounded-sm text-xs h-8 w-16" />
+                <Button type="button" onClick={addYoutube} className="rounded-sm bg-red-600 hover:bg-red-700 text-white text-xs h-8 flex-1" disabled={!youtubeUrl.trim()}>Add Video</Button>
+              </div>
+            </div>
+          </div>
         </div>
       </div>
+
       <div>
         <div className="text-[10px] uppercase tracking-wider font-semibold text-[#6B7280] mb-2">Sequence ({items.length})</div>
-        <div className="border border-[#E5E7EB] rounded-sm max-h-60 overflow-y-auto p-2 space-y-1 bg-[#F9FAFB]">
-          {items.length === 0 && <div className="text-xs text-[#9CA3AF] text-center p-4">Click media on the left to add.</div>}
+        <div className="border border-[#E5E7EB] rounded-sm max-h-80 overflow-y-auto p-2 space-y-1 bg-[#F9FAFB]">
+          {items.length === 0 && <div className="text-xs text-[#9CA3AF] text-center p-4">Add content on the left.</div>}
           {items.map((it, idx) => {
-            const m = mediaById(it.media_id);
+            const m = it.type === "media" ? mediaById(it.media_id) : null;
+            const ytId = it.type === "youtube" ? getYoutubeId(it.url) : null;
             return (
               <div key={idx} className="flex items-center gap-2 bg-white border border-[#E5E7EB] rounded-sm p-1.5">
                 <div className="flex flex-col">
                   <button type="button" onClick={() => move(idx, -1)} className="text-[8px] text-[#6B7280]">▲</button>
                   <button type="button" onClick={() => move(idx, 1)} className="text-[8px] text-[#6B7280]">▼</button>
                 </div>
-                <div className="w-10 h-10 bg-[#F3F4F6] rounded-sm overflow-hidden flex-shrink-0">
-                  {m?.kind === "image" ? <img src={`${API_BASE}/media/serve/${m.id}`} className="w-full h-full object-cover" alt="" /> : <div className="w-full h-full flex items-center justify-center bg-[#111827]"><Film className="w-3 h-3 text-white/50" /></div>}
+                <div className="w-10 h-10 bg-[#F3F4F6] rounded-sm overflow-hidden flex-shrink-0 flex items-center justify-center">
+                  {it.type === "media" && m?.kind === "image" && <img src={`${API_BASE}/media/serve/${m.id}`} className="w-full h-full object-cover" alt="" />}
+                  {it.type === "media" && m?.kind === "video" && <div className="text-center"><Film className="w-3 h-3 text-white/50" /></div>}
+                  {it.type === "text" && <div className="text-[8px] font-bold text-[#111827]">TXT</div>}
+                  {it.type === "youtube" && ytId && <div className="text-[6px] font-bold text-red-600">YT</div>}
                 </div>
                 <div className="flex-1 min-w-0">
-                  <div className="text-xs font-semibold truncate">{m?.name || "Missing"}</div>
+                  <div className="text-xs font-semibold truncate">
+                    {it.type === "media" && (m?.name || "Missing media")}
+                    {it.type === "text" && `"${it.content.substring(0, 20)}..."`}
+                    {it.type === "youtube" && (ytId ? "YouTube video" : "Invalid YT URL")}
+                  </div>
                   <div className="flex items-center gap-1 mt-0.5">
                     <Input type="number" min="1" value={it.duration} onChange={(e) => setDur(idx, parseInt(e.target.value || 1))} className="h-6 w-16 text-xs rounded-sm" />
                     <span className="text-[10px] text-[#6B7280]">sec</span>
                   </div>
+                  {it.type === "media" && (
+                    <div className="mt-1">
+                      <Select value={it.fit || "cover"} onValueChange={(value) => setFit(idx, value)}>
+                        <SelectTrigger className="h-6 w-24 text-[10px] rounded-sm" data-testid={`media-fit-${idx}`}>
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="cover">Cover</SelectItem>
+                          <SelectItem value="contain">Contain</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  )}
                 </div>
                 <button type="button" onClick={() => remove(idx)} className="text-red-600 px-1">×</button>
               </div>
@@ -352,6 +436,7 @@ export default function ClientPlaylists() {
         <DialogContent className="rounded-sm max-w-5xl max-h-[90vh] overflow-y-auto" data-testid="playlist-dialog">
           <DialogHeader>
             <DialogTitle className="font-display text-2xl font-extrabold tracking-tight">{editing ? "Edit Playlist" : "New Playlist"}</DialogTitle>
+            <DialogDescription>Select template and add media, text, or YouTube videos to zones</DialogDescription>
           </DialogHeader>
           <form onSubmit={submit} className="space-y-4">
             <div className="grid grid-cols-2 gap-4">

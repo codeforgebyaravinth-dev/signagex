@@ -1,19 +1,22 @@
 # VPS Deployment Guide
 
-This project has two parts:
+This deployment uses Docker Compose with:
 
-- Backend: FastAPI + MongoDB Atlas + Supabase S3
-- Frontend: React (CRACO)
+- MongoDB in a container
+- MinIO as the S3-compatible object store
+- FastAPI backend
+- React frontend served by Nginx
+- Public Nginx reverse proxy for `rpsignage.com` and `rpsignage.in`
 
 ## 1) Prerequisites
 
 Install on the VPS:
 
-- Python 3.13+
-- Node.js 18+
-- Yarn 1.x or npm
-- Nginx
+- Docker Engine
+- Docker Compose v2
 - Git
+- Port `80` and `443` open
+- DNS A records for both domains pointing to the VPS
 
 ## 2) Clone the project
 
@@ -22,140 +25,81 @@ git clone <your-repo-url>
 cd SignageOS1-main
 ```
 
-## 3) Configure backend environment
+## 3) Configure Docker environment
 
-Create `backend/.env` with your production values:
+Copy the example env file:
+
+```bash
+cp backend/.env.docker.example backend/.env.docker
+```
+
+Edit `backend/.env.docker` and set at least:
 
 ```env
-MONGO_URL=<your-mongodb-atlas-connection-string>
-DB_NAME=signage
 JWT_SECRET=<strong-random-secret>
-ADMIN_EMAIL=admin@demo.com
-ADMIN_PASSWORD=admin123
-FRONTEND_URL=https://your-domain.com
-AWS_ACCESS_KEY_ID=<your-s3-access-key-id>
-AWS_SECRET_ACCESS_KEY=<your-s3-secret-access-key>
-AWS_REGION=ap-southeast-2
-S3_ENDPOINT_URL=https://xztrjsqymgyltfivpgdj.storage.supabase.co/storage/v1/s3
-SUPABASE_URL=https://xztrjsqymgyltfivpgdj.supabase.co
-S3_BUCKET=storage
+ADMIN_PASSWORD=<strong-admin-password>
+MINIO_ROOT_PASSWORD=<strong-minio-password>
+LETSENCRYPT_EMAIL=admin@rpsignage.com
 ```
 
-Notes:
+The example file already points the stack to:
 
-- The database is MongoDB Atlas.
-- The media storage bucket is `storage`.
-- The backend uploads media files directly to Supabase Storage using the S3 protocol.
+- `mongodb://mongodb:27017`
+- `http://minio:9000`
+- `https://rpsignage.com,https://rpsignage.in`
 
-## 4) Install backend dependencies
+## 4) Start the stack
+
+Run the single deployment script:
 
 ```bash
-cd backend
-python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
+chmod +x deploy.sh
+./deploy.sh
 ```
 
-## 5) Run the backend
+What the script does:
 
-Development mode:
+1. Generates a temporary self-signed certificate if one does not exist yet.
+2. Builds the backend, frontend, and Nginx images.
+3. Starts MongoDB, MinIO, backend, frontend, and public Nginx.
+4. Requests a real Let's Encrypt certificate for both domains.
+5. Restarts Nginx after certificates are issued.
+
+## 5) Service layout
+
+- `mongodb` stores application data.
+- `minio` stores uploaded media.
+- `backend` serves `/api/*` and streams media from MinIO.
+- `frontend` serves the React SPA.
+- `nginx` terminates TLS and routes both domains to the same app.
+
+## 6) Public URLs
+
+- `https://rpsignage.com`
+- `https://rpsignage.in`
+
+Both domains serve the same application.
+
+## 7) Notes
+
+- Uploaded media is stored in MinIO and served through `/api/media/serve/{id}`.
+- MongoDB and MinIO data persist in Docker volumes.
+- If you change the primary public domain, update `PUBLIC_APP_URL` in `backend/.env.docker`.
+- MinIO console is kept internal by default. If you want it public, add a separate protected host later.
+
+## 8) Backups
+
+Create a backup with:
 
 ```bash
-python -m uvicorn backend.server:app --host 0.0.0.0 --port 8000
+chmod +x scripts/backup.sh
+./scripts/backup.sh
 ```
 
-For production, run it behind a process manager such as systemd or supervisor.
+This saves:
 
-### Example systemd service
+- A MongoDB dump as `mongodump` archive
+- The MinIO data volume as a compressed tarball
+- A snapshot of `backend/.env.docker` for reference
 
-Create `/etc/systemd/system/signage-backend.service`:
-
-```ini
-[Unit]
-Description=SignageOS Backend
-After=network.target
-
-[Service]
-WorkingDirectory=/opt/SignageOS1-main
-EnvironmentFile=/opt/SignageOS1-main/backend/.env
-ExecStart=/usr/bin/python3 -m uvicorn backend.server:app --host 0.0.0.0 --port 8000
-Restart=always
-User=www-data
-Group=www-data
-
-[Install]
-WantedBy=multi-user.target
-```
-
-Then enable it:
-
-```bash
-sudo systemctl daemon-reload
-sudo systemctl enable signage-backend
-sudo systemctl start signage-backend
-```
-
-## 6) Install frontend dependencies
-
-```bash
-cd ../frontend
-yarn install
-```
-
-## 7) Build the frontend for production
-
-Set the backend URL before building:
-
-```bash
-export REACT_APP_BACKEND_URL=https://api.your-domain.com
-yarn build
-```
-
-The production bundle will be generated in `frontend/build`.
-
-## 8) Serve the frontend with Nginx
-
-Example Nginx config:
-
-```nginx
-server {
-    listen 80;
-    server_name your-domain.com;
-
-    root /opt/SignageOS1-main/frontend/build;
-    index index.html;
-
-    location / {
-        try_files $uri /index.html;
-    }
-
-    location /api/ {
-        proxy_pass http://127.0.0.1:8000/api/;
-        proxy_http_version 1.1;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-    }
-}
-```
-
-Then reload Nginx:
-
-```bash
-sudo nginx -t
-sudo systemctl reload nginx
-```
-
-## 9) Login accounts
-
-Use these defaults if they are seeded in your database:
-
-- Admin: `admin@demo.com` / `admin123`
-- Dealer: `dealer@demo.com` / `dealer123`
-
-## 10) Important deployment notes
-
-- Make sure your MongoDB Atlas IP allowlist includes the VPS IP.
-- Make sure the S3 bucket name is exactly `bucket` unless you change `S3_BUCKET`.
-- If uploads fail, verify the AWS credentials can write to that bucket.
-- Set HTTPS in production so cookies and auth work correctly.
+Restore is intentionally manual so you can verify where the data is going before overwriting production volumes.

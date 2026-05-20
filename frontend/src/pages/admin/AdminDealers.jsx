@@ -124,7 +124,7 @@ export default function AdminDealers() {
         <Table>
           <TableHeader>
             <TableRow className="bg-[#F9FAFB] hover:bg-[#F9FAFB]">
-              <TableHead className="text-[11px] uppercase tracking-wider text-[#6B7280]">Dealer ID</TableHead>
+              <TableHead className="text-[11px] uppercase tracking-wider text-[#6B7280]">Dealer Code</TableHead>
               <TableHead className="text-[11px] uppercase tracking-wider text-[#6B7280]">Dealer</TableHead>
               <TableHead className="text-[11px] uppercase tracking-wider text-[#6B7280]">GST</TableHead>
               <TableHead className="text-[11px] uppercase tracking-wider text-[#6B7280]">Plan</TableHead>
@@ -138,7 +138,7 @@ export default function AdminDealers() {
             )}
             {filtered.map((d) => (
               <TableRow key={d.id} data-testid={`dealer-row-${d.id}`}>
-                <TableCell className="font-mono text-[11px] text-[#6B7280]">{d.id}</TableCell>
+                <TableCell className="font-mono font-semibold text-[#111827]">{d.dealer_code || "—"}</TableCell>
                 <TableCell>
                   <div className="font-semibold">{d.name}</div>
                   <div className="text-xs text-[#6B7280]">{d.email}</div>

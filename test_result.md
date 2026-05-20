@@ -7,7 +7,7 @@
 
 # Communication Protocol:
 # If the `testing_agent` is available, main agent should delegate all testing tasks to it.
-#
+#c
 # You have access to a file called `test_result.md`. This file contains the complete testing state
 # and history, and is the primary means of communication between main and the testing agent.
 #
