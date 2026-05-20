@@ -19,7 +19,7 @@ const FALLBACK_THUMB = "https://images.unsplash.com/photo-1686362060774-1786ef7b
 
 const DEFAULT_CANVAS = { width: 1920, height: 1080 };
 
-const presetZone = (id, name, x, y, width_px, height_px) => ({ id, name, x, y, width_px, height_px });
+const presetZone = (id, name, x, y, width_px, height_px, role = "") => ({ id, name, x, y, width_px, height_px, role });
 
 const parseNumber = (value, fallback = 0) => {
   const parsed = Number(value);
@@ -58,6 +58,7 @@ const normalizeZone = (zone, index, canvasWidth, canvasHeight, totalZones) => {
   return {
     id: zone?.id || `zone-${Date.now()}-${index}`,
     name: zone?.name || `Zone ${index + 1}`,
+    role: zone?.role || zone?.type || "",
     x,
     y,
     width_px: width_px ?? Math.max(1, Math.round(canvasWidth / Math.max(1, totalZones || 1))),
@@ -241,8 +242,9 @@ const DEFAULT_LAYOUT_LIBRARY = [
   starterTemplate("retail-promo", "Retail promo", "Promo hero, product list, and call-to-action footer.", 1920, 1080, [presetZone("zone-1", "Hero", 0, 0, 1200, 1080), presetZone("zone-2", "Products", 1200, 0, 720, 810), presetZone("zone-3", "CTA", 1200, 810, 720, 270)], "Retail"),
   starterTemplate("corporate-dashboard", "Corporate dashboard", "Dashboard-style update board for internal messaging.", 1920, 1080, [presetZone("zone-1", "Stats", 0, 0, 640, 540), presetZone("zone-2", "News", 640, 0, 640, 540), presetZone("zone-3", "Alerts", 1280, 0, 640, 540), presetZone("zone-4", "Footer", 0, 540, 1920, 540)], "Corporate"),
   starterTemplate("meeting-room", "Meeting room", "Agenda, room schedule, and live announcement zones.", 1920, 1080, [presetZone("zone-1", "Agenda", 0, 0, 1260, 1080), presetZone("zone-2", "Room Info", 1260, 0, 660, 540), presetZone("zone-3", "Ticker", 1260, 540, 660, 540)], "Corporate"),
-  starterTemplate("hospital-waiting", "Hospital waiting room", "Patient queue, announcements, and calm ambient panel.", 1920, 1080, [presetZone("zone-1", "Queue", 0, 0, 760, 1080), presetZone("zone-2", "Announcements", 760, 0, 1160, 780), presetZone("zone-3", "Ticker", 760, 780, 1160, 300)], "Healthcare"),
-  starterTemplate("clinic-portrait", "Clinic portrait", "Tall queue board for check-in and token display.", 1080, 1920, [presetZone("zone-1", "Queue", 0, 0, 1080, 1280), presetZone("zone-2", "Info", 0, 1280, 1080, 420), presetZone("zone-3", "Ticker", 0, 1700, 1080, 220)], "Healthcare"),
+  starterTemplate("hospital-waiting", "Hospital waiting room", "Patient queue, announcements, and calm ambient panel.", 1920, 1080, [presetZone("zone-1", "Queue", 0, 0, 760, 1080, "queue"), presetZone("zone-2", "Announcements", 760, 0, 1160, 780), presetZone("zone-3", "Ticker", 760, 780, 1160, 300, "ticker")], "Healthcare"),
+  starterTemplate("clinic-portrait", "Clinic portrait", "Tall queue board for check-in and token display.", 1080, 1920, [presetZone("zone-1", "Queue", 0, 0, 1080, 1280, "queue"), presetZone("zone-2", "Info", 0, 1280, 1080, 420), presetZone("zone-3", "Ticker", 0, 1700, 1080, 220, "ticker")], "Healthcare"),
+  starterTemplate("clinic-portrait-logo", "Clinic portrait with logo", "Full portrait queue board with a dedicated logo zone and ticker.", 1080, 1920, [presetZone("zone-1", "Logo", 0, 0, 1080, 260, "logo"), presetZone("zone-2", "Queue", 0, 260, 1080, 1360, "queue"), presetZone("zone-3", "Ticker", 0, 1620, 1080, 300, "ticker")], "Healthcare"),
   starterTemplate("school-board", "School announcement board", "Timetable, notices, and campus ticker layout.", 1920, 1080, [presetZone("zone-1", "Notices", 0, 0, 1240, 1080), presetZone("zone-2", "Timetable", 1240, 0, 680, 780), presetZone("zone-3", "Ticker", 1240, 780, 680, 300)], "Education"),
   starterTemplate("transport-board", "Transport board", "Departure board with side update panel and ticker.", 1920, 1080, [presetZone("zone-1", "Departures", 0, 0, 1380, 870), presetZone("zone-2", "Service Info", 1380, 0, 540, 870), presetZone("zone-3", "Ticker", 0, 870, 1920, 210)], "Transportation"),
   starterTemplate("hotel-welcome", "Hotel welcome", "Lobby welcome screen with offers and scrolling news.", 1920, 1080, [presetZone("zone-1", "Welcome", 0, 0, 1240, 1080), presetZone("zone-2", "Offers", 1240, 0, 680, 780), presetZone("zone-3", "Ticker", 1240, 780, 680, 300)], "Hospitality"),

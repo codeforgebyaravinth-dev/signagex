@@ -72,27 +72,27 @@ function MediaSlot({ items, label }) {
       </div>
     ) : (cur.type === "media" || cur.media_id) ? (
       isImageItem(cur) ? (
-        <img src={`${BASE}${cur.url}`} alt={cur.name} className={`w-full h-full ${getMediaFit(cur)}`} onError={handleMediaEnd} />
+        <img src={`${BASE}${cur.url}`} alt={cur.name} className={`w-full h-full ${getMediaFit(cur)} object-center bg-black`} onError={handleMediaEnd} />
       ) : (
         <video
           src={`${BASE}${cur.url}`}
           autoPlay
           muted
           playsInline
-          className={`w-full h-full ${getMediaFit(cur)}`}
+          className={`w-full h-full ${getMediaFit(cur)} object-center bg-black`}
           onEnded={handleMediaEnd}
           onError={handleMediaEnd}
         />
       )
     ) : isImageItem(cur) ? (
-      <img src={`${BASE}${cur.url}`} alt={cur.name} className={`w-full h-full ${getMediaFit(cur)}`} onError={handleMediaEnd} />
+      <img src={`${BASE}${cur.url}`} alt={cur.name} className={`w-full h-full ${getMediaFit(cur)} object-center bg-black`} onError={handleMediaEnd} />
     ) : (
       <video
         src={`${BASE}${cur.url}`}
         autoPlay
         muted
         playsInline
-        className={`w-full h-full ${getMediaFit(cur)}`}
+        className={`w-full h-full ${getMediaFit(cur)} object-center bg-black`}
         onEnded={handleMediaEnd}
         onError={handleMediaEnd}
       />
@@ -155,6 +155,97 @@ function TickerSlot({ items, label }) {
   );
 }
 
+function QueueBoard({ deviceName, queuePreview, notices }) {
+  const currentToken = queuePreview?.[0] || null;
+  const upNext = Array.isArray(queuePreview) ? queuePreview.slice(1, 4) : [];
+  const highlightNotice = Array.isArray(notices) && notices.length > 0 ? notices[0] : null;
+  const queueCount = Array.isArray(queuePreview) ? queuePreview.length : 0;
+
+  if (!currentToken && upNext.length === 0 && !highlightNotice) return null;
+
+  return (
+    <div className="pointer-events-auto w-full max-w-full overflow-hidden rounded-none border border-white/10 bg-[#080608]/92 text-white shadow-none backdrop-blur-[1px]">
+      <div className="flex flex-col gap-2">
+      <div className="relative shrink-0 border-b border-white/10 px-3 pt-2 pb-2 text-center">
+        <div className="absolute inset-x-0 top-0 h-1 bg-gradient-to-r from-fuchsia-500 via-rose-500 to-fuchsia-500" />
+        <div className="mx-auto mb-1.5 flex h-10 w-10 items-center justify-center rounded-none border border-fuchsia-400/30 bg-fuchsia-500/10 text-fuchsia-200">
+          <span className="text-[10px] font-bold uppercase tracking-[0.35em]">RP</span>
+        </div>
+        <div className="text-[10px] uppercase tracking-[0.5em] text-white/55">{deviceName || "Token Display"}</div>
+        <div className="mt-1 text-xl font-black uppercase tracking-[0.22em] text-white">Now Serving</div>
+        <div className="mt-1 text-[10px] uppercase tracking-[0.35em] text-white/40">Live queue {queueCount ? `· ${queueCount} waiting` : ""}</div>
+      </div>
+
+      <div className="px-3 pb-3 space-y-2.5">
+        {currentToken ? (
+          <div className="rounded-none border border-fuchsia-400/25 bg-[radial-gradient(circle_at_top,rgba(236,72,153,0.24),transparent_60%),linear-gradient(180deg,rgba(236,72,153,0.16),rgba(8,6,8,0.98))] px-3 py-4 text-center shadow-none">
+            <div className="text-[10px] uppercase tracking-[0.4em] text-fuchsia-200/85">Current token</div>
+            <div className="mt-2 font-display text-[clamp(3rem,8vw,5rem)] font-black leading-none tracking-tight text-white">
+              {currentToken.token}
+            </div>
+            <div className="mt-2 text-[clamp(0.95rem,2.2vw,1.35rem)] font-semibold text-white/90">
+              {currentToken.service_name || currentToken.patient_name || "Queue item"}
+            </div>
+            <div className="mt-1.5 text-[10px] uppercase tracking-[0.4em] text-white/45">
+              {currentToken.service_duration_mins ? `${currentToken.service_duration_mins} min` : "Live queue"}
+            </div>
+          </div>
+        ) : null}
+
+        {upNext.length > 0 ? (
+          <div className="rounded-none border border-white/10 bg-white/5 px-3 py-2.5">
+            <div className="flex items-center justify-between gap-3">
+              <div className="text-[10px] uppercase tracking-[0.35em] text-white/55">Up next</div>
+              <div className="text-[10px] uppercase tracking-[0.35em] text-white/35">Preview</div>
+            </div>
+            <div className="mt-2 space-y-1.5">
+              {upNext.map((item, index) => (
+                <div key={`${item.token}-${index}`} className="flex items-center justify-between rounded-none border border-white/10 bg-black/45 px-2.5 py-2">
+                  <div className="flex items-baseline gap-3 min-w-0">
+                    <div className="text-lg font-black leading-none text-white">{item.token}</div>
+                    <div className="min-w-0">
+                      <div className="text-[11px] font-semibold text-white truncate">{item.service_name || "Service"}</div>
+                      <div className="text-[9px] uppercase tracking-[0.3em] text-white/35">
+                        {item.status || "pending"}
+                      </div>
+                    </div>
+                  </div>
+                  <div className="text-right text-[9px] uppercase tracking-[0.3em] text-white/40">
+                    {item.wait_after_mins ? `${item.wait_after_mins}m wait` : "Queued"}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        ) : null}
+
+        {highlightNotice ? (
+          <div className="max-h-[96px] overflow-hidden rounded-none border border-fuchsia-400/20 bg-gradient-to-br from-fuchsia-500/90 via-rose-500/80 to-pink-400/85 p-2.5 text-white shadow-none">
+            <div className="text-[10px] uppercase tracking-[0.4em] text-white/75">Special offer</div>
+            <div className="mt-0.5 text-base font-black uppercase leading-tight">Live notice</div>
+            <div className="mt-1 text-[11px] font-semibold text-white/90 line-clamp-2">
+              {highlightNotice.title || highlightNotice.body || "Queue updates available"}
+            </div>
+          </div>
+        ) : null}
+      </div>
+      </div>
+    </div>
+  );
+}
+
+function isQueueZone(zone) {
+  return zone?.role === "queue" || /queue|token/i.test(`${zone?.id || ""} ${zone?.name || ""}`);
+}
+
+function isLogoZone(zone) {
+  return zone?.role === "logo" || /logo|brand/i.test(`${zone?.id || ""} ${zone?.name || ""}`);
+}
+
+function getClientLogoUrl(providerData, payload) {
+  return providerData?.profile?.image_url || providerData?.image_url || payload?.client_logo_url || "";
+}
+
 export default function SignagePlayer() {
   const { pairCode } = useParams();
   const [payload, setPayload] = useState(null);
@@ -170,6 +261,14 @@ export default function SignagePlayer() {
   const [voiceError, setVoiceError] = useState("");
   const [voiceTranscript, setVoiceTranscript] = useState("");
   const [showSplash, setShowSplash] = useState(true);
+  const [showHud, setShowHud] = useState(false);
+  const hudTimerRef = useRef(null);
+
+  const revealHud = useCallback(() => {
+    setShowHud(true);
+    if (hudTimerRef.current) clearTimeout(hudTimerRef.current);
+    hudTimerRef.current = setTimeout(() => setShowHud(false), 3000);
+  }, []);
 
   const poll = useCallback(async () => {
     try {
@@ -195,6 +294,10 @@ export default function SignagePlayer() {
     const t = setTimeout(() => setShowSplash(false), minMs);
     return () => clearTimeout(t);
   }, [payload, showSplash]);
+
+  useEffect(() => () => {
+    if (hudTimerRef.current) clearTimeout(hudTimerRef.current);
+  }, []);
 
   // fetch vertical-specific public data (products/services/queue/notices/rooms)
   useEffect(() => {
@@ -509,26 +612,41 @@ export default function SignagePlayer() {
   const notices = Array.isArray(providerData?.notices)
     ? providerData.notices
     : (Array.isArray(payload?.notices) ? payload.notices : []);
-  const currentToken = queuePreview[0] || null;
+  const clientLogoUrl = getClientLogoUrl(providerData, payload);
   const colCount = Math.max(1, zoneEntries.length);
   const gridStyle = {
     gridTemplateColumns: colCount === 1 ? "1fr" : colCount === 2 ? "repeat(2, minmax(0, 1fr))" : colCount === 4 ? "repeat(2, minmax(0, 1fr))" : `repeat(${colCount}, minmax(0, 1fr))`,
   };
+  const queueSidebarLeft = (() => {
+    if (orientation === "portrait" || !hasAbsoluteLayout) return null;
+    const queueEntry = zoneEntries.find(({ zone }) => isQueueZone(zone));
+    if (!queueEntry?.zone) return null;
+    const zone = queueEntry.zone;
+    const rawLeft = ((Number(zone.x) || 0) / canvasWidth) * 100;
+    const rawWidth = ((Number(zone.width_px) || canvasWidth) / canvasWidth) * 100;
+    const clampedLeft = Math.max(0, Math.min(100, rawLeft));
+    const clampedWidth = Math.max(0, Math.min(100, rawWidth, 100 - clampedLeft));
+    const rightEdge = Math.min(100, clampedLeft + clampedWidth);
+    const targetWidth = Math.min(36, Math.max(28, clampedWidth));
+    return Math.max(0, Math.min(99 - targetWidth, rightEdge - targetWidth));
+  })();
 
   return (
-    <div ref={wrapRef} className="min-h-screen bg-black text-white flex flex-col" data-testid="signage-player">
-      <div className="flex items-center justify-between px-4 py-2 bg-black/80 border-b border-white/10 text-[10px] uppercase tracking-wider font-mono">
-        <div className="flex items-center gap-2"><Monitor className="w-3.5 h-3.5" /> {payload.device_name}</div>
-        <div className="flex items-center gap-4">
-          <span className={`px-2 py-1 rounded-full border ${voiceState === "listening" ? "border-emerald-400/40 text-emerald-300" : voiceState === "unsupported" || voiceState === "error" ? "border-red-400/40 text-red-300" : "border-white/15 text-white/50"}`}>
-            voice {voiceState === "listening" ? "listening" : voiceState === "restarting" ? "restarting" : voiceState === "unsupported" ? "unsupported" : voiceState === "error" ? "error" : "idle"}
-          </span>
-          <span className="text-white/40 text-[11px] ml-2">dbg P:{(providerData?.products || payload?.products || []).length} M:{(overlay?.items?.length) || (overlay ? 1 : 0)}</span>
-          <span className="text-white/50">code <span className="text-white">{pairCode}</span></span>
-          <span className="text-white/50">{orientation}</span>
-          <button onClick={goFullscreen} className="hover:text-white/80" data-testid="fullscreen-btn"><Maximize className="w-3.5 h-3.5" /></button>
+    <div ref={wrapRef} className="min-h-screen bg-black text-white flex flex-col" data-testid="signage-player" onPointerDown={revealHud} onTouchStart={revealHud}>
+      {showHud ? (
+        <div className="flex items-center justify-between px-4 py-2 bg-black/80 border-b border-white/10 text-[10px] uppercase tracking-wider font-mono">
+          <div className="flex items-center gap-2"><Monitor className="w-3.5 h-3.5" /> {payload.device_name}</div>
+          <div className="flex items-center gap-4">
+            <button onClick={goFullscreen} className="hover:text-white/80" data-testid="fullscreen-btn"><Maximize className="w-3.5 h-3.5" /></button>
+            <span className={`px-2 py-1 rounded-full border ${voiceState === "listening" ? "border-emerald-400/40 text-emerald-300" : voiceState === "unsupported" || voiceState === "error" ? "border-red-400/40 text-red-300" : "border-white/15 text-white/50"}`}>
+              voice {voiceState === "listening" ? "listening" : voiceState === "restarting" ? "restarting" : voiceState === "unsupported" ? "unsupported" : voiceState === "error" ? "error" : "idle"}
+            </span>
+            <span className="text-white/40 text-[11px] ml-2">dbg P:{(providerData?.products || payload?.products || []).length} M:{(overlay?.items?.length) || (overlay ? 1 : 0)}</span>
+            <span className="text-white/50">code <span className="text-white">{pairCode}</span></span>
+            <span className="text-white/50">{orientation}</span>
+          </div>
         </div>
-      </div>
+      ) : null}
 
       {voiceError ? (
         <div className="px-4 py-2 border-b border-white/10 bg-red-500/10 text-[11px] text-red-200 font-mono uppercase tracking-wider">
@@ -537,70 +655,7 @@ export default function SignagePlayer() {
       ) : null}
 
       {voiceTranscript ? (
-        <div className="px-4 py-2 border-b border-white/10 bg-white/5 text-[11px] text-white/60 font-mono uppercase tracking-wider truncate">
-          heard: {voiceTranscript}
-        </div>
-      ) : null}
-
-      {(currentToken || queuePreview.length > 0 || notices.length > 0) ? (
-        <div className="absolute inset-x-3 bottom-3 z-20 pointer-events-none">
-          <div className="grid gap-3 md:grid-cols-2">
-            {(currentToken || queuePreview.length > 0) ? (
-              <div className="pointer-events-auto rounded-2xl border border-emerald-400/20 bg-black/70 backdrop-blur-md shadow-[0_16px_60px_-30px_rgba(0,0,0,0.75)] p-4">
-                <div className="flex items-center justify-between gap-3 mb-3">
-                  <div>
-                    <div className="text-[10px] uppercase tracking-[0.25em] text-emerald-300/80">Live queue</div>
-                    <div className="text-white font-semibold text-sm">Current token processing</div>
-                  </div>
-                  <div className="text-[11px] text-white/50 uppercase tracking-wider">{queuePreview.length} waiting</div>
-                </div>
-                {currentToken ? (
-                  <div className="mb-3 rounded-xl border border-emerald-400/20 bg-emerald-400/10 px-4 py-3 flex items-center justify-between gap-3">
-                    <div>
-                      <div className="text-[10px] uppercase tracking-[0.2em] text-emerald-200/80">Now processing</div>
-                      <div className="font-display text-2xl font-extrabold tracking-tight text-white">Token #{currentToken.token}</div>
-                      <div className="text-xs text-white/70 mt-1">{currentToken.service_name || currentToken.patient_name || "Queue item"}</div>
-                    </div>
-                    <div className="text-right text-xs text-white/60">
-                      <div>{currentToken.service_duration_mins || 0} min</div>
-                      <div className="mt-1">+{currentToken.wait_after_mins || 0}m wait</div>
-                    </div>
-                  </div>
-                ) : null}
-                {queuePreview.length > 1 ? (
-                  <div className="grid gap-2 max-h-32 overflow-auto pr-1">
-                    {queuePreview.slice(1, 6).map((item) => (
-                      <div key={`${item.token}-${item.wait_after_mins}`} className="rounded-lg border border-white/10 bg-white/5 px-3 py-2 flex items-center justify-between text-xs text-white/75">
-                        <span className="font-semibold">Token #{item.token}</span>
-                        <span className="text-white/50">{item.service_name || "Service"} · {item.wait_after_mins || 0}m</span>
-                      </div>
-                    ))}
-                  </div>
-                ) : null}
-              </div>
-            ) : null}
-
-            {notices.length > 0 ? (
-              <div className="pointer-events-auto rounded-2xl border border-white/10 bg-black/70 backdrop-blur-md shadow-[0_16px_60px_-30px_rgba(0,0,0,0.75)] p-4">
-                <div className="flex items-center justify-between gap-3 mb-3">
-                  <div>
-                    <div className="text-[10px] uppercase tracking-[0.25em] text-white/50">Notices</div>
-                    <div className="text-white font-semibold text-sm">Resident announcements</div>
-                  </div>
-                  <div className="text-[11px] text-white/50 uppercase tracking-wider">{notices.length} active</div>
-                </div>
-                <div className="grid gap-2 max-h-40 overflow-auto pr-1">
-                  {notices.slice(0, 5).map((n) => (
-                    <div key={n.id} className="rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-xs text-white/75">
-                      <div className="font-semibold text-white">{n.title || "Notice"}</div>
-                      <div className="text-white/60 mt-1 line-clamp-2">{n.body || ""}</div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            ) : null}
-          </div>
-        </div>
+        null
       ) : null}
 
       {overlay ? (
@@ -650,38 +705,89 @@ export default function SignagePlayer() {
         </div>
       ) : (
         <div className="flex-1 relative min-h-0 bg-black overflow-hidden">
-          <div className={`absolute ${orientation === "portrait" ? "" : "inset-0 p-1"}`} style={contentStyle}>
+          <div className={`absolute ${orientation === "portrait" ? "" : "inset-0"}`} style={contentStyle}>
             {hasAbsoluteLayout ? (
               <div className="relative w-full h-full overflow-hidden bg-black">
                 {zoneEntries.map(({ zone, items }) => {
-                  // Use swapped canvas dimensions when in portrait mode so
-                  // absolute zone coordinates map correctly after rotation.
+                  const queueZone = isQueueZone(zone);
+                  const isTickerZone = /ticker/i.test(`${zone.id} ${zone.name}`);
+                  const logoZone = isLogoZone(zone);
                   const rawLeft = ((Number(zone.x) || 0) / canvasWidth) * 100;
                   const rawTop = ((Number(zone.y) || 0) / canvasHeight) * 100;
                   const rawWidth = ((Number(zone.width_px) || canvasWidth) / canvasWidth) * 100;
                   const rawHeight = ((Number(zone.height_px) || canvasHeight) / canvasHeight) * 100;
-                  // clamp values to viewport to avoid zones overflowing
-                  const left = Math.max(0, Math.min(100, rawLeft));
-                  const top = Math.max(0, Math.min(100, rawTop));
-                  const width = Math.max(0, Math.min(100, rawWidth, 100 - left));
-                  const height = Math.max(0, Math.min(100, rawHeight, 100 - top));
-                  const isTickerZone = /ticker/i.test(`${zone.id} ${zone.name}`);
+                  // Clamp values to viewport and apply queue safe-area guardrails for cleaner signage composition.
+                  const clampedLeft = Math.max(0, Math.min(100, rawLeft));
+                  const clampedTop = Math.max(0, Math.min(100, rawTop));
+                  const clampedWidth = Math.max(0, Math.min(100, rawWidth, 100 - clampedLeft));
+                  const clampedHeight = Math.max(0, Math.min(100, rawHeight, 100 - clampedTop));
+
+                  let left = clampedLeft;
+                  let top = clampedTop;
+                  let width = clampedWidth;
+                  let height = clampedHeight;
+
+                  if (orientation !== "portrait" && queueZone) {
+                    const rightEdge = Math.min(100, clampedLeft + clampedWidth);
+                    const targetWidth = Math.min(36, Math.max(28, clampedWidth));
+                    const targetHeight = Math.min(78, Math.max(44, clampedHeight));
+                    width = Math.min(targetWidth, rightEdge);
+                    height = Math.min(targetHeight, 99 - clampedTop);
+                    left = queueSidebarLeft != null
+                      ? queueSidebarLeft
+                      : Math.max(0, Math.min(99 - width, rightEdge - width));
+                    top = Math.max(1, Math.min(clampedTop, 99 - height));
+                  }
+
+                  if (orientation !== "portrait" && queueSidebarLeft != null && !queueZone && !isTickerZone) {
+                    const safeRightEdge = Math.max(0, queueSidebarLeft - 0.8);
+                    const zoneRight = left + width;
+                    if (zoneRight > safeRightEdge) {
+                      width = Math.max(0, safeRightEdge - left);
+                    }
+                  }
+
+                  const zoneZIndex = Number.isFinite(Number(zone?.z_index))
+                    ? Number(zone.z_index)
+                    : (isTickerZone ? 60 : queueZone ? 45 : 20);
                   return (
                     <div
                       key={zone.id}
-                      className="absolute overflow-hidden bg-black"
-                      style={{ left: `${left}%`, top: `${top}%`, width: `${width}%`, height: `${height}%` }}
+                      className={`absolute overflow-hidden ${queueZone ? "bg-transparent" : "bg-black"}`}
+                      style={{ left: `${left}%`, top: `${top}%`, width: `${width}%`, height: `${height}%`, zIndex: zoneZIndex }}
                     >
-                      {isTickerZone ? <TickerSlot items={items} label={zone.name} /> : <MediaSlot items={items} label={zone.name} />}
+                      {queueZone ? (
+                        <QueueBoard deviceName={payload.device_name} queuePreview={queuePreview} notices={notices} />
+                      ) : isTickerZone ? (
+                        <TickerSlot items={items} label={zone.name} />
+                      ) : logoZone && items.length === 0 && clientLogoUrl ? (
+                        <div className="w-full h-full flex items-center justify-center bg-black p-4">
+                          <div className="w-full h-full rounded-[1.5rem] border border-white/10 bg-white/5 flex items-center justify-center overflow-hidden">
+                            <img src={clientLogoUrl} alt={`${payload.device_name || "client"} logo`} className="max-h-[75%] max-w-[75%] object-contain" />
+                          </div>
+                        </div>
+                      ) : (
+                        <MediaSlot items={items} label={zone.name} />
+                      )}
                     </div>
                   );
                 })}
               </div>
             ) : (
-              <div className="grid gap-1 w-full h-full min-h-0" style={gridStyle}>
+              <div className="grid gap-0 w-full h-full min-h-0" style={gridStyle}>
                 {zoneEntries.map(({ zone, items }) => (
                   <div key={zone.id} className="bg-black overflow-hidden relative min-h-[160px]">
-                    {/ticker/i.test(`${zone.id} ${zone.name}`) ? <TickerSlot items={items} label={zone.name} /> : <MediaSlot items={items} label={zone.name} />}
+                    {isQueueZone(zone) ? (
+                      <QueueBoard deviceName={payload.device_name} queuePreview={queuePreview} notices={notices} />
+                    ) : /ticker/i.test(`${zone.id} ${zone.name}`) ? (
+                      <TickerSlot items={items} label={zone.name} />
+                    ) : isLogoZone(zone) && items.length === 0 && clientLogoUrl ? (
+                      <div className="w-full h-full flex items-center justify-center bg-black p-4">
+                        <div className="w-full h-full rounded-[1.5rem] border border-white/10 bg-white/5 flex items-center justify-center overflow-hidden">
+                          <img src={clientLogoUrl} alt={`${payload.device_name || "client"} logo`} className="max-h-[75%] max-w-[75%] object-contain" />
+                        </div>
+                      </div>
+                    ) : <MediaSlot items={items} label={zone.name} />}
                   </div>
                 ))}
               </div>

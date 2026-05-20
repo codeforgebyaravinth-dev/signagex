@@ -28,14 +28,25 @@ function ServicePanel({ vertical, label, icon: Icon }) {
   const bookingCta = label === "Salon" ? "Book service" : "Book appointment";
   const services = Array.isArray(profile.services) ? profile.services : [];
 
+  const sortAppointments = useCallback((appointments = []) => {
+    const rank = (status) => ({ called: 0, pending: 1, done: 2, cancelled: 3 }[status || ""] ?? 9);
+    return [...appointments].sort((a, b) => {
+      const statusDelta = rank(a.status) - rank(b.status);
+      if (statusDelta !== 0) return statusDelta;
+      const tokenDelta = Number(a.token || 0) - Number(b.token || 0);
+      if (tokenDelta !== 0) return tokenDelta;
+      return String(a.created_at || "").localeCompare(String(b.created_at || ""));
+    });
+  }, []);
+
   const load = useCallback(async () => {
     try {
       const [m, a] = await Promise.all([api.get("/client/me"), api.get(`/client/${vertical}/appointments`)]);
       setMe(m.data);
-      setApts(a.data);
+      setApts(sortAppointments(a.data));
       if (m.data[profileKey]) setProfile({ ...emptyProfile, ...m.data[profileKey], services: Array.isArray(m.data[profileKey].services) ? m.data[profileKey].services : [] });
     } catch {}
-  }, [profileKey, vertical, emptyProfile]);
+  }, [profileKey, vertical, emptyProfile, sortAppointments]);
   useEffect(() => { load(); }, [load]);
 
   const save = async () => {

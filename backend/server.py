@@ -313,6 +313,9 @@ def now_iso(): return datetime.now(timezone.utc).isoformat()
 def clean(d): d.pop("_id", None); d.pop("password_hash", None); return d
 def gen_pair_code(): return str(uuid.uuid4().int)[:6]
 
+def _appointment_status_rank(status: str) -> int:
+    return {"called": 0, "pending": 1, "done": 2, "cancelled": 3}.get(status or "", 9)
+
 async def gen_dealer_code() -> str:
     """Generate next dealer code like RP-D101, RP-D102, etc."""
     counter = await db.counters.find_one_and_update(
@@ -556,7 +559,9 @@ async def create_client(body: ClientCreate, user: dict = Depends(require_role("d
     email = body.email.lower()
     if await db.clients.find_one({"email": email}) or await db.users.find_one({"email": email}):
         raise HTTPException(status_code=400, detail="Email already exists")
-    valid = set([t["id"] for t in await db.templates.find({"assigned_dealer_ids": user["id"]}, {"_id": 0, "id": 1}).to_list(1000)])
+    # allow templates explicitly assigned to the dealer OR unassigned (global starter templates)
+    dealer_tpl_filter = {"$or": [{"assigned_dealer_ids": user["id"]}, {"assigned_dealer_ids": {"$exists": True, "$size": 0}}, {"assigned_dealer_ids": {"$exists": False}}]}
+    valid = set([t["id"] for t in await db.templates.find(dealer_tpl_filter, {"_id": 0, "id": 1}).to_list(1000)])
     safe = [t for t in body.assigned_template_ids if t in valid]
     client_code = await gen_client_code()
     doc = {"id": str(uuid.uuid4()), "name": body.name, "email": email,
@@ -577,7 +582,8 @@ async def update_client(cid: str, body: ClientUpdate, user: dict = Depends(requi
     # only allow specific status transitions by dealer
     if body.status and body.status not in ("active", "suspended"): upd.pop("status", None)
     if body.assigned_template_ids is not None:
-        valid = set([t["id"] for t in await db.templates.find({"assigned_dealer_ids": user["id"]}, {"_id": 0, "id": 1}).to_list(1000)])
+        dealer_tpl_filter = {"$or": [{"assigned_dealer_ids": user["id"]}, {"assigned_dealer_ids": {"$exists": True, "$size": 0}}, {"assigned_dealer_ids": {"$exists": False}}]}
+        valid = set([t["id"] for t in await db.templates.find(dealer_tpl_filter, {"_id": 0, "id": 1}).to_list(1000)])
         upd["assigned_template_ids"] = [t for t in body.assigned_template_ids if t in valid]
     if not upd: raise HTTPException(status_code=400, detail="Nothing to update")
     r = await db.clients.find_one_and_update({"id": cid, "dealer_id": user["id"]}, {"$set": upd}, return_document=True, projection={"_id": 0, "password_hash": 0})
@@ -603,7 +609,9 @@ async def credit_client(cid: str, body: CreditIn, user: dict = Depends(require_r
 
 @api.get("/dealer/templates")
 async def list_my_templates(user: dict = Depends(require_role("dealer"))):
-    return await db.templates.find({"assigned_dealer_ids": user["id"]}, {"_id": 0}).to_list(1000)
+    # return templates assigned to this dealer, plus any unassigned (global) starter templates
+    dealer_tpl_filter = {"$or": [{"assigned_dealer_ids": user["id"]}, {"assigned_dealer_ids": {"$exists": True, "$size": 0}}, {"assigned_dealer_ids": {"$exists": False}}]}
+    return await db.templates.find(dealer_tpl_filter, {"_id": 0}).to_list(1000)
 
 @api.get("/dealer/devices")
 async def list_dealer_devices(user: dict = Depends(require_role("dealer"))):
@@ -616,7 +624,9 @@ async def list_dealer_devices(user: dict = Depends(require_role("dealer"))):
 @api.get("/dealer/stats")
 async def dealer_stats(user: dict = Depends(require_role("dealer"))):
     clients_count = await db.clients.count_documents({"dealer_id": user["id"]})
-    templates_count = await db.templates.count_documents({"assigned_dealer_ids": user["id"]})
+    # count templates assigned to dealer or unassigned (global)
+    dealer_tpl_filter = {"$or": [{"assigned_dealer_ids": user["id"]}, {"assigned_dealer_ids": {"$exists": True, "$size": 0}}, {"assigned_dealer_ids": {"$exists": False}}]}
+    templates_count = await db.templates.count_documents(dealer_tpl_filter)
     client_ids = [c["id"] for c in await db.clients.find({"dealer_id": user["id"]}, {"_id": 0, "id": 1}).to_list(2000)]
     devices_count = await db.devices.count_documents({"client_id": {"$in": client_ids}})
     p = [{"$match": {"dealer_id": user["id"]}}, {"$group": {"_id": None, "total": {"$sum": "$wallet_balance"}}}]
@@ -791,7 +801,15 @@ async def _update_service_profile(vertical: str, body: DoctorProfile, user: dict
 
 
 async def _list_service_appointments(user: dict):
-    return await db.appointments.find({"client_id": user["id"]}, {"_id": 0}).sort("created_at", -1).to_list(500)
+    appointments = await db.appointments.find({"client_id": user["id"]}, {"_id": 0}).to_list(500)
+    return sorted(
+        appointments,
+        key=lambda item: (
+            _appointment_status_rank(item.get("status")),
+            int(item.get("token") or 0),
+            item.get("created_at") or "",
+        ),
+    )
 
 
 async def _set_service_appointment_status(aid: str, status: str, user: dict):
@@ -928,11 +946,11 @@ async def _public_service_profile(cid: str):
         profile_field = _service_profile_field(vertical)
         profile = _normalize_service_catalog(c.get(profile_field, {}), vertical)
         today = datetime.now(timezone.utc).date().isoformat()
-        pending_filter = {"client_id": cid, "status": "pending", "date": today}
-        pending = await db.appointments.find(pending_filter, {"_id": 0}).sort([("token", 1), ("created_at", 1)]).to_list(50)
+        active_filter = {"client_id": cid, "status": {"$in": ["called", "pending"]}, "date": today}
+        active = await db.appointments.find(active_filter, {"_id": 0}).sort([("token", 1), ("created_at", 1)]).to_list(50)
         queue_minutes = 0
         queue_preview = []
-        for item in pending:
+        for item in active:
             duration = int(item.get("service_duration_mins") or profile.get("slot_minutes", 15) or 15)
             queue_preview.append({
                 "token": item.get("token"),
@@ -940,13 +958,14 @@ async def _public_service_profile(cid: str):
                 "service_duration_mins": duration,
                 "preferred_time": item.get("preferred_time", ""),
                 "source": item.get("source", "public"),
+                "status": item.get("status", "pending"),
                 "wait_after_mins": queue_minutes,
             })
             queue_minutes += max(5, duration)
         return {
             **base,
             "profile": profile,
-            "queue_length": len(pending),
+            "queue_length": len(active),
             "queue_total_minutes": queue_minutes,
             "queue_preview": queue_preview[:8],
         }
@@ -985,7 +1004,13 @@ async def _book_service(cid: str, body: AppointmentCreate, source: Optional[str]
     profile = _normalize_service_catalog(c.get(_service_profile_field(c.get("vertical", "doctor")), {}), c.get("vertical", "doctor"))
     service = await _resolve_service_snapshot(profile, body)
     today = datetime.now(timezone.utc).date().isoformat()
-    token = await db.appointments.count_documents({"client_id": cid, "date": today}) + 1
+    counter = await db.counters.find_one_and_update(
+        {"_id": f"appointment_token:{cid}:{today}"},
+        {"$inc": {"next": 1}},
+        upsert=True,
+        return_document=True,
+    )
+    token = int(counter.get("next", 1))
     doc = {
         "id": str(uuid.uuid4()),
         "client_id": cid,

@@ -31,13 +31,17 @@ const extractZonesFromTemplate = (template) => {
   if (!template) return [];
   const layoutZones = template.layout?.zones || [];
   if (Array.isArray(layoutZones) && layoutZones.length > 0) {
-    return layoutZones.map(z => ({ id: z.id || z.name?.toLowerCase().replace(/\s+/g, '_'), name: z.name || z.id }));
+    return layoutZones.map((z) => ({
+      id: z.id || z.name?.toLowerCase().replace(/\s+/g, '_'),
+      name: z.name || z.id,
+      role: z.role || z.type || "",
+    }));
   }
   const layout = template.layout || {};
   const legacyZones = [];
-  if (layout.main) legacyZones.push({ id: "main", name: layout.main || "Main" });
-  if (layout.sidebar) legacyZones.push({ id: "sidebar", name: layout.sidebar || "Sidebar" });
-  if (layout.ticker) legacyZones.push({ id: "ticker", name: layout.ticker || "Ticker" });
+  if (layout.main) legacyZones.push({ id: "main", name: layout.main || "Main", role: "" });
+  if (layout.sidebar) legacyZones.push({ id: "sidebar", name: layout.sidebar || "Sidebar", role: "" });
+  if (layout.ticker) legacyZones.push({ id: "ticker", name: layout.ticker || "Ticker", role: "ticker" });
   return legacyZones.length > 0 ? legacyZones : [];
 };
 
@@ -68,7 +72,11 @@ const remapLegacyItemsToZones = (zoneDefs, existingZoneItems = {}) => {
   return nextZoneItems;
 };
 
-const isTickerZone = (zone) => /ticker/i.test(`${zone?.id || ""} ${zone?.name || ""}`);
+const isTickerZone = (zone) => zone?.role === "ticker" || /ticker/i.test(`${zone?.id || ""} ${zone?.name || ""}`);
+const isQueueZone = (zone) => zone?.role === "queue" || /queue|token/i.test(`${zone?.id || ""} ${zone?.name || ""}`);
+const isLogoZone = (zone) => zone?.role === "logo" || /logo|brand/i.test(`${zone?.id || ""} ${zone?.name || ""}`);
+
+const isAutoZone = (zone) => isQueueZone(zone);
 
 function ZonePicker({ media, items, setItems }) {
   const [addType, setAddType] = useState(""); // for managing add dialog
@@ -330,6 +338,9 @@ export default function ClientPlaylists() {
     const zones = tpl ? extractZonesFromTemplate(tpl) : FALLBACK_TEMPLATE.layout.zones;
     const { ticker_messages: existingTickerMessages, ...zoneSource } = existingZoneItems || {};
     const nextZoneItems = remapLegacyItemsToZones(zones, zoneSource);
+    zones.forEach((zone) => {
+      if (isAutoZone(zone)) nextZoneItems[zone.id] = [];
+    });
     const nextTickerMessages = Array.isArray(existingTickerMessages) ? existingTickerMessages : Array.isArray(zoneSource.ticker) ? zoneSource.ticker : [];
     delete nextZoneItems.ticker;
     setForm((prev) => ({ ...prev, template_id: templateId, zone_items: nextZoneItems, ticker_messages: nextTickerMessages }));
@@ -475,7 +486,7 @@ export default function ClientPlaylists() {
                 {zoneDefs.map((zone) => (
                   <TabsTrigger key={zone.id} value={zone.id} className="rounded-sm data-[state=active]:bg-[#111827] data-[state=active]:text-white" data-testid={`zone-tab-${zone.id}`}>
                     {zone.name}
-                    <span className="ml-2 text-[10px] font-mono opacity-70">{isTickerZone(zone) ? (form.ticker_messages || []).length : (form.zone_items?.[zone.id] || []).length}</span>
+                      <span className="ml-2 text-[10px] font-mono opacity-70">{isTickerZone(zone) ? (form.ticker_messages || []).length : isAutoZone(zone) ? "auto" : (form.zone_items?.[zone.id] || []).length}</span>
                   </TabsTrigger>
                 ))}
               </TabsList>
@@ -486,6 +497,14 @@ export default function ClientPlaylists() {
                       items={form.ticker_messages || []}
                       setItems={(nextItems) => setForm({ ...form, ticker_messages: nextItems })}
                     />
+                  ) : isAutoZone(zone) ? (
+                    <div className="rounded-sm border border-dashed border-[#D1D5DB] bg-[#F9FAFB] p-4 text-sm text-[#6B7280]">
+                      <div className="font-semibold text-[#111827]">Automatic queue zone</div>
+                      <p className="mt-1">
+                        This zone is filled by the player using the live queue, showing the current token and the next tokens automatically.
+                        No manual media items are needed here.
+                      </p>
+                    </div>
                   ) : (
                     <ZonePicker
                       media={media}
