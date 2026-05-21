@@ -10,6 +10,47 @@ function getMediaFit(item) {
   return item?.fit === "contain" ? "object-contain" : "object-cover";
 }
 
+function escapeRegExp(string) {
+  return string.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function wordBoundaryIncludes(haystack, needle) {
+  if (!needle) return false;
+  try {
+    const re = new RegExp(`\\b${escapeRegExp(needle)}\\b`, "i");
+    return re.test(haystack);
+  } catch (e) {
+    return haystack.includes(needle);
+  }
+}
+
+function normalizeRoomToken(s) {
+  if (!s) return "";
+  return String(s).toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+function levenshtein(a, b) {
+  if (!a || !b) return Math.max(a?.length || 0, b?.length || 0);
+  const m = a.length, n = b.length;
+  const dp = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0));
+  for (let i = 0; i <= m; i++) dp[i][0] = i;
+  for (let j = 0; j <= n; j++) dp[0][j] = j;
+  for (let i = 1; i <= m; i++) {
+    for (let j = 1; j <= n; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      dp[i][j] = Math.min(dp[i - 1][j] + 1, dp[i][j - 1] + 1, dp[i - 1][j - 1] + cost);
+    }
+  }
+  return dp[m][n];
+}
+
+function similarityScore(a, b) {
+  if (!a || !b) return 0;
+  const la = a.length, lb = b.length;
+  const dist = levenshtein(a, b);
+  return Math.max(0, 1 - dist / Math.max(la, lb));
+}
+
 function isImageItem(item) {
   return item?.kind === "image" || (item?.content_type || "").startsWith("image/") || /\.(png|jpe?g|webp|gif|bmp|svg)$/i.test(item?.url || item?.name || "");
 }
@@ -44,6 +85,17 @@ function MediaSlot({ items, label }) {
   const cur = items[idx];
   if (!cur) return null;
 
+  const resolveSrc = (it) => {
+    const candidate = it?.url || it?.image_url || it?.public_url || it?.media_url || (it?.media_id ? `/api/media/${it.media_id}` : "");
+    if (!candidate) return "";
+    // if it's already absolute, return as-is
+    if (/^https?:\/\//i.test(candidate) || /^data:/i.test(candidate)) return candidate;
+    // ensure leading slash
+    const pref = BASE || "";
+    if (candidate.startsWith("/")) return `${pref}${candidate}`;
+    return `${pref}/${candidate}`;
+  };
+
   const getYoutubeId = (url) => {
     const regex = /(?:youtube\.com\/watch\?v=|youtu\.be\/)([\w-]+)/;
     const match = url?.match(regex);
@@ -72,29 +124,29 @@ function MediaSlot({ items, label }) {
       </div>
     ) : (cur.type === "media" || cur.media_id) ? (
       isImageItem(cur) ? (
-        <img src={`${BASE}${cur.url}`} alt={cur.name} className={`w-full h-full ${getMediaFit(cur)} object-center bg-black`} onError={handleMediaEnd} />
+        <img src={resolveSrc(cur)} alt={cur.name} className={`w-full h-full ${getMediaFit(cur)} object-center bg-black`} onError={(e) => { console.error('Media load error', resolveSrc(cur), e); handleMediaEnd(); }} />
       ) : (
         <video
-          src={`${BASE}${cur.url}`}
+          src={resolveSrc(cur)}
           autoPlay
           muted
           playsInline
           className={`w-full h-full ${getMediaFit(cur)} object-center bg-black`}
           onEnded={handleMediaEnd}
-          onError={handleMediaEnd}
+          onError={(e) => { console.error('Media load error', resolveSrc(cur), e); handleMediaEnd(); }}
         />
       )
     ) : isImageItem(cur) ? (
-      <img src={`${BASE}${cur.url}`} alt={cur.name} className={`w-full h-full ${getMediaFit(cur)} object-center bg-black`} onError={handleMediaEnd} />
+      <img src={resolveSrc(cur)} alt={cur.name} className={`w-full h-full ${getMediaFit(cur)} object-center bg-black`} onError={(e) => { console.error('Media load error', resolveSrc(cur), e); handleMediaEnd(); }} />
     ) : (
       <video
-        src={`${BASE}${cur.url}`}
+        src={resolveSrc(cur)}
         autoPlay
         muted
         playsInline
         className={`w-full h-full ${getMediaFit(cur)} object-center bg-black`}
         onEnded={handleMediaEnd}
-        onError={handleMediaEnd}
+        onError={(e) => { console.error('Media load error', resolveSrc(cur), e); handleMediaEnd(); }}
       />
     );
 
@@ -251,6 +303,7 @@ export default function SignagePlayer() {
   const [payload, setPayload] = useState(null);
   const [providerData, setProviderData] = useState(null);
   const [err, setErr] = useState("");
+  const lastGreetSpokenRef = useRef(0);
   const wrapRef = useRef(null);
   const recogRef = useRef(null);
   const [overlay, setOverlay] = useState(null); // single: {title,image,description,meta,type} | multi: {title,type,items[]}
@@ -260,6 +313,7 @@ export default function SignagePlayer() {
   const [voiceState, setVoiceState] = useState("idle");
   const [voiceError, setVoiceError] = useState("");
   const [voiceTranscript, setVoiceTranscript] = useState("");
+  const voiceGreetingPlayedRef = useRef(false);
   const [showSplash, setShowSplash] = useState(true);
   const [showHud, setShowHud] = useState(false);
   const hudTimerRef = useRef(null);
@@ -274,6 +328,7 @@ export default function SignagePlayer() {
     try {
       const { data } = await axios.get(`${BASE}/api/public/player/${pairCode}`);
       setPayload(data);
+      try { console.debug("player-payload", data); } catch (e) {}
       setErr("");
     } catch (e) {
       setErr(e.response?.data?.detail || "Could not load");
@@ -320,6 +375,25 @@ export default function SignagePlayer() {
       clearInterval(id);
     };
   }, [payload?.client_id]);
+
+  // show subscription-required overlay if provider subscription inactive
+  useEffect(() => {
+    if (!providerData) return;
+    try {
+      const sub = providerData.subscription;
+      if (sub && sub.active === false) {
+        if (!overlayKeyRef.current) {
+          setOverlay({ title: "Subscription required", description: "This signage requires an active subscription to run.", type: "subscription_required", takeover: true });
+          overlayKeyRef.current = "subscription_required";
+        }
+      } else {
+        if (overlayKeyRef.current === "subscription_required") {
+          overlayKeyRef.current = "";
+          setOverlay(null);
+        }
+      }
+    } catch (e) {}
+  }, [providerData]);
 
   // continuous voice listening and matching across verticals
   useEffect(() => {
@@ -397,20 +471,38 @@ export default function SignagePlayer() {
       }
 
       const normTranscript = normalize(transcript);
-      const match = catalog.find((c) => {
-        const n = c.name || "";
-        const keywords = Array.isArray(c.keywords) ? c.keywords : (n ? n.split(/\s+/).filter(Boolean) : []);
-        if (!n && keywords.length === 0) return false;
-        // direct name include
-        if (n && normTranscript.includes(n)) return true;
-        // keywords/tags include
-        if (keywords.some((k) => k && normTranscript.includes(k))) return true;
-        // fallback to token-by-token match against name
-        const tokens = n.split(/\s+/).filter(Boolean);
-        return tokens.some((t) => t && normTranscript.includes(t));
-      });
 
       const productCatalog = catalog.filter((c) => c.type === "product");
+      // If user greets the player (hello/hi), respond via TTS and show a small product group
+      try {
+        const greetingRE = /\b(hello|hi|hey)\b/i;
+        const isGreeting = greetingRE.test(normTranscript);
+        if (isGreeting && productCatalog.length > 0 && (Date.now() - (lastGreetSpokenRef.current || 0) > 30_000)) {
+          lastGreetSpokenRef.current = Date.now();
+          try {
+            if (typeof window !== "undefined" && window.speechSynthesis) {
+              const u = new SpeechSynthesisUtterance("Hello — I'll fetch some products for you");
+              u.lang = navigator.language || "en-US";
+              window.speechSynthesis.cancel();
+              window.speechSynthesis.speak(u);
+            }
+          } catch (e) {}
+          // show up to 5 products (rotate cursor)
+          const start = genericProductCursorRef.current % productCatalog.length;
+          const count = Math.min(5, productCatalog.length);
+          const items = new Array(count).fill(0).map((_, i) => {
+            const p = productCatalog[(start + i) % productCatalog.length];
+            return { id: p.id, name: p.meta?.name || p.name, image: p.image || p.meta?.image_url || "", description: p.desc || p.meta?.description || "", price: p.meta?.price };
+          });
+          genericProductCursorRef.current = (genericProductCursorRef.current + count) % Math.max(1, productCatalog.length);
+          const groupKey = `greet:products:${items.map((p) => p.id || p.name).join("|")}`;
+          setOverlay({ title: "Products", type: "product_group", items });
+          overlayKeyRef.current = groupKey;
+          if (overlayTimer.current) clearTimeout(overlayTimer.current);
+          overlayTimer.current = setTimeout(() => { overlayKeyRef.current = ""; setOverlay(null); }, 30_000);
+          return;
+        }
+      } catch (e) {}
       const queryTerms = normTranscript
         .split(/\s+/)
         .map((w) => w.trim())
@@ -420,10 +512,93 @@ export default function SignagePlayer() {
         const nameTokens = (p.name || "").split(/\s+/).map((t) => singular(t));
         const tagTokens = Array.isArray(p.tags) ? p.tags.map((t) => singular(normalize(t))) : [];
         const keywordTokens = Array.isArray(p.keywords) ? p.keywords.map((t) => singular(t)) : [];
-        const pTokens = Array.from(new Set([...nameTokens, ...tagTokens, ...keywordTokens]));
+        const pTokens = Array.from(new Set([...(nameTokens || []), ...tagTokens, ...keywordTokens]));
         return queryTerms.some((q) => pTokens.includes(singular(q)));
       });
       const wantsCollection = groupedProducts.length > 0 && /\b(show|shows|all|list|display|browse)\b/.test(normTranscript);
+
+      // If the user said a category (like "maxi") and multiple products match, show the full product group takeover.
+      if (groupedProducts.length > 1 && queryTerms.length > 0) {
+        const qtSet = new Set(queryTerms.map((q) => singular(q)));
+        const groupMatch = groupedProducts.filter((p) => {
+          const tokens = (p.name || "").split(/\s+/).map((t) => singular(t));
+          return tokens.some((t) => qtSet.has(t));
+        });
+        if (groupMatch.length > 0) {
+          const items = groupMatch.map((p) => ({ id: p.id, name: p.meta?.name || p.name, image: p.image || p.meta?.image_url || "", description: p.desc || p.meta?.description || "", price: p.meta?.price }));
+          const groupKey = `group:product:${queryTerms.join("-")}:${items.map((p) => p.id || p.name).join("|")}`;
+          if (overlayKeyRef.current === groupKey) return;
+          setOverlay({ title: queryTerms.length ? `Showing ${queryTerms.join(" ")}` : "Products", type: "product_group", items, takeover: true });
+          overlayKeyRef.current = groupKey;
+          if (overlayTimer.current) clearTimeout(overlayTimer.current);
+          overlayTimer.current = setTimeout(() => { overlayKeyRef.current = ""; setOverlay(null); }, 30_000);
+          return;
+        }
+      }
+
+      // Scored matching with word-boundary checks and fuzzy fallback to avoid accidental substring matches (eg A 01 vs A 201)
+      const scored = catalog.map((c) => {
+        const n = (c.name || "").toLowerCase();
+        let score = 0;
+        if (n && normTranscript === n) score += 200;
+        if (n && wordBoundaryIncludes(normTranscript, n)) score += 120;
+        // boost resident name exact matches strongly
+        if (c.type === "room_resident" && c.name && wordBoundaryIncludes(normTranscript, (c.name || "").toLowerCase())) score += 220;
+        // normalize room numbers and prefer exact normalized match (A01 vs A201)
+        if (c.type === "room_no") {
+          const normRoom = normalizeRoomToken(c.name || "");
+          const normTranscriptToken = normalizeRoomToken(normTranscript);
+          if (normRoom && normTranscriptToken && normRoom === normTranscriptToken) score += 240;
+          // if transcript contains the room token as word-boundary
+          if (normRoom && normTranscriptToken && normTranscript.includes((c.name || "").toLowerCase())) score += 80;
+        }
+        // product-specific boosts to avoid mis-mapping
+        if (c.type === "product") {
+          // exact name
+          if (n && normTranscript === n) score += 220;
+          // sku exact match if available
+          const sku = (c.meta?.sku || "").toLowerCase();
+          if (sku && normTranscript.includes(sku)) score += 300;
+          // tag matches
+          const tagMatches = (c.tags || []).reduce((s, t) => s + (wordBoundaryIncludes(normTranscript, normalize(t)) ? 1 : 0), 0);
+          score += tagMatches * 40;
+        }
+        const tokens = n.split(/\s+/).filter(Boolean);
+        const tokenMatches = tokens.reduce((s, t) => s + (wordBoundaryIncludes(normTranscript, t) ? 1 : 0), 0);
+        score += tokenMatches * 20;
+        const kwMatches = (c.keywords || []).reduce((s, k) => s + (wordBoundaryIncludes(normTranscript, k) ? 1 : 0), 0);
+        score += kwMatches * 15;
+        const sim = similarityScore(normTranscript, n);
+        score += sim * 50;
+        return { item: c, score };
+      }).sort((a, b) => b.score - a.score);
+
+      const best = scored[0];
+      let match = best && best.score > 40 ? best.item : null;
+      // require a slightly stronger score for product matches to avoid accidental cross-products
+      if (match && match.type === "product" && best.score < 55) {
+        match = null;
+      }
+      // If top two product matches have close scores, show a product group overlay instead of picking one
+      const second = scored[1];
+      if (best && second && best.item && second.item && best.item.type === "product" && second.item.type === "product") {
+        const scoreDelta = (best.score || 0) - (second.score || 0);
+        if (scoreDelta < 40) {
+          // collect top similar product items
+          const topProducts = scored.filter(s => s.item && s.item.type === "product" && s.score > 30).slice(0, 6).map(s => s.item);
+          if (topProducts.length > 1) {
+            const items = topProducts.map((p) => ({ id: p.id, name: p.meta?.name || p.name, image: p.image || p.meta?.image_url || "", description: p.desc || p.meta?.description || "", price: p.meta?.price }));
+            const groupKey = `tiebreak:products:${items.map((p) => p.id || p.name).join("|")}`;
+            if (overlayKeyRef.current !== groupKey) {
+              setOverlay({ title: "Multiple products", type: "product_group", items, takeover: true });
+              overlayKeyRef.current = groupKey;
+              if (overlayTimer.current) clearTimeout(overlayTimer.current);
+              overlayTimer.current = setTimeout(() => { overlayKeyRef.current = ""; setOverlay(null); }, 30_000);
+            }
+            match = null;
+          }
+        }
+      }
 
       // debug information for voice matching
       try {
@@ -508,12 +683,46 @@ export default function SignagePlayer() {
           overlayKeyRef.current = "";
           setOverlay(null);
         }, 30_000);
+        try {
+          // speak owner/room name for accessibility and convenience
+          if (typeof window !== "undefined" && window.speechSynthesis) {
+            const spokenKey = `spoken:${resolvedKey}`;
+            if (!window[spokenKey]) {
+              let speakText = "";
+              if (resolved.type === "room_resident") speakText = `${resolved.meta.user_name || resolved.name}`;
+              else if (resolved.type === "room_no") speakText = `Room ${resolved.meta.room_no || resolved.meta.room || resolved.name}`;
+              else if (resolved.type === "provider") speakText = `${resolved.meta?.name || resolved.name}`;
+              if (speakText) {
+                const u = new SpeechSynthesisUtterance(speakText);
+                u.lang = navigator.language || "en-US";
+                window.speechSynthesis.cancel();
+                window.speechSynthesis.speak(u);
+                window[spokenKey] = true;
+                // clear spoken flag after overlay timeout
+                setTimeout(() => { try { window[spokenKey] = false; } catch (e) {} }, 31000);
+              }
+            }
+          }
+        } catch (e) {}
       }
     };
 
     recognition.onstart = () => {
       setVoiceState("listening");
       setVoiceError("");
+      try {
+        if (!voiceGreetingPlayedRef.current && typeof window !== "undefined" && window.speechSynthesis) {
+          const clientName = payload?.client_name || payload?.client?.name || "";
+          const greetText = clientName ? `Hello, welcome to ${clientName}` : "Hello";
+          const utter = new SpeechSynthesisUtterance(greetText);
+          utter.lang = navigator.language || "en-US";
+          window.speechSynthesis.cancel();
+          window.speechSynthesis.speak(utter);
+          voiceGreetingPlayedRef.current = true;
+        }
+      } catch (e) {
+        // ignore TTS failures (browser restrictions)
+      }
     };
     recognition.onerror = (event) => {
       setVoiceState("error");
@@ -648,6 +857,8 @@ export default function SignagePlayer() {
         </div>
       ) : null}
 
+      
+
       {voiceError ? (
         <div className="px-4 py-2 border-b border-white/10 bg-red-500/10 text-[11px] text-red-200 font-mono uppercase tracking-wider">
           {voiceError}
@@ -659,40 +870,69 @@ export default function SignagePlayer() {
       ) : null}
 
       {overlay ? (
-        <div className="absolute top-20 right-4 z-30 w-[min(92vw,380px)] pointer-events-none">
-          <div className="rounded-2xl border border-white/15 bg-black/80 backdrop-blur-md shadow-[0_20px_80px_-30px_rgba(0,0,0,0.85)] p-3">
-            <div className="text-[10px] uppercase tracking-[0.2em] text-emerald-300/80 mb-1">Voice result</div>
-            <div className="text-white font-semibold text-base leading-tight truncate">{overlay.title || "Result"}</div>
-
-            {Array.isArray(overlay.items) && overlay.items.length > 0 ? (
-              <div className="mt-3 grid grid-cols-2 gap-2 max-h-[56vh] overflow-auto pr-1">
-                {overlay.items.map((item) => (
-                  <div key={item.id || item.name} className="rounded-xl border border-white/10 bg-white/5 p-2">
-                    <div className="w-full h-20 rounded-lg overflow-hidden bg-white/10 mb-2">
-                      {item.image ? <img src={item.image} alt={item.name || "product"} className="w-full h-full object-cover" /> : null}
+        overlay.takeover ? (
+          <div className="absolute inset-0 z-40 flex items-center justify-center pointer-events-auto">
+            <div className="w-[min(96vw,1200px)] max-h-[92vh] overflow-auto rounded-2xl border border-white/15 bg-black/95 p-6">
+              <div className="flex items-center justify-between mb-4">
+                <div className="text-[12px] uppercase tracking-[0.2em] text-emerald-300/80">Voice result</div>
+                <div className="text-white font-semibold text-lg leading-tight">{overlay.title || "Result"}</div>
+              </div>
+              {Array.isArray(overlay.items) && overlay.items.length > 0 ? (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  {overlay.items.map((item) => (
+                    <div key={item.id || item.name} className="rounded-lg border border-white/10 bg-white/3 p-4 flex gap-4">
+                      <div className="w-40 h-40 rounded overflow-hidden bg-white/10 flex-shrink-0">
+                        {item.image ? <img src={item.image} alt={item.name || "product"} className="w-full h-full object-cover" /> : null}
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <div className="text-lg font-bold text-white truncate">{item.name}</div>
+                        <div className="text-sm text-white/70 mt-2">{item.description}</div>
+                        {item.price != null ? <div className="text-[13px] text-white/60 mt-3">Rs {Number(item.price || 0).toLocaleString()}</div> : null}
+                      </div>
                     </div>
-                    <div className="text-xs text-white font-semibold truncate">{item.name || "Product"}</div>
-                    {item.price != null ? <div className="text-[11px] text-white/60">Rs {Number(item.price || 0).toLocaleString()}</div> : null}
-                  </div>
-                ))}
-              </div>
-            ) : (
-              <div className="mt-3 flex gap-3">
-                <div className="w-24 h-24 rounded-xl overflow-hidden bg-white/10 shrink-0">
-                  {overlay.image ? (
-                    <img src={overlay.image} alt={overlay.title || "match"} className="w-full h-full object-cover" />
-                  ) : (
-                    <div className="w-full h-full flex items-center justify-center text-[10px] text-white/50 uppercase tracking-wider">No image</div>
-                  )}
+                  ))}
                 </div>
-                <div className="min-w-0 flex-1">
-                  <div className="text-xs text-white/65 mt-1 line-clamp-3">{overlay.description || "Matched from spoken command"}</div>
-                  <div className="text-[10px] text-white/45 uppercase tracking-wider mt-2">{overlay.type || "item"}</div>
-                </div>
-              </div>
-            )}
+              ) : (
+                <div className="text-white">{overlay.description || "Matched from spoken command"}</div>
+              )}
+            </div>
           </div>
-        </div>
+        ) : (
+          <div className="absolute z-30 w-[min(92vw,380px)] pointer-events-none bottom-6 left-1/2 -translate-x-1/2 sm:top-20 sm:right-4 sm:left-auto sm:translate-x-0 sm:bottom-auto">
+            <div className="rounded-2xl border border-white/15 bg-black/80 backdrop-blur-md shadow-[0_20px_80px_-30px_rgba(0,0,0,0.85)] p-3">
+              <div className="text-[10px] uppercase tracking-[0.2em] text-emerald-300/80 mb-1">Voice result</div>
+              <div className="text-white font-semibold text-base leading-tight truncate">{overlay.title || "Result"}</div>
+
+              {Array.isArray(overlay.items) && overlay.items.length > 0 ? (
+                <div className="mt-3 grid grid-cols-2 gap-2 max-h-[56vh] overflow-auto pr-1">
+                  {overlay.items.map((item) => (
+                    <div key={item.id || item.name} className="rounded-xl border border-white/10 bg-white/5 p-2">
+                      <div className="w-full h-20 rounded-lg overflow-hidden bg-white/10 mb-2">
+                        {item.image ? <img src={item.image} alt={item.name || "product"} className="w-full h-full object-cover" /> : null}
+                      </div>
+                      <div className="text-xs text-white font-semibold truncate">{item.name || "Product"}</div>
+                      {item.price != null ? <div className="text-[11px] text-white/60">Rs {Number(item.price || 0).toLocaleString()}</div> : null}
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="mt-3 flex gap-3">
+                  <div className="w-24 h-24 rounded-xl overflow-hidden bg-white/10 shrink-0">
+                    {overlay.image ? (
+                      <img src={overlay.image} alt={overlay.title || "match"} className="w-full h-full object-cover" />
+                    ) : (
+                      <div className="w-full h-full flex items-center justify-center text-[10px] text-white/50 uppercase tracking-wider">No image</div>
+                    )}
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <div className="text-xs text-white/65 mt-1 line-clamp-3">{overlay.description || "Matched from spoken command"}</div>
+                    <div className="text-[10px] text-white/45 uppercase tracking-wider mt-2">{overlay.type || "item"}</div>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        )
       ) : null}
 
       {!hasContent ? (

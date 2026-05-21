@@ -10,6 +10,7 @@ elif (ROOT_DIR / ".env").exists():
 import os
 import logging
 import uuid
+import re
 from datetime import datetime, timezone, timedelta
 from typing import List, Optional, Literal, Dict, Any
 from urllib.parse import quote
@@ -259,6 +260,7 @@ class ServiceItem(BaseModel):
     description: str = ""
     image_url: str = ""
     active: bool = True
+    tags: List[str] = Field(default_factory=list)
 
 
 class DoctorProfile(BaseModel):
@@ -312,6 +314,11 @@ class NoticeUpdate(BaseModel):
 def now_iso(): return datetime.now(timezone.utc).isoformat()
 def clean(d): d.pop("_id", None); d.pop("password_hash", None); return d
 def gen_pair_code(): return str(uuid.uuid4().int)[:6]
+
+def normalize_room_no(r):
+    if not r: return ""
+    s = re.sub(r"[^A-Za-z0-9]", "", str(r))
+    return s.upper()
 
 def _appointment_status_rank(status: str) -> int:
     return {"called": 0, "pending": 1, "done": 2, "cancelled": 3}.get(status or "", 9)
@@ -879,13 +886,24 @@ async def list_rooms(user: dict = Depends(require_role("client"))):
 
 @api.post("/client/rooms")
 async def create_room(body: RoomIn, user: dict = Depends(require_role("client"))):
-    doc = {"id": str(uuid.uuid4()), "client_id": user["id"], **body.model_dump(), "created_at": now_iso()}
+    room_no_norm = normalize_room_no(body.room_no)
+    # prevent duplicates for same client
+    exists = await db.rooms.find_one({"client_id": user["id"], "room_no_norm": room_no_norm})
+    if exists:
+        raise HTTPException(status_code=400, detail="Room/Flat number already exists")
+    doc = {"id": str(uuid.uuid4()), "client_id": user["id"], **body.model_dump(), "room_no_norm": room_no_norm, "created_at": now_iso()}
     await db.rooms.insert_one(doc); return clean(doc)
 
 @api.put("/client/rooms/{rid}")
 async def update_room(rid: str, body: RoomUpdate, user: dict = Depends(require_role("client"))):
     upd = {k: v for k, v in body.model_dump(exclude_none=True).items()}
     if not upd: raise HTTPException(status_code=400, detail="Nothing to update")
+    if upd.get("room_no"):
+        room_no_norm = normalize_room_no(upd.get("room_no"))
+        exists = await db.rooms.find_one({"client_id": user["id"], "room_no_norm": room_no_norm, "id": {"$ne": rid}})
+        if exists:
+            raise HTTPException(status_code=400, detail="Room/Flat number already exists")
+        upd["room_no_norm"] = room_no_norm
     r = await db.rooms.find_one_and_update({"id": rid, "client_id": user["id"]}, {"$set": upd}, return_document=True, projection={"_id": 0})
     if not r: raise HTTPException(status_code=404, detail="Room not found")
     return r
@@ -968,6 +986,7 @@ async def _public_service_profile(cid: str):
             "queue_length": len(active),
             "queue_total_minutes": queue_minutes,
             "queue_preview": queue_preview[:8],
+            "subscription": await _resolve_storage_plan_for_client(c) or None,
         }
 
     # Retailer: include product catalog
@@ -1161,6 +1180,27 @@ async def _get_client_storage_quota(client: dict) -> tuple[int, float, Optional[
     plan = await _resolve_storage_plan_for_client(client)
     limit_gb = float((plan or {}).get("storage_limit_gb", 0) or 0)
     return int(limit_gb * 1024 * 1024 * 1024), limit_gb, plan
+
+
+@api.get("/client/subscription")
+async def get_client_subscription(user: dict = Depends(require_role("client"))):
+    client = await db.clients.find_one({"id": user["id"]}, {"_id": 0})
+    if not client:
+        raise HTTPException(status_code=404, detail="Client not found")
+    plan = await _resolve_storage_plan_for_client(client)
+    if not plan:
+        return {"active": False, "plan": None}
+    # determine active flag heuristically
+    expires = plan.get("expires_at") or plan.get("valid_till") or None
+    active = True
+    if expires:
+        try:
+            exp_dt = datetime.fromisoformat(str(expires)) if isinstance(expires, str) else None
+            if exp_dt and exp_dt < datetime.now(timezone.utc):
+                active = False
+        except Exception:
+            active = True
+    return {"active": active, "plan": plan}
 
 # ==================== Media ====================
 class MediaUpdate(BaseModel):
@@ -1580,6 +1620,25 @@ async def player_payload(pair_code: str):
     """Returns current playlist items for a device based on schedules + current time."""
     device = await db.devices.find_one({"pair_code": pair_code}, {"_id": 0})
     if not device: raise HTTPException(status_code=404, detail="Device not found. Check pair code.")
+    # enforce subscription: do not return playlist if client's subscription is inactive
+    client = await db.clients.find_one({"id": device.get("client_id")}, {"_id": 0})
+    plan = await _resolve_storage_plan_for_client(client)
+    active = True
+    if not plan:
+        active = False
+    else:
+        expires = plan.get("expires_at") or plan.get("valid_till") or None
+        if expires:
+            try:
+                exp_dt = datetime.fromisoformat(str(expires)) if isinstance(expires, str) else None
+                if exp_dt and exp_dt < datetime.now(timezone.utc):
+                    active = False
+            except Exception:
+                pass
+    if not active:
+        # return minimal payload indicating subscription required
+        await db.devices.update_one({"id": device["id"]}, {"$set": {"status": "suspended", "last_seen": now_iso()}})
+        return {"device_id": device["id"], "client_id": device["client_id"], "subscription_active": False, "message": "Subscription required to run signage"}
     now = datetime.now(timezone.utc)
     dow = now.weekday()
     cur_min = now.hour * 60 + now.minute
@@ -1917,6 +1976,34 @@ async def on_startup():
         await db.plans.create_index("id", unique=True)
         await db.products.create_index("id", unique=True)
         await db.rooms.create_index("id", unique=True)
+        # Clean up null/empty room_no_norm fields, then normalize safe room_no -> room_no_norm
+        try:
+            await db.rooms.update_many({"room_no_norm": None}, {"$unset": {"room_no_norm": ""}})
+            await db.rooms.update_many({"room_no_norm": ""}, {"$unset": {"room_no_norm": ""}})
+        except Exception:
+            logger.exception("Error cleaning up empty room_no_norm fields")
+
+        try:
+            cursor = db.rooms.find({"$or": [{"room_no_norm": {"$exists": False}}, {"room_no_norm": {"$exists": False}}]}, {"_id": 0, "id": 1, "client_id": 1, "room_no": 1})
+            async for r in cursor:
+                room_no = r.get("room_no")
+                if not room_no:
+                    continue
+                norm = normalize_room_no(room_no)
+                if not norm:
+                    continue
+                # only set if no other document for this client already has the normalized value
+                exists = await db.rooms.find_one({"client_id": r.get("client_id"), "room_no_norm": norm, "id": {"$ne": r.get("id")}})
+                if not exists:
+                    await db.rooms.update_one({"id": r.get("id")}, {"$set": {"room_no_norm": norm}})
+        except Exception:
+            logger.exception("Error normalizing existing room numbers")
+
+        # Create a partial unique index that only indexes documents where room_no_norm exists.
+        try:
+            await db.rooms.create_index([("client_id", 1), ("room_no_norm", 1)], unique=True, partialFilterExpression={"room_no_norm": {"$exists": True}})
+        except Exception:
+            logger.exception("Failed to create partial unique index on rooms (client_id, room_no_norm)")
         await db.appointments.create_index("id", unique=True)
         await db.media.create_index("id", unique=True)
         await db.playlists.create_index("id", unique=True)
