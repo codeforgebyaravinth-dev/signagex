@@ -212,7 +212,7 @@ function MediaSlot({ items, label, queuePreview, weatherData, zone, canvasWidth,
   const timerRef = useRef(null);
   const youtubeRef = useRef(null);
   const youtubePlayerRef = useRef(null);
-  const zoneScale = getZoneScale(zone, canvasWidth, canvasHeight, false);
+  const zoneScale = getZoneScale(zone, canvasWidth, canvasHeight, /^(header|weather)$/i.test(role));
   const itemCount = Math.max(1, items?.length || 0);
   const handleMediaEnd = useCallback(() => {
     setIdx((i) => (i + 1) % itemCount);
@@ -1671,7 +1671,17 @@ export default function SignagePlayer() {
                           </div>
                         </div>
                       ) : (
-                        <MediaSlot items={items} label={zone.name} queuePreview={queuePreview} weatherData={weatherData} zone={zone} canvasWidth={canvasWidth} canvasHeight={canvasHeight} mediaMode={zoneMediaModes?.[zone.id] || "fill"} />
+                        {/* default mediaMode: weather/header fill, others fit */}
+                        <MediaSlot
+                          items={items}
+                          label={zone.name}
+                          queuePreview={queuePreview}
+                          weatherData={weatherData}
+                          zone={zone}
+                          canvasWidth={canvasWidth}
+                          canvasHeight={canvasHeight}
+                          mediaMode={zoneMediaModes?.[zone.id] || (/^(header|weather)$/i.test(zone?.role || "") ? "fill" : "fit")}
+                        />
                       )}
                     </div>
                   );
@@ -1713,7 +1723,18 @@ export default function SignagePlayer() {
                           <img src={clientLogoUrl} alt={`${payload.device_name || "client"} logo`} className="max-h-[75%] max-w-[75%] object-contain" />
                         </div>
                       </div>
-                    ) : <MediaSlot items={items} label={zone.name} queuePreview={queuePreview} weatherData={weatherData} zone={zone} canvasWidth={canvasWidth} canvasHeight={canvasHeight} mediaMode={zoneMediaModes?.[zone.id] || "fill"} />}
+                    ) : (
+                      <MediaSlot
+                        items={items}
+                        label={zone.name}
+                        queuePreview={queuePreview}
+                        weatherData={weatherData}
+                        zone={zone}
+                        canvasWidth={canvasWidth}
+                        canvasHeight={canvasHeight}
+                        mediaMode={zoneMediaModes?.[zone.id] || (/^(header|weather)$/i.test(zone?.role || "") ? "fill" : "fit")}
+                      />
+                    )}
                   </div>
                 ))}
               </div>
