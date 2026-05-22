@@ -192,8 +192,8 @@ export default function PublicBooking() {
   if (detailItem && detailItem.kind === "product" && doc.vertical === "retailer") {
     return (
       <div className="min-h-screen bg-[radial-gradient(circle_at_top,_rgba(17,24,39,0.12),_transparent_42%),linear-gradient(180deg,#F8FAFC,#EEF2FF)] text-[#111827]">
-        <header className="px-6 py-5">
-          <div className="max-w-6xl mx-auto flex items-center justify-between gap-4 rounded-2xl bg-[#111827] text-white px-5 py-4 shadow-[0_24px_60px_-36px_rgba(15,23,42,0.7)]">
+        <header className="px-4 sm:px-6 py-4 sm:py-5">
+          <div className="max-w-6xl mx-auto flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between rounded-2xl bg-[#111827] text-white px-4 sm:px-5 py-4 shadow-[0_24px_60px_-36px_rgba(15,23,42,0.7)]">
             <div className="flex items-center gap-3">
               <div className="w-10 h-10 bg-white text-[#111827] flex items-center justify-center rounded-xl"><ShoppingBag className="w-5 h-5" /></div>
               <div>
@@ -207,7 +207,7 @@ export default function PublicBooking() {
           </div>
         </header>
 
-        <main className="max-w-6xl mx-auto px-6 pb-10">
+        <main className="max-w-6xl mx-auto px-4 sm:px-6 pb-10">
           <div className="grid gap-6 lg:grid-cols-[1.05fr_0.95fr] items-start">
             <div className="rounded-[2rem] overflow-hidden border border-white/60 bg-white shadow-[0_30px_80px_-50px_rgba(15,23,42,0.45)]">
               <div className="relative min-h-[420px] bg-[#0F172A]">
@@ -252,8 +252,8 @@ export default function PublicBooking() {
   if (detailItem && detailItem.kind === "service") {
     return (
       <div className="min-h-screen bg-[radial-gradient(circle_at_top,_rgba(17,24,39,0.12),_transparent_42%),linear-gradient(180deg,#F8FAFC,#EEF2FF)] text-[#111827]">
-        <header className="px-6 py-5">
-          <div className="max-w-6xl mx-auto flex items-center justify-between gap-4 rounded-2xl bg-[#111827] text-white px-5 py-4 shadow-[0_24px_60px_-36px_rgba(15,23,42,0.7)]">
+        <header className="px-4 sm:px-6 py-4 sm:py-5">
+          <div className="max-w-6xl mx-auto flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between rounded-2xl bg-[#111827] text-white px-4 sm:px-5 py-4 shadow-[0_24px_60px_-36px_rgba(15,23,42,0.7)]">
             <div className="flex items-center gap-3">
               <div className="w-10 h-10 bg-white text-[#111827] flex items-center justify-center rounded-xl"><Stethoscope className="w-5 h-5" /></div>
               <div>
@@ -267,7 +267,7 @@ export default function PublicBooking() {
           </div>
         </header>
 
-        <main className="max-w-6xl mx-auto px-6 pb-10">
+        <main className="max-w-6xl mx-auto px-4 sm:px-6 pb-10">
           <div className="grid gap-6 lg:grid-cols-[1.05fr_0.95fr] items-start">
             <div className="rounded-[2rem] overflow-hidden border border-white/60 bg-white shadow-[0_30px_80px_-50px_rgba(15,23,42,0.45)]">
               <div className="relative min-h-[420px] bg-[#0F172A]">
@@ -323,8 +323,8 @@ export default function PublicBooking() {
     const products = Array.isArray(doc.products) ? doc.products : [];
     return (
       <div className="min-h-screen bg-[radial-gradient(circle_at_top,_rgba(17,24,39,0.12),_transparent_42%),linear-gradient(180deg,#F8FAFC,#EEF2FF)] text-[#111827]">
-        <header className="px-6 py-5">
-          <div className="max-w-6xl mx-auto flex items-center justify-between gap-4 rounded-2xl bg-[#111827] text-white px-5 py-4 shadow-[0_24px_60px_-36px_rgba(15,23,42,0.7)]">
+        <header className="px-4 sm:px-6 py-4 sm:py-5">
+          <div className="max-w-6xl mx-auto flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between rounded-2xl bg-[#111827] text-white px-4 sm:px-5 py-4 shadow-[0_24px_60px_-36px_rgba(15,23,42,0.7)]">
             <div className="flex items-center gap-3">
               <div className="w-10 h-10 bg-white text-[#111827] flex items-center justify-center rounded-xl"><Stethoscope className="w-5 h-5" /></div>
               <div>
@@ -336,7 +336,7 @@ export default function PublicBooking() {
           </div>
         </header>
 
-        <main className="max-w-6xl mx-auto px-6 pb-10">
+        <main className="max-w-6xl mx-auto px-4 sm:px-6 pb-10">
           <div className="space-y-6">
             <div className="rounded-[2rem] overflow-hidden border border-white/60 bg-white shadow-[0_30px_80px_-50px_rgba(15,23,42,0.45)]">
               <div className="relative min-h-[220px] bg-[#0F172A]">
@@ -395,8 +395,8 @@ export default function PublicBooking() {
 
   return (
     <div className="min-h-screen bg-[radial-gradient(circle_at_top,_rgba(17,24,39,0.12),_transparent_42%),linear-gradient(180deg,#F8FAFC,#EEF2FF)] text-[#111827]">
-      <header className="px-6 py-5">
-        <div className="max-w-6xl mx-auto flex items-center justify-between gap-4 rounded-2xl bg-[#111827] text-white px-5 py-4 shadow-[0_24px_60px_-36px_rgba(15,23,42,0.7)]">
+      <header className="px-4 sm:px-6 py-4 sm:py-5">
+        <div className="max-w-6xl mx-auto flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between rounded-2xl bg-[#111827] text-white px-4 sm:px-5 py-4 shadow-[0_24px_60px_-36px_rgba(15,23,42,0.7)]">
           <div className="flex items-center gap-3">
             <div className="w-10 h-10 bg-white text-[#111827] flex items-center justify-center rounded-xl"><Stethoscope className="w-5 h-5" /></div>
             <div>
@@ -408,7 +408,7 @@ export default function PublicBooking() {
         </div>
       </header>
 
-      <main className="max-w-6xl mx-auto px-6 pb-10">
+      <main className="max-w-6xl mx-auto px-4 sm:px-6 pb-10">
         <section className="grid gap-6 lg:grid-cols-[1.15fr_0.85fr] items-start">
           <div className="space-y-6">
             <div className="rounded-[2rem] overflow-hidden border border-white/60 bg-white shadow-[0_30px_80px_-50px_rgba(15,23,42,0.45)]">
@@ -421,7 +421,7 @@ export default function PublicBooking() {
                   <p className="mt-3 max-w-2xl text-sm md:text-base text-white/80">{profile.description || (isSalon ? "Curated cuts, styling, and premium grooming appointments." : "Elegant appointments, trusted care, and quick booking.")}</p>
                 </div>
               </div>
-              <div className="grid gap-3 md:grid-cols-4 p-6">
+              <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4 p-4 sm:p-6">
                 <div className="rounded-2xl bg-[#F8FAFC] p-4 border border-[#E5E7EB]"><div className="text-[10px] uppercase tracking-wider text-[#6B7280]">Queue</div><div className="font-display text-3xl font-extrabold mt-1">{doc.queue_length}</div><div className="text-xs text-[#6B7280]">Waiting today</div></div>
                 <div className="rounded-2xl bg-[#F8FAFC] p-4 border border-[#E5E7EB]"><div className="text-[10px] uppercase tracking-wider text-[#6B7280]">Live wait</div><div className="font-display text-3xl font-extrabold mt-1">~{approxWaitMinutes}m</div><div className="text-xs text-[#6B7280]">Updated every 20 sec</div></div>
                 <div className="rounded-2xl bg-[#F8FAFC] p-4 border border-[#E5E7EB]"><div className="text-[10px] uppercase tracking-wider text-[#6B7280]">Hours</div><div className="font-semibold mt-1">{profile.hours || "Open daily"}</div><div className="text-xs text-[#6B7280]">Plan your visit</div></div>
@@ -440,7 +440,7 @@ export default function PublicBooking() {
                     {queuePreview.length === 0 ? (
                       <div className="text-sm text-[#6B7280]">The queue is empty right now.</div>
                     ) : queuePreview.map((item) => (
-                      <div key={`${item.token}-${item.wait_after_mins}`} className="min-w-[180px] rounded-xl bg-white border border-[#E5E7EB] p-3 shadow-sm">
+                      <div key={`${item.token}-${item.wait_after_mins}`} className="min-w-[160px] sm:min-w-[180px] rounded-xl bg-white border border-[#E5E7EB] p-3 shadow-sm">
                         <div className="text-[10px] uppercase tracking-wider text-[#6B7280]">Token #{item.token}</div>
                         <div className="font-semibold text-sm mt-1 truncate">{item.service_name || "Service"}</div>
                         <div className="text-xs text-[#6B7280] mt-1">{item.service_duration_mins} min service</div>
@@ -496,7 +496,7 @@ export default function PublicBooking() {
             )}
           </div>
 
-          <form onSubmit={submit} className="lg:sticky lg:top-6 bg-white/92 backdrop-blur border border-white shadow-[0_30px_80px_-42px_rgba(15,23,42,0.45)] rounded-[2rem] p-6">
+          <form onSubmit={submit} className="lg:sticky lg:top-6 bg-white/92 backdrop-blur border border-white shadow-[0_30px_80px_-42px_rgba(15,23,42,0.45)] rounded-[2rem] p-4 sm:p-6">
             <div className="text-[11px] font-semibold uppercase tracking-[0.2em] text-[#6B7280] mb-2">Book {serviceLabel}</div>
             <h2 className="font-display text-3xl font-extrabold tracking-tighter mb-2">Get your token.</h2>
             <p className="text-sm text-[#6B7280] mb-6">Walk-ins and online bookings use the same queue, so your staff can manage everything in one place.</p>

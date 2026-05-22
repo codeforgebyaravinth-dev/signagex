@@ -179,7 +179,7 @@ function ServicePanel({ vertical, label, icon: Icon }) {
 
   return (
     <div className="space-y-8">
-      <div className="bg-gradient-to-br from-[#111827] via-[#1F2937] to-[#0F172A] text-white rounded-2xl p-6 shadow-[0_30px_80px_-40px_rgba(15,23,42,0.9)] border border-white/10">
+      <div className="bg-gradient-to-br from-[#111827] via-[#1F2937] to-[#0F172A] text-white rounded-2xl p-4 sm:p-6 shadow-[0_30px_80px_-40px_rgba(15,23,42,0.9)] border border-white/10">
         <div className="flex flex-col gap-6 lg:flex-row lg:items-start lg:justify-between">
           <div className="max-w-2xl">
             <div className="text-[11px] font-semibold uppercase tracking-[0.25em] text-white/60 mb-2">{title}</div>
@@ -236,21 +236,21 @@ function ServicePanel({ vertical, label, icon: Icon }) {
       </div>
 
       <div className="bg-white border border-[#E5E7EB] rounded-2xl overflow-hidden shadow-[0_24px_60px_-36px_rgba(15,23,42,0.35)]">
-        <div className="px-6 py-5 border-b border-[#E5E7EB] flex flex-wrap items-center justify-between gap-3 bg-[#F9FAFB]">
+        <div className="px-4 sm:px-6 py-5 border-b border-[#E5E7EB] flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 bg-[#F9FAFB]">
           <div>
             <div className="text-[11px] font-semibold uppercase tracking-[0.2em] text-[#6B7280] mb-1">Catalog</div>
             <h3 className="font-display text-2xl font-extrabold tracking-tight">Services and pricing</h3>
           </div>
-          <div className="flex gap-2">
+          <div className="flex flex-wrap gap-2">
             <Button variant="outline" className="rounded-xl" onClick={openManualBooking}>Add walk-in</Button>
             <Button className="rounded-xl bg-[#111827] hover:bg-[#374151] text-white" onClick={() => openServiceEditor()}>Add service</Button>
           </div>
         </div>
-        <div className="p-6">
+        <div className="p-4 sm:p-6">
           {services.length === 0 ? (
             <div className="border border-dashed border-[#D1D5DB] rounded-2xl p-8 text-center text-sm text-[#6B7280]">No services yet. Add one premium service card for your storefront.</div>
           ) : (
-            <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+            <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
               {services.map((service, index) => (
                 <div key={service.id || index} className="rounded-2xl border border-[#E5E7EB] overflow-hidden bg-white shadow-[0_20px_40px_-30px_rgba(15,23,42,0.35)]">
                   <div className="h-44 bg-[#111827] relative">
@@ -291,7 +291,7 @@ function ServicePanel({ vertical, label, icon: Icon }) {
       </div>
 
       <div className="bg-white border border-[#E5E7EB] rounded-sm overflow-hidden">
-        <div className="px-6 py-4 border-b border-[#E5E7EB] flex items-center justify-between gap-3">
+        <div className="px-4 sm:px-6 py-4 border-b border-[#E5E7EB] flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
           <div>
             <div className="text-[11px] font-semibold uppercase tracking-[0.2em] text-[#6B7280] mb-1">Live queue</div>
             <h3 className="font-display text-2xl font-extrabold tracking-tight">Bookings and tokens</h3>

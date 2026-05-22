@@ -1,9 +1,10 @@
-import { NavLink, useNavigate, Outlet } from "react-router-dom";
+import { useEffect, useState } from "react";
+import { NavLink, useLocation, useNavigate, Outlet } from "react-router-dom";
 import { useAuth } from "../context/AuthContext";
 import {
   LayoutDashboard, Users, FileVideo, Building2, LogOut, ShieldCheck, Store,
   Layers, Monitor, Store as StoreIcon, UserCircle, Image as ImageIcon, ListMusic, Calendar,
-  Wallet,
+  Wallet, Menu,
 } from "lucide-react";
 import { Button } from "./ui/button";
 
@@ -39,14 +40,29 @@ const CLIENT_NAV = [
 export default function Layout() {
   const { user, logout } = useAuth();
   const nav = useNavigate();
+  const location = useLocation();
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const items = user?.role === "admin" ? ADMIN_NAV : user?.role === "dealer" ? DEALER_NAV : CLIENT_NAV;
   const RoleIcon = user?.role === "admin" ? ShieldCheck : user?.role === "dealer" ? Store : UserCircle;
+
+  useEffect(() => {
+    setMobileNavOpen(false);
+  }, [location.pathname]);
 
   const handleLogout = async () => { await logout(); nav("/login"); };
 
   return (
-    <div className="min-h-screen bg-white text-[#111827]">
-      <aside className="fixed top-0 left-0 h-screen w-64 bg-white border-r border-[#E5E7EB] flex flex-col">
+    <div className="min-h-screen bg-white text-[#111827] overflow-x-hidden">
+      {mobileNavOpen && (
+        <button
+          type="button"
+          aria-label="Close navigation"
+          className="fixed inset-0 z-40 bg-black/30 lg:hidden"
+          onClick={() => setMobileNavOpen(false)}
+        />
+      )}
+
+      <aside className={`fixed inset-y-0 left-0 z-50 flex h-screen w-[84vw] max-w-xs flex-col border-r border-[#E5E7EB] bg-white transition-transform duration-200 lg:w-64 lg:translate-x-0 lg:flex ${mobileNavOpen ? "translate-x-0" : "-translate-x-full lg:translate-x-0"}`}>
         <div className="px-6 py-6 border-b border-[#E5E7EB]">
           <div className="flex items-center gap-2">
             <div className="w-8 h-8 bg-[#111827] flex items-center justify-center rounded-sm">
@@ -66,6 +82,7 @@ export default function Layout() {
               to={to}
               end={end}
               data-testid={`nav-${label.toLowerCase().replace(/\s+/g, "-")}`}
+              onClick={() => setMobileNavOpen(false)}
               className={({ isActive }) =>
                 `flex items-center gap-3 px-3 py-2 rounded-sm text-sm transition-colors ${
                   isActive
@@ -101,8 +118,24 @@ export default function Layout() {
         </div>
       </aside>
 
-      <main className="pl-64">
-        <div className="p-8 max-w-[1400px]">
+      <main className="min-w-0 lg:pl-64">
+        <div className="sticky top-0 z-30 border-b border-[#E5E7EB] bg-white/95 px-4 py-3 backdrop-blur lg:hidden">
+          <div className="flex items-center justify-between gap-3">
+            <button
+              type="button"
+              onClick={() => setMobileNavOpen(true)}
+              className="inline-flex h-10 w-10 items-center justify-center rounded-sm border border-[#E5E7EB] text-[#111827]"
+              aria-label="Open navigation"
+            >
+              <Menu className="h-5 w-5" />
+            </button>
+            <div className="min-w-0 text-right">
+              <div className="font-display text-sm font-extrabold tracking-tight">SIGNAGE OS</div>
+              <div className="text-[10px] uppercase tracking-[0.2em] text-[#6B7280]">Control Panel</div>
+            </div>
+          </div>
+        </div>
+        <div className="mx-auto w-full max-w-[1400px] p-4 sm:p-6 lg:p-8 min-w-0">
           <Outlet />
         </div>
       </main>

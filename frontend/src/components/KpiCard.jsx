@@ -2,7 +2,7 @@ export default function KpiCard({ label, value, hint, Icon, accent = "#111827", 
   return (
     <div
       data-testid={testid}
-      className="dense-card bg-white border border-[#E5E7EB] rounded-sm p-6"
+      className="dense-card min-w-0 bg-white border border-[#E5E7EB] rounded-sm p-4 sm:p-6"
     >
       <div className="flex items-start justify-between mb-4">
         <div className="text-[11px] font-semibold uppercase tracking-[0.2em] text-[#6B7280]">
@@ -14,7 +14,7 @@ export default function KpiCard({ label, value, hint, Icon, accent = "#111827", 
           </div>
         )}
       </div>
-      <div className="font-display text-4xl font-extrabold tracking-tighter text-[#111827] leading-none">{value}</div>
+      <div className="font-display text-3xl sm:text-4xl font-extrabold tracking-tighter text-[#111827] leading-none">{value}</div>
       {hint && <div className="text-xs text-[#6B7280] mt-3">{hint}</div>}
     </div>
   );

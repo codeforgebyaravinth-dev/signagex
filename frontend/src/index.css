@@ -11,6 +11,21 @@ body {
   -moz-osx-font-smoothing: grayscale;
   background: #FFFFFF;
   color: #111827;
+  overflow-x: hidden;
+}
+
+html,
+body,
+#root {
+  width: 100%;
+  min-height: 100%;
+}
+
+img,
+video,
+canvas,
+svg {
+  max-width: 100%;
 }
 
 h1, h2, h3, h4, h5, h6, .font-display {

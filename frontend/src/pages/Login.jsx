@@ -40,7 +40,7 @@ export default function Login() {
   };
 
   return (
-    <div className="min-h-screen flex bg-white">
+    <div className="min-h-screen flex flex-col lg:flex-row bg-white overflow-x-hidden">
       <div className="hidden lg:flex w-1/2 bg-[#111827] text-white p-12 flex-col justify-between relative overflow-hidden">
         <div className="absolute inset-0 opacity-[0.06]" style={{
           backgroundImage: "linear-gradient(#fff 1px, transparent 1px), linear-gradient(90deg, #fff 1px, transparent 1px)",
@@ -79,10 +79,10 @@ export default function Login() {
         </div>
       </div>
 
-      <div className="flex-1 flex items-center justify-center p-8">
-        <form onSubmit={submit} className="w-full max-w-sm" data-testid="login-form">
+      <div className="flex-1 flex items-center justify-center px-4 py-8 sm:px-6 lg:p-8">
+        <form onSubmit={submit} className="w-full max-w-md lg:max-w-sm" data-testid="login-form">
           <div className="text-[11px] font-semibold uppercase tracking-[0.25em] text-[#6B7280] mb-3">Sign in</div>
-          <h2 className="font-display text-4xl font-extrabold tracking-tighter mb-2">Access the panel.</h2>
+          <h2 className="font-display text-3xl sm:text-4xl font-extrabold tracking-tighter mb-2">Access the panel.</h2>
           <p className="text-sm text-[#6B7280] mb-8">Enter your credentials to continue.</p>
 
           {err && (

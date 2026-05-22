@@ -1346,6 +1346,7 @@ export default function SignagePlayer() {
       zone.height_px != null
     )
   );
+  const hasCustomPlacements = customPlacementEnabled && Object.keys(zonePlacements || {}).length > 0;
   const renderAsAbsolute = hasAbsoluteLayout || hasCustomPlacements;
 
   useEffect(() => {
@@ -1412,7 +1413,6 @@ export default function SignagePlayer() {
   }
 
   const shouldCompactLayout = fillBlankSpaces && hiddenZoneIds.length > 0;
-  const hasCustomPlacements = customPlacementEnabled && Object.keys(zonePlacements || {}).length > 0;
   const zoneEntries = visibleZoneDefs.map((zone) => ({ zone, items: payload.zones?.[zone.id] || [] }));
   const hasContent = zoneEntries.some(({ items }) => items.length > 0);
   const queuePreview = Array.isArray(providerData?.queue_preview)

@@ -40,6 +40,55 @@ const parseDimension = (value, total) => {
   return null;
 };
 
+const SCALE_POINTS = {
+  full: { x: 0, y: 0, w: 1, h: 1 },
+  left: { x: 0, y: 0, w: 0.35, h: 1 },
+  right: { x: 0.65, y: 0, w: 0.35, h: 1 },
+  top: { x: 0, y: 0, w: 1, h: 0.35 },
+  bottom: { x: 0, y: 0.65, w: 1, h: 0.35 },
+  center: { x: 0.15, y: 0.15, w: 0.7, h: 0.7 },
+};
+
+const buildResponsiveLayout = (layout = {}, targetCanvasWidth, targetCanvasHeight) => {
+  const sourceLayout = normalizeLayout(layout);
+  const sourceWidth = Math.max(1, Number(sourceLayout.canvas_width) || DEFAULT_CANVAS.width);
+  const sourceHeight = Math.max(1, Number(sourceLayout.canvas_height) || DEFAULT_CANVAS.height);
+  const targetWidth = parseNumber(targetCanvasWidth, DEFAULT_CANVAS.width);
+  const targetHeight = parseNumber(targetCanvasHeight, DEFAULT_CANVAS.height);
+  const rotated = sourceWidth > sourceHeight && targetWidth < targetHeight;
+
+  const mapZone = (zone, index) => {
+    const key = String(zone?.role || zone?.name || zone?.id || "").toLowerCase();
+    const preset = Object.entries(SCALE_POINTS).find(([name]) => key.includes(name))?.[1] || null;
+
+    const xRatio = sourceWidth ? Number(zone?.x || 0) / sourceWidth : 0;
+    const yRatio = sourceHeight ? Number(zone?.y || 0) / sourceHeight : 0;
+    const widthRatio = sourceWidth ? Number(zone?.width_px || sourceWidth) / sourceWidth : 1;
+    const heightRatio = sourceHeight ? Number(zone?.height_px || sourceHeight) / sourceHeight : 1;
+
+    const x = Math.max(0, Math.round((preset ? preset.x : (rotated ? yRatio : xRatio)) * targetWidth));
+    const y = Math.max(0, Math.round((preset ? preset.y : (rotated ? xRatio : yRatio)) * targetHeight));
+    const width_px = Math.max(1, Math.round((preset ? preset.w : (rotated ? heightRatio : widthRatio)) * targetWidth));
+    const height_px = Math.max(1, Math.round((preset ? preset.h : (rotated ? widthRatio : heightRatio)) * targetHeight));
+
+    return {
+      ...zone,
+      id: zone?.id || `zone-${Date.now()}-${index}`,
+      x,
+      y,
+      width_px,
+      height_px,
+    };
+  };
+
+  return {
+    ...sourceLayout,
+    canvas_width: targetWidth,
+    canvas_height: targetHeight,
+    zones: Array.isArray(sourceLayout.zones) ? sourceLayout.zones.map(mapZone) : [],
+  };
+};
+
 const normalizeZone = (zone, index, canvasWidth, canvasHeight, totalZones) => {
   const legacyPosition = typeof zone?.position === "string" ? zone.position.split(",").map((part) => Number.parseFloat(part.trim())) : [];
   const x = Number.isFinite(Number(zone?.x))
@@ -318,6 +367,16 @@ export default function AdminTemplates() {
     setOpen(true);
   };
 
+  const autoConvertCurrentLayout = (targetPresetKey) => {
+    const preset = LAYOUT_PRESETS.find((item) => item.key === targetPresetKey);
+    if (!preset) return;
+    setForm((current) => ({
+      ...current,
+      layout: buildResponsiveLayout(current.layout, preset.canvas_width, preset.canvas_height),
+    }));
+    setSelectedPresetKey(targetPresetKey);
+  };
+
   const submit = async (e) => {
     e.preventDefault();
     try {
@@ -516,6 +575,14 @@ export default function AdminTemplates() {
                 <SelectItem value="custom" disabled>Custom canvas</SelectItem>
               </SelectContent>
             </Select>
+            <div className="flex flex-wrap gap-2 pt-2">
+              <Button type="button" variant="outline" className="rounded-full border-[#E5E7EB]" onClick={() => autoConvertCurrentLayout("portrait")}>
+                Auto portrait
+              </Button>
+              <Button type="button" variant="outline" className="rounded-full border-[#E5E7EB]" onClick={() => autoConvertCurrentLayout("landscape")}>
+                Auto landscape
+              </Button>
+            </div>
           </div>
 
           <div>
@@ -696,11 +763,11 @@ export default function AdminTemplates() {
   };
 
   return (
-    <div data-testid="admin-templates-page" className="min-h-[calc(100vh-80px)] bg-[#FAFAFA] -m-6 p-6">
-      <div className="rounded-[28px] border border-[#E7E5E4] bg-white shadow-[0_20px_60px_rgba(15,23,42,0.06)]">
-        <div className="border-b border-[#E7E5E4] px-6 pt-5 pb-4">
-          <div className="flex items-center justify-between gap-4">
-            <div className="flex items-center gap-2 text-sm text-[#6B7280]">
+    <div data-testid="admin-templates-page" className="min-h-[calc(100vh-80px)] bg-[#FAFAFA] p-4 sm:p-6 lg:p-8">
+      <div className="rounded-[28px] border border-[#E7E5E4] bg-white shadow-[0_20px_60px_rgba(15,23,42,0.06)] overflow-hidden">
+        <div className="border-b border-[#E7E5E4] px-4 sm:px-6 pt-5 pb-4">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex items-center gap-2 text-sm text-[#6B7280] flex-wrap">
               <span>All Compositions</span>
               <span>/</span>
               <span className="text-[#111827] font-medium">Create Composition</span>
@@ -710,7 +777,7 @@ export default function AdminTemplates() {
             </Button>
           </div>
 
-          <div className="mt-4 flex items-center justify-between gap-4">
+          <div className="mt-4 flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
             <div>
               <div className="text-2xl font-semibold tracking-tight text-[#111827]">Create Composition</div>
             </div>
@@ -724,38 +791,40 @@ export default function AdminTemplates() {
           </div>
         </div>
 
-        <div className="px-6 pt-10 pb-6 text-center">
+        <div className="px-4 sm:px-6 pt-8 sm:pt-10 pb-6 text-center">
           <h1 className="text-[28px] font-semibold tracking-tight text-[#111827]">Choose your layout</h1>
           <p className="mt-2 text-[#6B7280]">Select a layout template that matches your screen structure. Choose between landscape and portrait orientations.</p>
         </div>
 
-        <div className="px-6 pb-6 flex flex-col items-center gap-4">
-          <div className="flex flex-wrap justify-center gap-3">
-            {[
-              { key: "all", label: "All" },
-              { key: "portrait", label: "Portrait" },
-              { key: "landscape", label: "Landscape" },
-              { key: "custom", label: "Custom" },
-            ].map((tab) => (
-              <button
-                key={tab.key}
-                type="button"
-                onClick={() => setLayoutTab(tab.key)}
-                className={`rounded-xl border px-5 py-2 text-sm transition ${layoutTab === tab.key ? "border-[#111827] bg-[#111827] text-white" : "border-[#E5E7EB] bg-white text-[#111827] hover:bg-[#FAFAFA]"}`}
-              >
-                {tab.label}
-              </button>
-            ))}
-            <div className="relative min-w-[320px] max-w-[420px] flex-1">
+        <div className="px-4 sm:px-6 pb-6 flex flex-col items-stretch gap-4">
+          <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-center">
+            <div className="flex flex-wrap justify-center gap-3">
+              {[
+                { key: "all", label: "All" },
+                { key: "portrait", label: "Portrait" },
+                { key: "landscape", label: "Landscape" },
+                { key: "custom", label: "Custom" },
+              ].map((tab) => (
+                <button
+                  key={tab.key}
+                  type="button"
+                  onClick={() => setLayoutTab(tab.key)}
+                  className={`rounded-xl border px-5 py-2 text-sm transition ${layoutTab === tab.key ? "border-[#111827] bg-[#111827] text-white" : "border-[#E5E7EB] bg-white text-[#111827] hover:bg-[#FAFAFA]"}`}
+                >
+                  {tab.label}
+                </button>
+              ))}
+            </div>
+            <div className="relative w-full min-w-0 lg:max-w-[420px] lg:flex-1">
               <Search className="w-4 h-4 absolute left-4 top-1/2 -translate-y-1/2 text-[#A1A1AA]" />
               <Input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search layout by name" className="h-11 rounded-xl border-[#E5E7EB] pl-11" data-testid="search-template" />
             </div>
           </div>
         </div>
 
-        <div className="px-6 pb-8">
+        <div className="px-4 sm:px-6 pb-8">
           <div className="mb-6">
-            <div className="mb-4 flex items-end justify-between gap-4">
+            <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
               <div>
                 <div className="text-lg font-semibold text-[#111827]">Starter templates</div>
                 <p className="text-sm text-[#6B7280]">Use a prebuilt template or start with a blank canvas.</p>
