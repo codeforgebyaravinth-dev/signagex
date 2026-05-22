@@ -212,7 +212,7 @@ function MediaSlot({ items, label, queuePreview, weatherData, zone, canvasWidth,
   const timerRef = useRef(null);
   const youtubeRef = useRef(null);
   const youtubePlayerRef = useRef(null);
-  const zoneScale = getZoneScale(zone, canvasWidth, canvasHeight, /^(header|weather)$/i.test(role));
+  const zoneScale = getZoneScale(zone, canvasWidth, canvasHeight, /^(header|weather)$/i.test(zone?.role || ""));
   const itemCount = Math.max(1, items?.length || 0);
   const handleMediaEnd = useCallback(() => {
     setIdx((i) => (i + 1) % itemCount);
