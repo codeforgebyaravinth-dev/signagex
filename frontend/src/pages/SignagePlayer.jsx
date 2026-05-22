@@ -56,6 +56,36 @@ function isImageItem(item) {
   return item?.kind === "image" || (item?.content_type || "").startsWith("image/") || /\.(png|jpe?g|webp|gif|bmp|svg)$/i.test(item?.url || item?.name || "");
 }
 
+let youtubeApiPromise = null;
+
+function loadYouTubeIframeApi() {
+  if (typeof window === "undefined") return Promise.resolve(null);
+  if (window.YT?.Player) return Promise.resolve(window.YT);
+  if (youtubeApiPromise) return youtubeApiPromise;
+
+  youtubeApiPromise = new Promise((resolve) => {
+    const previousReady = window.onYouTubeIframeAPIReady;
+    window.onYouTubeIframeAPIReady = () => {
+      if (typeof previousReady === "function") previousReady();
+      resolve(window.YT);
+    };
+
+    const existingScript = document.querySelector('script[src="https://www.youtube.com/iframe_api"]');
+    if (!existingScript) {
+      const script = document.createElement("script");
+      script.src = "https://www.youtube.com/iframe_api";
+      script.async = true;
+      document.head.appendChild(script);
+    }
+
+    window.setTimeout(() => {
+      if (window.YT?.Player) resolve(window.YT);
+    }, 2000);
+  });
+
+  return youtubeApiPromise;
+}
+
 function getWeatherEmoji(weather = {}, conditionText = "") {
   const code = Number(weather?.weather_code);
   if (Number.isFinite(code)) {
@@ -128,10 +158,17 @@ async function fetchWeatherFromCoords(latitude, longitude) {
   };
 }
 
-function MediaSlot({ items, label, queuePreview, weatherData }) {
+function MediaSlot({ items, label, queuePreview, weatherData, zone, canvasWidth, canvasHeight }) {
   const [idx, setIdx] = useState(0);
   const [showFrame, setShowFrame] = useState(true);
   const timerRef = useRef(null);
+  const youtubeRef = useRef(null);
+  const youtubePlayerRef = useRef(null);
+  const zoneScale = getZoneScale(zone, canvasWidth, canvasHeight);
+  const itemCount = Math.max(1, items?.length || 0);
+  const handleMediaEnd = useCallback(() => {
+    setIdx((i) => (i + 1) % itemCount);
+  }, [itemCount]);
 
   useEffect(() => { setIdx(0); }, [items?.length]);
 
@@ -139,20 +176,82 @@ function MediaSlot({ items, label, queuePreview, weatherData }) {
     setShowFrame(false);
     const frame = setTimeout(() => setShowFrame(true), 30);
     return () => clearTimeout(frame);
-  }, [idx, items]);
+  }, [idx, items, handleMediaEnd]);
 
   useEffect(() => {
     if (!items || items.length === 0) return;
     const cur = items[idx];
     if (!cur) return;
-    // Skip timer for videos - let them play to end
-    if (cur.kind === "video" || cur.type === "youtube") return;
+    // Skip timer for videos and YouTube clips - they advance through their own end handlers.
+    if (cur.kind === "video") return;
     timerRef.current = setTimeout(() => setIdx((i) => (i + 1) % items.length), (cur.duration || 10) * 1000);
     return () => clearTimeout(timerRef.current);
-  }, [idx, items]);
+  }, [idx, items, handleMediaEnd]);
+
+  useEffect(() => {
+    const cur = items?.[idx];
+    if (!cur || String(cur.type || cur.kind || "").toLowerCase() !== "youtube") {
+      if (youtubePlayerRef.current) {
+        youtubePlayerRef.current.destroy();
+        youtubePlayerRef.current = null;
+      }
+      return;
+    }
+
+    let cancelled = false;
+    loadYouTubeIframeApi().then((YT) => {
+      if (cancelled || !YT?.Player || !youtubeRef.current) return;
+      if (youtubePlayerRef.current) {
+        youtubePlayerRef.current.destroy();
+        youtubePlayerRef.current = null;
+      }
+
+      const videoId = getYoutubeId(cur.url);
+      if (!videoId) {
+        handleMediaEnd();
+        return;
+      }
+
+      youtubePlayerRef.current = new YT.Player(youtubeRef.current, {
+        videoId,
+        host: "https://www.youtube-nocookie.com",
+        playerVars: {
+          autoplay: 1,
+          controls: 0,
+          modestbranding: 1,
+          rel: 0,
+          fs: 0,
+          playsinline: 1,
+          iv_load_policy: 3,
+        },
+        events: {
+          onReady: (event) => {
+            event.target.playVideo();
+          },
+          onStateChange: (event) => {
+            if (event.data === YT.PlayerState.ENDED) {
+              handleMediaEnd();
+            }
+          },
+        },
+      });
+    });
+
+    return () => {
+      cancelled = true;
+      if (youtubePlayerRef.current) {
+        youtubePlayerRef.current.destroy();
+        youtubePlayerRef.current = null;
+      }
+    };
+  }, [idx, items, handleMediaEnd]);
 
   if (!items || items.length === 0) {
-    return <div className="w-full h-full flex items-center justify-center text-white/30 text-xs font-mono uppercase tracking-widest">{label}</div>;
+    return (
+      <ResponsiveZoneShell scale={zoneScale}>
+        <div className="w-full h-full flex items-center justify-center text-white/30 text-xs font-mono uppercase tracking-widest">{label}</div>
+      </ResponsiveZoneShell>
+    );
   }
 
   const cur = items[idx];
@@ -164,7 +263,7 @@ function MediaSlot({ items, label, queuePreview, weatherData }) {
     const time = now.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
     const date = now.toLocaleDateString(undefined, { weekday: "long", month: "short", day: "numeric" });
     return (
-      <div className="w-full h-full bg-[radial-gradient(circle_at_top,_rgba(255,255,255,0.14),_transparent_35%),linear-gradient(180deg,#111827,#0B1120)] p-5 text-white flex flex-col justify-between">
+      <div className="w-full h-full bg-[radial-gradient(circle_at_top,_rgba(255,255,255,0.14),_transparent_35%),linear-gradient(180deg,#111827,#0B1120)] p-5 text-white flex flex-col justify-between overflow-hidden">
         <div>
           <div className="text-[10px] uppercase tracking-[0.45em] text-white/45">{cur.title || "Today"}</div>
           <div className="mt-2 text-sm text-white/70">{cur.location || "Local time"}</div>
@@ -186,7 +285,7 @@ function MediaSlot({ items, label, queuePreview, weatherData }) {
     const locationLabel = weather.location || "Current conditions";
     const emoji = getWeatherEmoji(weather, condition);
     return (
-      <div className="w-full h-full bg-[radial-gradient(circle_at_top,_rgba(56,189,248,0.22),_transparent_40%),linear-gradient(180deg,#0F172A,#111827)] p-5 text-white flex flex-col justify-between">
+      <div className="w-full h-full bg-[radial-gradient(circle_at_top,_rgba(56,189,248,0.22),_transparent_40%),linear-gradient(180deg,#0F172A,#111827)] p-5 text-white flex flex-col justify-between overflow-hidden">
         <div>
           <div className="text-[10px] uppercase tracking-[0.45em] text-cyan-200/70 flex items-center gap-2">Weather <span className="text-base leading-none">{emoji}</span></div>
           <div className="mt-2 text-sm text-white/70">{locationLabel}</div>
@@ -217,7 +316,7 @@ function MediaSlot({ items, label, queuePreview, weatherData }) {
       service: item.service_type || item.service_name || item.patient_name || "Appointment",
     }));
     return (
-      <div className="w-full h-full bg-[linear-gradient(180deg,#F8FAFC,#EEF2FF)] p-5 text-[#111827] flex flex-col">
+      <div className="w-full h-full bg-[linear-gradient(180deg,#F8FAFC,#EEF2FF)] p-5 text-[#111827] flex flex-col overflow-hidden">
         <div className="flex items-end justify-between gap-3 mb-4">
           <div>
             <div className="text-[10px] uppercase tracking-[0.45em] text-[#6B7280]">Queue</div>
@@ -251,7 +350,7 @@ function MediaSlot({ items, label, queuePreview, weatherData }) {
   if (itemType === "notices") {
     const notices = Array.isArray(cur.items) ? cur.items : Array.isArray(cur.notices) ? cur.notices : [];
     return (
-      <div className="w-full h-full bg-[linear-gradient(180deg,#111827,#0F172A)] p-5 text-white flex flex-col justify-between">
+      <div className="w-full h-full bg-[linear-gradient(180deg,#111827,#0F172A)] p-5 text-white flex flex-col justify-between overflow-hidden">
         <div>
           <div className="text-[10px] uppercase tracking-[0.45em] text-white/45">{cur.title || "Notices"}</div>
           <div className="mt-2 text-sm text-white/70">Announcements and updates</div>
@@ -287,25 +386,14 @@ function MediaSlot({ items, label, queuePreview, weatherData }) {
     return match ? match[1] : null;
   };
 
-  const handleMediaEnd = () => setIdx((i) => (i + 1) % items.length);
-
   const content = 
     (cur.type === "text" || cur.kind === "text") ? (
-      <div className="w-full h-full flex items-center justify-center bg-black p-6 text-center">
+      <div className="w-full h-full flex items-center justify-center bg-black p-6 text-center overflow-hidden">
         <div className="max-w-[90%] text-white font-display text-2xl font-bold leading-tight">{cur.content || cur.text}</div>
       </div>
     ) : (cur.type === "youtube") ? (
-      <div className="w-full h-full flex items-center justify-center bg-black">
-        <iframe
-          width="100%"
-          height="100%"
-          src={`https://www.youtube.com/embed/${getYoutubeId(cur.url)}?autoplay=1&modestbranding=1&rel=0&fs=0`}
-          frameBorder="0"
-          allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
-          allowFullScreen
-          onEnded={handleMediaEnd}
-          style={{ border: "none" }}
-        />
+      <div className="w-full h-full flex items-center justify-center bg-black overflow-hidden">
+        <div ref={youtubeRef} className="w-full h-full" />
       </div>
     ) : (cur.type === "media" || cur.media_id) ? (
       isImageItem(cur) ? (
@@ -335,11 +423,18 @@ function MediaSlot({ items, label, queuePreview, weatherData }) {
       />
     );
 
-  return <div className={`w-full h-full transition-all duration-500 ${showFrame ? "opacity-100 scale-100" : "opacity-0 scale-[1.01]"}`}>{content}</div>;
+  return (
+    <ResponsiveZoneShell scale={zoneScale}>
+      <div className={`w-full h-full overflow-hidden transition-all duration-500 ${showFrame ? "opacity-100 scale-100" : "opacity-0 scale-[1.01]"}`}>
+        {content}
+      </div>
+    </ResponsiveZoneShell>
+  );
 }
 
-function TickerSlot({ items, label }) {
+function TickerSlot({ items, label, zone, canvasWidth, canvasHeight }) {
   const [feedEntries, setFeedEntries] = useState([]);
+  const zoneScale = getZoneScale(zone, canvasWidth, canvasHeight);
 
   useEffect(() => {
     let mounted = true;
@@ -374,103 +469,97 @@ function TickerSlot({ items, label }) {
   }, [items]);
 
   if (!feedEntries.length) {
-    return <div className="w-full h-full flex items-center justify-center text-white/30 text-xs font-mono uppercase tracking-widest">{label}</div>;
+    return (
+      <ResponsiveZoneShell scale={zoneScale}>
+        <div className="w-full h-full flex items-center justify-center text-white/30 text-xs font-mono uppercase tracking-widest">{label}</div>
+      </ResponsiveZoneShell>
+    );
   }
 
   const repeated = [...feedEntries, ...feedEntries];
   return (
-    <div className="w-full h-full overflow-hidden bg-black text-white flex items-center px-4">
-      <div className="animate-marquee flex items-center gap-10 whitespace-nowrap text-sm font-semibold">
-        {repeated.map((entry, index) => (
-          <span key={`${entry.text}-${index}`} className="inline-flex items-center gap-3">
-            <span className="inline-flex h-1.5 w-1.5 rounded-full bg-white/50" />
-            <span>{entry.text}</span>
-          </span>
-        ))}
+    <ResponsiveZoneShell scale={zoneScale}>
+      <div className="w-full h-full overflow-hidden bg-black text-white flex items-center px-4">
+        <div className="animate-marquee flex items-center gap-10 whitespace-nowrap text-sm font-semibold">
+          {repeated.map((entry, index) => (
+            <span key={`${entry.text}-${index}`} className="inline-flex items-center gap-3">
+              <span className="inline-flex h-1.5 w-1.5 rounded-full bg-white/50" />
+              <span>{entry.text}</span>
+            </span>
+          ))}
+        </div>
       </div>
-    </div>
+    </ResponsiveZoneShell>
   );
 }
 
-function QueueBoard({ deviceName, queuePreview, notices }) {
+function QueueBoard({ deviceName, queuePreview, notices, zone, canvasWidth, canvasHeight }) {
   const currentToken = queuePreview?.[0] || null;
   const upNext = Array.isArray(queuePreview) ? queuePreview.slice(1, 4) : [];
   const highlightNotice = Array.isArray(notices) && notices.length > 0 ? notices[0] : null;
   const queueCount = Array.isArray(queuePreview) ? queuePreview.length : 0;
+  const zoneScale = getZoneScale(zone, canvasWidth, canvasHeight);
+  const isCompact = zoneScale < 0.8;
 
   if (!currentToken && upNext.length === 0 && !highlightNotice) return null;
 
   return (
-    <div className="pointer-events-auto w-full max-w-full overflow-hidden rounded-[2.5rem] border border-white/10 bg-[linear-gradient(180deg,rgba(2,6,23,0.98),rgba(15,23,42,0.96))] text-white shadow-[0_30px_100px_-34px_rgba(0,0,0,0.85)] backdrop-blur-xl">
-      <div className="relative">
-        <div className="absolute inset-x-0 top-0 h-1 bg-gradient-to-r from-fuchsia-500 via-rose-500 to-amber-400" />
-        <div className="absolute -right-16 -top-16 h-44 w-44 rounded-full bg-fuchsia-500/18 blur-3xl" />
-        <div className="absolute -left-10 bottom-0 h-32 w-32 rounded-full bg-cyan-400/12 blur-3xl" />
+    <ResponsiveZoneShell scale={zoneScale}>
+      <div className="pointer-events-auto w-full max-w-full overflow-hidden rounded-[2.5rem] border border-white/10 bg-[linear-gradient(180deg,rgba(2,6,23,0.98),rgba(15,23,42,0.96))] text-white shadow-[0_30px_100px_-34px_rgba(0,0,0,0.85)] backdrop-blur-xl">
+        <div className="relative">
+        <div className={`absolute -right-16 -top-16 ${isCompact ? "h-28 w-28" : "h-44 w-44"} rounded-full bg-fuchsia-500/18 blur-3xl`} />
+        <div className={`absolute -left-10 bottom-0 ${isCompact ? "h-20 w-20" : "h-32 w-32"} rounded-full bg-cyan-400/12 blur-3xl`} />
 
-        <div className="grid h-full gap-4 p-5 lg:grid-cols-[0.95fr_1.05fr]">
-          <div className="rounded-[2rem] border border-white/10 bg-[radial-gradient(circle_at_top_right,rgba(236,72,153,0.24),transparent_42%),linear-gradient(180deg,rgba(15,23,42,0.98),rgba(2,6,23,0.98))] p-5 shadow-[0_20px_60px_-36px_rgba(236,72,153,0.45)]">
-            <div className="flex items-start justify-between gap-4">
-              <div>
-                <div className="inline-flex items-center gap-2 rounded-full border border-fuchsia-400/25 bg-fuchsia-500/10 px-3 py-1 text-[10px] uppercase tracking-[0.35em] text-fuchsia-100/85">
-                  <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" /> Concierge board
-                </div>
-                <div className="mt-3 text-[10px] uppercase tracking-[0.45em] text-white/45">{deviceName || "Token Display"}</div>
-                <div className="mt-2 font-display text-[clamp(2rem,4vw,3.1rem)] font-black uppercase tracking-[0.08em] text-white">Now Serving</div>
-              </div>
-              <div className="text-right">
-                <div className="text-[10px] uppercase tracking-[0.35em] text-white/45">Waiting</div>
-                <div className="mt-1 font-display text-[clamp(3rem,6vw,4.5rem)] font-black tracking-tight text-white">{String(queueCount).padStart(2, "0")}</div>
-              </div>
-            </div>
-
+        <div className={`grid h-full ${isCompact ? "gap-2 p-3" : "gap-4 p-5"} lg:grid-cols-[0.95fr_1.05fr]`}>
+          <div className={`rounded-[2rem] border border-white/10 bg-[radial-gradient(circle_at_top_right,rgba(236,72,153,0.24),transparent_42%),linear-gradient(180deg,rgba(15,23,42,0.98),rgba(2,6,23,0.98))] ${isCompact ? "p-3" : "p-5"} shadow-[0_20px_60px_-36px_rgba(236,72,153,0.45)]`}>
             {currentToken ? (
-              <div className="mt-6 grid gap-4 rounded-[1.75rem] border border-fuchsia-400/18 bg-white/5 p-4 md:grid-cols-[1fr_0.8fr] md:items-stretch">
-                <div className="flex items-center gap-4">
-                  <div className="flex h-24 w-24 shrink-0 items-center justify-center rounded-[1.75rem] bg-[linear-gradient(135deg,#ec4899,#fb7185,#f97316)] text-[2.5rem] font-black tracking-tight text-white shadow-[0_24px_50px_-16px_rgba(236,72,153,0.9)]">
+              <div className={`grid ${isCompact ? "gap-2" : "gap-4"} rounded-[1.75rem] border border-fuchsia-400/18 bg-white/5 ${isCompact ? "p-3" : "p-4"} md:grid-cols-[1fr_0.8fr] md:items-stretch`}>
+                <div className={`flex items-center ${isCompact ? "gap-3" : "gap-4"}`}>
+                  <div className={`flex ${isCompact ? "h-18 w-18 text-[1.9rem]" : "h-24 w-24 text-[2.5rem]"} shrink-0 items-center justify-center rounded-[1.75rem] bg-[linear-gradient(135deg,#ec4899,#fb7185,#f97316)] font-black tracking-tight text-white shadow-[0_24px_50px_-16px_rgba(236,72,153,0.9)]`}>
                     {currentToken.token}
                   </div>
                   <div className="min-w-0">
                     <div className="text-[10px] uppercase tracking-[0.4em] text-fuchsia-100/70">Current token</div>
-                    <div className="mt-2 text-[clamp(1.1rem,2vw,1.8rem)] font-semibold text-white truncate">{currentToken.patient_name || currentToken.service_name || "Queue item"}</div>
-                    <div className="mt-1 text-sm uppercase tracking-[0.28em] text-white/55 truncate">{currentToken.service_type || currentToken.service_name || "Appointment"}</div>
-                    <div className="mt-1 text-sm text-white/70">Live front desk callout</div>
+                    <div className={`mt-2 ${isCompact ? "text-[clamp(0.95rem,1.6vw,1.4rem)]" : "text-[clamp(1.1rem,2vw,1.8rem)]"} font-semibold text-white truncate`}>{currentToken.patient_name || currentToken.service_name || "Queue item"}</div>
+                    <div className={`mt-1 ${isCompact ? "text-[0.7rem] tracking-[0.22em]" : "text-sm tracking-[0.28em]"} uppercase text-white/55 truncate`}>{currentToken.service_type || currentToken.service_name || "Appointment"}</div>
+                    <div className={`${isCompact ? "mt-0.5 text-[0.75rem]" : "mt-1 text-sm"} text-white/70`}>Live front desk callout</div>
                   </div>
                 </div>
-                <div className="grid gap-2 self-stretch">
-                  <div className="rounded-2xl border border-white/10 bg-black/20 px-4 py-3">
+                <div className={`grid ${isCompact ? "gap-1.5" : "gap-2"} self-stretch`}>
+                  <div className={`rounded-2xl border border-white/10 bg-black/20 ${isCompact ? "px-3 py-2" : "px-4 py-3"}`}>
                     <div className="text-[10px] uppercase tracking-[0.35em] text-white/45">Status</div>
-                    <div className="mt-1 text-sm font-semibold text-white">{currentToken.status || "pending"}</div>
+                    <div className={`mt-1 ${isCompact ? "text-xs" : "text-sm"} font-semibold text-white`}>{currentToken.status || "pending"}</div>
                   </div>
-                  <div className="rounded-2xl border border-white/10 bg-black/20 px-4 py-3">
+                  <div className={`rounded-2xl border border-white/10 bg-black/20 ${isCompact ? "px-3 py-2" : "px-4 py-3"}`}>
                     <div className="text-[10px] uppercase tracking-[0.35em] text-white/45">Time</div>
-                    <div className="mt-1 text-sm font-semibold text-white">{currentToken.assigned_time || currentToken.preferred_time || "Live queue"}</div>
+                    <div className={`mt-1 ${isCompact ? "text-xs" : "text-sm"} font-semibold text-white`}>{currentToken.assigned_time || currentToken.preferred_time || "Live queue"}</div>
                   </div>
                 </div>
               </div>
             ) : null}
           </div>
 
-          <div className="grid gap-4">
+          <div className={`grid ${isCompact ? "gap-2" : "gap-4"}`}>
             {upNext.length > 0 ? (
-              <div className="rounded-[2rem] border border-white/10 bg-[linear-gradient(180deg,rgba(255,255,255,0.08),rgba(255,255,255,0.04))] p-4">
+              <div className={`rounded-[2rem] border border-white/10 bg-[linear-gradient(180deg,rgba(255,255,255,0.08),rgba(255,255,255,0.04))] ${isCompact ? "p-3" : "p-4"}`}>
                 <div className="flex items-center justify-between gap-3">
                   <div>
                     <div className="text-[10px] uppercase tracking-[0.35em] text-white/55">Next wave</div>
-                    <div className="mt-1 text-sm text-white/75">Upcoming tokens</div>
+                    <div className={`mt-1 ${isCompact ? "text-xs" : "text-sm"} text-white/75`}>Upcoming tokens</div>
                   </div>
                   <div className="text-[10px] uppercase tracking-[0.35em] text-white/35">{upNext.length} entries</div>
                 </div>
-                <div className="mt-4 grid gap-3">
+                <div className={`mt-${isCompact ? "3" : "4"} grid ${isCompact ? "gap-2" : "gap-3"}`}>
                   {upNext.map((item, index) => (
-                    <div key={`${item.token}-${index}`} className="rounded-[1.35rem] border border-white/10 bg-black/30 px-4 py-3.5">
-                      <div className="flex items-center gap-3">
-                        <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-white/10 text-lg font-black text-white">
+                    <div key={`${item.token}-${index}`} className={`rounded-[1.35rem] border border-white/10 bg-black/30 ${isCompact ? "px-3 py-2.5" : "px-4 py-3.5"}`}>
+                      <div className={`flex items-center ${isCompact ? "gap-2.5" : "gap-3"}`}>
+                        <div className={`flex ${isCompact ? "h-10 w-10 text-base" : "h-12 w-12 text-lg"} shrink-0 items-center justify-center rounded-2xl bg-white/10 font-black text-white`}>
                           {item.token}
                         </div>
                         <div className="min-w-0 flex-1">
-                          <div className="text-sm font-semibold text-white truncate">{item.patient_name || item.service_name || "Service"}</div>
-                          <div className="mt-1 text-[10px] uppercase tracking-[0.32em] text-white/50 truncate">{item.service_type || item.service_name || "Appointment"}</div>
-                          <div className="mt-1 flex items-center gap-2 text-[10px] uppercase tracking-[0.32em] text-white/40">
+                          <div className={`font-semibold text-white truncate ${isCompact ? "text-xs" : "text-sm"}`}>{item.patient_name || item.service_name || "Service"}</div>
+                          <div className={`mt-1 uppercase tracking-[0.32em] text-white/50 truncate ${isCompact ? "text-[9px]" : "text-[10px]"}`}>{item.service_type || item.service_name || "Appointment"}</div>
+                          <div className={`mt-1 flex items-center gap-2 uppercase tracking-[0.32em] text-white/40 ${isCompact ? "text-[9px]" : "text-[10px]"}`}>
                             <span>{item.status || "pending"}</span>
                             <span className="h-1 w-1 rounded-full bg-white/20" />
                             <span>{item.assigned_time || item.preferred_time || (item.wait_after_mins ? `${item.wait_after_mins}m wait` : "Queued")}</span>
@@ -484,18 +573,19 @@ function QueueBoard({ deviceName, queuePreview, notices }) {
             ) : null}
 
             {highlightNotice ? (
-              <div className="overflow-hidden rounded-[2rem] border border-fuchsia-400/20 bg-[linear-gradient(135deg,rgba(217,70,239,0.95),rgba(244,63,94,0.92),rgba(251,146,60,0.9))] p-4 text-white shadow-[0_18px_50px_-24px_rgba(244,63,94,0.8)]">
+              <div className={`overflow-hidden rounded-[2rem] border border-fuchsia-400/20 bg-[linear-gradient(135deg,rgba(217,70,239,0.95),rgba(244,63,94,0.92),rgba(251,146,60,0.9))] ${isCompact ? "p-3" : "p-4"} text-white shadow-[0_18px_50px_-24px_rgba(244,63,94,0.8)]`}>
                 <div className="text-[10px] uppercase tracking-[0.4em] text-white/75">Priority notice</div>
-                <div className="mt-1 text-xl font-black uppercase leading-tight">Live update</div>
-                <div className="mt-2 text-sm font-medium text-white/92 line-clamp-3">
+                <div className={`mt-1 font-black uppercase leading-tight ${isCompact ? "text-base" : "text-xl"}`}>Live update</div>
+                <div className={`mt-2 font-medium text-white/92 line-clamp-3 ${isCompact ? "text-xs" : "text-sm"}`}>
                   {highlightNotice.title || highlightNotice.body || "Queue updates available"}
                 </div>
               </div>
             ) : null}
           </div>
         </div>
+        </div>
       </div>
-    </div>
+    </ResponsiveZoneShell>
   );
 }
 
@@ -511,25 +601,28 @@ function isAutoWidgetZone(zone) {
   return /^(header|weather|bookings)$/i.test(zone?.role || "");
 }
 
-function AutoWidgetZone({ zone, queuePreview, payload, providerData, weatherData }) {
+function AutoWidgetZone({ zone, queuePreview, payload, providerData, weatherData, canvasWidth, canvasHeight }) {
   const role = String(zone?.role || "").toLowerCase();
+  const zoneScale = getZoneScale(zone, canvasWidth, canvasHeight);
 
   if (role === "header") {
     return (
-      <div className="w-full h-full bg-[linear-gradient(90deg,#111827,#0F172A)] p-4 text-white flex items-center justify-between gap-4">
-        <div>
-          <div className="text-[10px] uppercase tracking-[0.45em] text-white/45">Today</div>
-          <div className="mt-1 font-display text-3xl font-black tracking-tight">
-            {new Date().toLocaleDateString(undefined, { weekday: "long", month: "short", day: "numeric" })}
+      <ResponsiveZoneShell scale={zoneScale}>
+        <div className="w-full h-full bg-[linear-gradient(90deg,#111827,#0F172A)] p-4 text-white flex items-center justify-between gap-4">
+          <div>
+            <div className="text-[10px] uppercase tracking-[0.45em] text-white/45">Today</div>
+            <div className="mt-1 font-display text-3xl font-black tracking-tight">
+              {new Date().toLocaleDateString(undefined, { weekday: "long", month: "short", day: "numeric" })}
+            </div>
+          </div>
+          <div className="text-right">
+            <div className="text-[10px] uppercase tracking-[0.45em] text-white/45">Local time</div>
+            <div className="mt-1 font-display text-4xl font-black tracking-tight">
+              {new Date().toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })}
+            </div>
           </div>
         </div>
-        <div className="text-right">
-          <div className="text-[10px] uppercase tracking-[0.45em] text-white/45">Local time</div>
-          <div className="mt-1 font-display text-4xl font-black tracking-tight">
-            {new Date().toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })}
-          </div>
-        </div>
-      </div>
+      </ResponsiveZoneShell>
     );
   }
 
@@ -541,20 +634,22 @@ function AutoWidgetZone({ zone, queuePreview, payload, providerData, weatherData
     const low = weather.low ?? weather.min ?? "--";
     const emoji = getWeatherEmoji(weather, condition);
     return (
-      <div className="w-full h-full bg-[radial-gradient(circle_at_top,_rgba(56,189,248,0.22),_transparent_40%),linear-gradient(180deg,#0F172A,#111827)] p-5 text-white flex flex-col justify-between">
-        <div>
-          <div className="text-[10px] uppercase tracking-[0.45em] text-cyan-200/70 flex items-center gap-2">Weather <span className="text-base leading-none">{emoji}</span></div>
-          <div className="mt-2 text-sm text-white/70">{weather.location || zone?.name || "Current conditions"}</div>
-        </div>
-        <div className="space-y-3">
-          <div className="font-display text-7xl font-black tracking-tight leading-none">{temperature}°</div>
-          <div className="text-lg font-semibold text-white/90 flex items-center gap-2"><span>{emoji}</span><span>{condition}</span></div>
-          <div className="flex flex-wrap gap-2 text-xs uppercase tracking-[0.22em] text-white/60">
-            <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1.5">H {high}°</span>
-            <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1.5">L {low}°</span>
+      <ResponsiveZoneShell scale={zoneScale}>
+        <div className="w-full h-full bg-[radial-gradient(circle_at_top,_rgba(56,189,248,0.22),_transparent_40%),linear-gradient(180deg,#0F172A,#111827)] p-5 text-white flex flex-col justify-between">
+          <div>
+            <div className="text-[10px] uppercase tracking-[0.45em] text-cyan-200/70 flex items-center gap-2">Weather <span className="text-base leading-none">{emoji}</span></div>
+            <div className="mt-2 text-sm text-white/70">{weather.location || zone?.name || "Current conditions"}</div>
+          </div>
+          <div className="space-y-3">
+            <div className="font-display text-7xl font-black tracking-tight leading-none">{temperature}°</div>
+            <div className="text-lg font-semibold text-white/90 flex items-center gap-2"><span>{emoji}</span><span>{condition}</span></div>
+            <div className="flex flex-wrap gap-2 text-xs uppercase tracking-[0.22em] text-white/60">
+              <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1.5">H {high}°</span>
+              <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1.5">L {low}°</span>
+            </div>
           </div>
         </div>
-      </div>
+      </ResponsiveZoneShell>
     );
   }
 
@@ -570,9 +665,10 @@ function AutoWidgetZone({ zone, queuePreview, payload, providerData, weatherData
     }));
 
     return (
-      <div className="w-full h-full bg-[linear-gradient(180deg,#F8FAFC,#EEF2FF)] p-5 text-[#111827] flex flex-col">
-        <div className="grid h-full gap-4 lg:grid-cols-[0.85fr_1.15fr]">
-          <div className="relative overflow-hidden rounded-[2rem] border border-[#DBE4F0] bg-[linear-gradient(180deg,#0F172A,#111827)] p-5 text-white shadow-[0_20px_60px_-36px_rgba(15,23,42,0.65)]">
+      <ResponsiveZoneShell scale={zoneScale}>
+        <div className="w-full h-full bg-[linear-gradient(180deg,#F8FAFC,#EEF2FF)] p-5 text-[#111827] flex flex-col">
+          <div className="grid h-full gap-4 lg:grid-cols-[0.85fr_1.15fr]">
+            <div className="relative overflow-hidden rounded-[2rem] border border-[#DBE4F0] bg-[linear-gradient(180deg,#0F172A,#111827)] p-5 text-white shadow-[0_20px_60px_-36px_rgba(15,23,42,0.65)]">
             <div className="absolute -right-8 -top-8 h-24 w-24 rounded-full bg-fuchsia-400/20 blur-3xl" />
             <div className="absolute -left-8 bottom-0 h-20 w-20 rounded-full bg-cyan-400/12 blur-3xl" />
             <div className="relative">
@@ -591,7 +687,7 @@ function AutoWidgetZone({ zone, queuePreview, payload, providerData, weatherData
             </div>
           </div>
 
-          <div className="rounded-[2rem] border border-white/80 bg-white/90 shadow-[0_18px_40px_-24px_rgba(15,23,42,0.3)] p-4 md:p-5 overflow-hidden">
+            <div className="rounded-[2rem] border border-white/80 bg-white/90 shadow-[0_18px_40px_-24px_rgba(15,23,42,0.3)] p-4 md:p-5 overflow-hidden">
             <div className="flex items-end justify-between gap-3 pb-4 border-b border-[#E2E8F0]">
               <div>
                 <div className="text-[10px] uppercase tracking-[0.4em] text-[#94A3B8]">Queue</div>
@@ -624,9 +720,10 @@ function AutoWidgetZone({ zone, queuePreview, payload, providerData, weatherData
                 </div>
               ))}
             </div>
+            </div>
           </div>
         </div>
-      </div>
+      </ResponsiveZoneShell>
     );
   }
 
@@ -635,6 +732,37 @@ function AutoWidgetZone({ zone, queuePreview, payload, providerData, weatherData
 
 function getClientLogoUrl(providerData, payload) {
   return providerData?.profile?.image_url || providerData?.image_url || payload?.client_logo_url || "";
+}
+
+function getZoneScale(zone, canvasWidth, canvasHeight) {
+  const zoneWidth = Number(zone?.width_px ?? canvasWidth) || canvasWidth || 1920;
+  const zoneHeight = Number(zone?.height_px ?? canvasHeight) || canvasHeight || 1080;
+  const baseWidth = Number(canvasWidth) || 1920;
+  const baseHeight = Number(canvasHeight) || 1080;
+  const widthScale = zoneWidth / baseWidth;
+  const heightScale = zoneHeight / baseHeight;
+  const rawScale = Math.min(widthScale, heightScale) * 0.94;
+  return Math.max(0.35, Math.min(1, Number.isFinite(rawScale) ? rawScale : 1));
+}
+
+function ResponsiveZoneShell({ scale = 1, className = "", children }) {
+  const safeScale = Math.max(0.35, Math.min(1, Number(scale) || 1));
+  const inverseScale = 1 / safeScale;
+  return (
+    <div className="w-full h-full overflow-hidden" style={{ contain: "layout paint size" }}>
+      <div
+        className={className}
+        style={{
+          transform: `scale(${safeScale})`,
+          transformOrigin: "top left",
+          width: `${inverseScale * 100}%`,
+          height: `${inverseScale * 100}%`,
+        }}
+      >
+        {children}
+      </div>
+    </div>
+  );
 }
 
 export default function SignagePlayer() {
@@ -1221,26 +1349,6 @@ export default function SignagePlayer() {
 
   return (
     <div ref={wrapRef} className="min-h-screen bg-black text-white flex flex-col" data-testid="signage-player" onPointerDown={revealHud} onTouchStart={revealHud}>
-      {showHud ? (
-        <div className="flex items-center justify-between px-4 py-2 bg-black/80 border-b border-white/10 text-[10px] uppercase tracking-wider font-mono">
-          <div className="flex items-center gap-2"><Monitor className="w-3.5 h-3.5" /> {payload.device_name}</div>
-              <div className="flex items-center gap-4">
-            <button onClick={goFullscreen} className="hover:text-white/80" data-testid="fullscreen-btn"><Maximize className="w-3.5 h-3.5" /></button>
-            <span className={`px-2 py-1 rounded-full border ${voiceState === "listening" ? "border-emerald-400/40 text-emerald-300" : voiceState === "unsupported" || voiceState === "error" ? "border-red-400/40 text-red-300" : "border-white/15 text-white/50"}`}>
-              voice {voiceState === "listening" ? "listening" : voiceState === "restarting" ? "restarting" : voiceState === "unsupported" ? "unsupported" : voiceState === "error" ? "error" : "idle"}
-            </span>
-                <span className={`px-2 py-1 rounded-full border ${weatherState === "ready" ? "border-cyan-400/40 text-cyan-200" : weatherState === "requesting" ? "border-white/20 text-white/60" : weatherState === "denied" || weatherState === "error" ? "border-amber-400/40 text-amber-200" : "border-white/15 text-white/50"}`}>
-                  weather {weatherState}
-                </span>
-            <span className="text-white/40 text-[11px] ml-2">dbg P:{(providerData?.products || payload?.products || []).length} M:{(overlay?.items?.length) || (overlay ? 1 : 0)}</span>
-            <span className="text-white/50">code <span className="text-white">{pairCode}</span></span>
-            <span className="text-white/50">{orientation}</span>
-          </div>
-        </div>
-      ) : null}
-
-      
-
       {voiceError ? (
         <div className="px-4 py-2 border-b border-white/10 bg-red-500/10 text-[11px] text-red-200 font-mono uppercase tracking-wider">
           {voiceError}
@@ -1380,11 +1488,11 @@ export default function SignagePlayer() {
                       style={{ left: `${left}%`, top: `${top}%`, width: `${width}%`, height: `${height}%`, zIndex: zoneZIndex }}
                     >
                       {queueZone && items.length === 0 ? (
-                        <QueueBoard deviceName={payload.device_name} queuePreview={queuePreview} notices={notices} />
+                        <QueueBoard deviceName={payload.device_name} queuePreview={queuePreview} notices={notices} zone={zone} canvasWidth={canvasWidth} canvasHeight={canvasHeight} />
                         ) : autoWidgetZone && items.length === 0 ? (
-                          <AutoWidgetZone zone={zone} queuePreview={queuePreview} payload={payload} providerData={providerData} weatherData={weatherData} />
+                          <AutoWidgetZone zone={zone} queuePreview={queuePreview} payload={payload} providerData={providerData} weatherData={weatherData} canvasWidth={canvasWidth} canvasHeight={canvasHeight} />
                       ) : isTickerZone ? (
-                        <TickerSlot items={items} label={zone.name} />
+                        <TickerSlot items={items} label={zone.name} zone={zone} canvasWidth={canvasWidth} canvasHeight={canvasHeight} />
                       ) : logoZone && items.length === 0 && clientLogoUrl ? (
                         <div className="w-full h-full flex items-center justify-center bg-black p-4">
                           <div className="w-full h-full rounded-[1.5rem] border border-white/10 bg-white/5 flex items-center justify-center overflow-hidden">
@@ -1392,7 +1500,7 @@ export default function SignagePlayer() {
                           </div>
                         </div>
                       ) : (
-                        <MediaSlot items={items} label={zone.name} queuePreview={queuePreview} weatherData={weatherData} />
+                        <MediaSlot items={items} label={zone.name} queuePreview={queuePreview} weatherData={weatherData} zone={zone} canvasWidth={canvasWidth} canvasHeight={canvasHeight} />
                       )}
                     </div>
                   );
@@ -1403,18 +1511,18 @@ export default function SignagePlayer() {
                 {zoneEntries.map(({ zone, items }) => (
                   <div key={zone.id} className="bg-black overflow-hidden relative min-h-[160px]">
                     {isQueueZone(zone) && items.length === 0 ? (
-                      <QueueBoard deviceName={payload.device_name} queuePreview={queuePreview} notices={notices} />
+                      <QueueBoard deviceName={payload.device_name} queuePreview={queuePreview} notices={notices} zone={zone} canvasWidth={canvasWidth} canvasHeight={canvasHeight} />
                     ) : isAutoWidgetZone(zone) && items.length === 0 ? (
-                      <AutoWidgetZone zone={zone} queuePreview={queuePreview} payload={payload} providerData={providerData} weatherData={weatherData} />
+                      <AutoWidgetZone zone={zone} queuePreview={queuePreview} payload={payload} providerData={providerData} weatherData={weatherData} canvasWidth={canvasWidth} canvasHeight={canvasHeight} />
                     ) : /ticker/i.test(`${zone.id} ${zone.name}`) ? (
-                      <TickerSlot items={items} label={zone.name} />
+                      <TickerSlot items={items} label={zone.name} zone={zone} canvasWidth={canvasWidth} canvasHeight={canvasHeight} />
                     ) : isLogoZone(zone) && items.length === 0 && clientLogoUrl ? (
                       <div className="w-full h-full flex items-center justify-center bg-black p-4">
                         <div className="w-full h-full rounded-[1.5rem] border border-white/10 bg-white/5 flex items-center justify-center overflow-hidden">
                           <img src={clientLogoUrl} alt={`${payload.device_name || "client"} logo`} className="max-h-[75%] max-w-[75%] object-contain" />
                         </div>
                       </div>
-                    ) : <MediaSlot items={items} label={zone.name} queuePreview={queuePreview} weatherData={weatherData} />}
+                    ) : <MediaSlot items={items} label={zone.name} queuePreview={queuePreview} weatherData={weatherData} zone={zone} canvasWidth={canvasWidth} canvasHeight={canvasHeight} />}
                   </div>
                 ))}
               </div>

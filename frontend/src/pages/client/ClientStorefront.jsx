@@ -167,7 +167,7 @@ function ServicePanel({ vertical, label, icon: Icon }) {
     const base = String(me.public_booking_slug || me.name || "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 48);
     return base || me.id;
   }, [me]);
-  const bookingUrl = me ? `${window.location.origin}/book/${bookingSlug}` : "";
+  const bookingUrl = me ? `${window.location.origin}/book/${encodeURIComponent(me.id || bookingSlug)}` : "";
   const copyLink = async () => {
     try {
       await navigator.clipboard.writeText(bookingUrl);
