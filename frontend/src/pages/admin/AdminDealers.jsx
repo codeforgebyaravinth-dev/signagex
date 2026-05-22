@@ -18,6 +18,23 @@ import {
 import { Plus, MoreVertical, Pencil, Trash2, Wallet, Search, Pause, Play } from "lucide-react";
 import { toast } from "sonner";
 
+const GST_RE = /^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][0-9A-Z]Z[0-9A-Z]$/;
+
+function isValidPhone(value) {
+  const text = String(value || "").trim();
+  if (!text) return true;
+  const extMatch = text.match(/(?:\s*(?:ext\.?|x)\s*(\d{1,6}))$/i);
+  const base = extMatch ? text.slice(0, extMatch.index).trim() : text;
+  if (/[A-Za-z]/.test(base)) return false;
+  const digits = base.replace(/\D/g, "");
+  return digits.length >= 10 && digits.length <= 15;
+}
+
+function isValidGst(value) {
+  const text = String(value || "").trim().toUpperCase();
+  return !text || GST_RE.test(text);
+}
+
 const empty = {
   name: "", email: "", password: "", gst_number: "", address: "", phone: "",
   plan: "cloud", wallet_balance: 0,
@@ -32,6 +49,7 @@ export default function AdminDealers() {
   const [filter, setFilter] = useState("all");
   const [creditOpen, setCreditOpen] = useState(null);
   const [creditAmt, setCreditAmt] = useState("");
+  const [errors, setErrors] = useState({});
 
   const load = async () => {
     try { const { data } = await api.get("/admin/dealers"); setDealers(data); } catch {}
@@ -47,6 +65,11 @@ export default function AdminDealers() {
 
   const submit = async (e) => {
     e.preventDefault();
+    const nextErrors = {};
+    if (!isValidGst(form.gst_number)) nextErrors.gst_number = "Use a valid 15-character GST number, like 29ABCDE1234F1Z5.";
+    if (!isValidPhone(form.phone)) nextErrors.phone = "Phone must be 10-15 digits, with optional ext 123.";
+    setErrors(nextErrors);
+    if (Object.keys(nextErrors).length > 0) return;
     try {
       if (editing) {
         const payload = { ...form };
@@ -205,11 +228,29 @@ export default function AdminDealers() {
             </div>
             <div>
               <Label className="text-xs uppercase tracking-wider text-[#6B7280]">GST Number</Label>
-              <Input value={form.gst_number} onChange={(e) => setForm({ ...form, gst_number: e.target.value })} className="rounded-sm font-mono" data-testid="dealer-gst" />
+              <Input
+                value={form.gst_number}
+                onChange={(e) => setForm({ ...form, gst_number: e.target.value.toUpperCase() })}
+                onBlur={() => setErrors((prev) => ({ ...prev, gst_number: isValidGst(form.gst_number) ? "" : "Use a valid 15-character GST number, like 29ABCDE1234F1Z5." }))}
+                className="rounded-sm font-mono"
+                data-testid="dealer-gst"
+                placeholder="29ABCDE1234F1Z5"
+                maxLength={15}
+              />
+              {errors.gst_number && <div className="mt-1 text-xs text-red-600">{errors.gst_number}</div>}
             </div>
             <div>
               <Label className="text-xs uppercase tracking-wider text-[#6B7280]">Phone</Label>
-              <Input value={form.phone} onChange={(e) => setForm({ ...form, phone: e.target.value })} className="rounded-sm" data-testid="dealer-phone" />
+              <Input
+                value={form.phone}
+                onChange={(e) => setForm({ ...form, phone: e.target.value })}
+                onBlur={() => setErrors((prev) => ({ ...prev, phone: isValidPhone(form.phone) ? "" : "Phone must be 10-15 digits, with optional ext 123." }))}
+                className="rounded-sm"
+                data-testid="dealer-phone"
+                placeholder="+91 9876543210 ext 123"
+                inputMode="tel"
+              />
+              {errors.phone && <div className="mt-1 text-xs text-red-600">{errors.phone}</div>}
             </div>
             <div className="col-span-2">
               <Label className="text-xs uppercase tracking-wider text-[#6B7280]">Address</Label>

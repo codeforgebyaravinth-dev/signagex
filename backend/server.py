@@ -41,6 +41,92 @@ public_api = APIRouter(prefix="/api/public")
 JWT_ALGO = "HS256"
 PLAN_TYPES = ("cloud", "usb", "hybrid")
 VERTICALS = ("general", "doctor", "salon", "retailer", "society")
+WEATHER_CACHE: Dict[str, Dict[str, Any]] = {}
+
+
+def _weather_description(code: Optional[Any]) -> str:
+    mapping = {
+        0: "Clear sky",
+        1: "Mainly clear",
+        2: "Partly cloudy",
+        3: "Overcast",
+        45: "Fog",
+        48: "Rime fog",
+        51: "Light drizzle",
+        53: "Drizzle",
+        55: "Dense drizzle",
+        61: "Light rain",
+        63: "Rain",
+        65: "Heavy rain",
+        71: "Light snow",
+        73: "Snow",
+        75: "Heavy snow",
+        80: "Rain showers",
+        81: "Heavy showers",
+        82: "Violent showers",
+        95: "Thunderstorm",
+    }
+    try:
+        return mapping.get(int(code), "Current conditions")
+    except Exception:
+        return "Current conditions"
+
+
+def _resolve_weather_snapshot(address: Optional[str]) -> Optional[Dict[str, Any]]:
+    if not address or not str(address).strip():
+        return None
+
+    cache_key = str(address).strip().lower()
+    cached = WEATHER_CACHE.get(cache_key)
+    if cached and cached.get("expires_at") and cached["expires_at"] > datetime.now(timezone.utc):
+        return cached.get("weather")
+
+    try:
+        geo_resp = requests.get(
+            "https://geocoding-api.open-meteo.com/v1/search",
+            params={"name": address, "count": 1, "language": "en", "format": "json"},
+            timeout=4,
+        )
+        geo_resp.raise_for_status()
+        geo_data = geo_resp.json() or {}
+        result = (geo_data.get("results") or [None])[0]
+        if not result:
+            return None
+
+        latitude = result.get("latitude")
+        longitude = result.get("longitude")
+        if latitude is None or longitude is None:
+            return None
+
+        wx_resp = requests.get(
+            "https://api.open-meteo.com/v1/forecast",
+            params={
+                "latitude": latitude,
+                "longitude": longitude,
+                "current": "temperature_2m,weather_code,relative_humidity_2m",
+                "daily": "temperature_2m_max,temperature_2m_min",
+                "timezone": "auto",
+            },
+            timeout=4,
+        )
+        wx_resp.raise_for_status()
+        wx_data = wx_resp.json() or {}
+        current = wx_data.get("current") or {}
+        daily = wx_data.get("daily") or {}
+
+        weather = {
+            "location": result.get("name") or address,
+            "temperature": current.get("temperature_2m"),
+            "condition": _weather_description(current.get("weather_code")),
+            "high": (daily.get("temperature_2m_max") or [None])[0],
+            "low": (daily.get("temperature_2m_min") or [None])[0],
+            "humidity": current.get("relative_humidity_2m"),
+            "weather_code": current.get("weather_code"),
+        }
+        WEATHER_CACHE[cache_key] = {"expires_at": datetime.now(timezone.utc) + timedelta(minutes=30), "weather": weather}
+        return weather
+    except Exception:
+        return None
 
 # ---------------- Auth ----------------
 def hash_password(pw: str) -> str:
@@ -243,6 +329,41 @@ class DeviceCreate(BaseModel):
     orientation: Optional[Literal["auto", "landscape", "portrait"]] = "auto"
     brightness: Optional[int] = 100
 
+
+GST_RE = re.compile(r"^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][0-9A-Z]Z[0-9A-Z]$")
+PHONE_EXT_RE = re.compile(r"(?:\s*(?:ext\.?|x)\s*(\d{1,6}))$", re.IGNORECASE)
+
+
+def _clean_phone_value(value: Optional[str]) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+
+    ext_match = PHONE_EXT_RE.search(text)
+    if ext_match:
+        text = text[:ext_match.start()].strip()
+
+    digits_only = re.sub(r"\D", "", text)
+    if not (10 <= len(digits_only) <= 15):
+        raise HTTPException(status_code=400, detail="Phone number must contain 10 to 15 digits. Use an optional extension like 'ext 123'.")
+
+    if re.search(r"[A-Za-z]", text):
+        raise HTTPException(status_code=400, detail="Phone number can only include digits, spaces, +, -, parentheses, and an optional extension.")
+
+    normalized = re.sub(r"\s+", " ", text).strip()
+    if ext_match:
+        normalized = f"{normalized} ext {ext_match.group(1)}"
+    return normalized
+
+
+def _clean_gst_value(value: Optional[str]) -> str:
+    text = str(value or "").strip().upper()
+    if not text:
+        return ""
+    if not GST_RE.fullmatch(text):
+        raise HTTPException(status_code=400, detail="GST number must be 15 characters in the standard format, like 29ABCDE1234F1Z5.")
+    return text
+
 class DeviceUpdate(BaseModel):
     name: Optional[str] = None
     location: Optional[str] = None
@@ -351,6 +472,7 @@ async def hydrate_client(c: dict) -> dict:
     if c.get("dealer_id"):
         d = await db.users.find_one({"id": c["dealer_id"]}, {"_id": 0, "name": 1})
         c["dealer_name"] = d["name"] if d else ""
+    c["public_booking_slug"] = _slugify_public_ref(c.get("name", ""))
     c.setdefault("doctor_profile", {"services": []})
     c.setdefault("salon_profile", {"services": []})
     return c
@@ -362,6 +484,31 @@ def _service_profile_field(vertical: str) -> str:
 
 def _service_label(vertical: str) -> str:
     return "Doctor" if vertical == "doctor" else "Salon" if vertical == "salon" else vertical.title()
+
+
+def _slugify_public_ref(value: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", str(value or "").strip().lower()).strip("-")
+    return slug[:48]
+
+
+async def _resolve_public_client_ref(ref: str) -> dict:
+    if not ref:
+        raise HTTPException(status_code=404, detail="Provider not found")
+
+    direct = await db.clients.find_one({"id": ref}, {"_id": 0, "password_hash": 0})
+    if direct:
+        return direct
+
+    slug = _slugify_public_ref(ref)
+    if not slug:
+        raise HTTPException(status_code=404, detail="Provider not found")
+
+    candidates = await db.clients.find({"vertical": {"$in": ["doctor", "salon"]}}, {"_id": 0, "password_hash": 0, "name": 1}).to_list(2000)
+    for candidate in candidates:
+        if _slugify_public_ref(candidate.get("name", "")) == slug:
+            return candidate
+
+    raise HTTPException(status_code=404, detail="Provider not found")
 
 
 def _normalize_service_catalog(profile: dict, vertical: str) -> dict:
@@ -453,9 +600,11 @@ async def create_dealer(body: DealerCreate, _: dict = Depends(require_role("admi
     email = body.email.lower()
     if await db.users.find_one({"email": email}): raise HTTPException(status_code=400, detail="Email already exists")
     dealer_code = await gen_dealer_code()
+    phone = _clean_phone_value(body.phone)
+    gst_number = _clean_gst_value(body.gst_number)
     doc = {"id": str(uuid.uuid4()), "email": email, "name": body.name, "role": "dealer",
            "password_hash": hash_password(body.password),
-           "gst_number": body.gst_number, "address": body.address, "phone": body.phone,
+        "gst_number": gst_number, "address": body.address, "phone": phone,
            "plan": body.plan, "plan_id": body.plan_id, "wallet_balance": float(body.wallet_balance),
            "dealer_code": dealer_code,
            "created_at": now_iso()}
@@ -465,6 +614,10 @@ async def create_dealer(body: DealerCreate, _: dict = Depends(require_role("admi
 async def update_dealer(did: str, body: DealerUpdate, _: dict = Depends(require_role("admin"))):
     upd = {k: v for k, v in body.model_dump(exclude_none=True).items() if k != "password"}
     if body.password: upd["password_hash"] = hash_password(body.password)
+    if "phone" in upd:
+        upd["phone"] = _clean_phone_value(upd["phone"])
+    if "gst_number" in upd:
+        upd["gst_number"] = _clean_gst_value(upd["gst_number"])
     if not upd: raise HTTPException(status_code=400, detail="Nothing to update")
     r = await db.users.find_one_and_update({"id": did, "role": "dealer"}, {"$set": upd}, return_document=True, projection={"_id": 0, "password_hash": 0})
     if not r: raise HTTPException(status_code=404, detail="Dealer not found")
@@ -571,9 +724,11 @@ async def create_client(body: ClientCreate, user: dict = Depends(require_role("d
     valid = set([t["id"] for t in await db.templates.find(dealer_tpl_filter, {"_id": 0, "id": 1}).to_list(1000)])
     safe = [t for t in body.assigned_template_ids if t in valid]
     client_code = await gen_client_code()
+    phone = _clean_phone_value(body.phone)
+    gst_number = _clean_gst_value(body.gst_number)
     doc = {"id": str(uuid.uuid4()), "name": body.name, "email": email,
            "password_hash": hash_password(body.password),
-           "phone": body.phone, "gst_number": body.gst_number, "address": body.address,
+           "phone": phone, "gst_number": gst_number, "address": body.address,
            "plan": body.plan, "vertical": body.vertical, "wallet_balance": float(body.wallet_balance),
            "dealer_id": user["id"], "dealer_name": user["name"],
            "client_code": client_code,
@@ -588,6 +743,10 @@ async def update_client(cid: str, body: ClientUpdate, user: dict = Depends(requi
     if body.password: upd["password_hash"] = hash_password(body.password)
     # only allow specific status transitions by dealer
     if body.status and body.status not in ("active", "suspended"): upd.pop("status", None)
+    if "phone" in upd:
+        upd["phone"] = _clean_phone_value(upd["phone"])
+    if "gst_number" in upd:
+        upd["gst_number"] = _clean_gst_value(upd["gst_number"])
     if body.assigned_template_ids is not None:
         dealer_tpl_filter = {"$or": [{"assigned_dealer_ids": user["id"]}, {"assigned_dealer_ids": {"$exists": True, "$size": 0}}, {"assigned_dealer_ids": {"$exists": False}}]}
         valid = set([t["id"] for t in await db.templates.find(dealer_tpl_filter, {"_id": 0, "id": 1}).to_list(1000)])
@@ -957,6 +1116,7 @@ async def _public_service_profile(cid: str):
         "vertical": vertical,
         "phone": c.get("phone", ""),
         "address": c.get("address", ""),
+        "weather": _resolve_weather_snapshot(c.get("address", "")),
     }
 
     # Doctor / Salon: include profile and live queue
@@ -970,11 +1130,15 @@ async def _public_service_profile(cid: str):
         queue_preview = []
         for item in active:
             duration = int(item.get("service_duration_mins") or profile.get("slot_minutes", 15) or 15)
+            display_time = item.get("assigned_time") or item.get("preferred_time") or ""
             queue_preview.append({
                 "token": item.get("token"),
+                "patient_name": item.get("patient_name", ""),
                 "service_name": item.get("service_name", ""),
+                "service_type": item.get("service_name", ""),
                 "service_duration_mins": duration,
                 "preferred_time": item.get("preferred_time", ""),
+                "assigned_time": display_time,
                 "source": item.get("source", "public"),
                 "status": item.get("status", "pending"),
                 "wait_after_mins": queue_minutes,
@@ -1023,6 +1187,12 @@ async def _book_service(cid: str, body: AppointmentCreate, source: Optional[str]
     profile = _normalize_service_catalog(c.get(_service_profile_field(c.get("vertical", "doctor")), {}), c.get("vertical", "doctor"))
     service = await _resolve_service_snapshot(profile, body)
     today = datetime.now(timezone.utc).date().isoformat()
+    slot_info = await _assign_next_available_time(
+        cid,
+        today,
+        body.preferred_time,
+        int(service.get("duration_mins", c.get(_service_profile_field(c.get("vertical", "doctor")), {}).get("slot_minutes", 15)) or 15),
+    )
     counter = await db.counters.find_one_and_update(
         {"_id": f"appointment_token:{cid}:{today}"},
         {"$inc": {"next": 1}},
@@ -1039,6 +1209,9 @@ async def _book_service(cid: str, body: AppointmentCreate, source: Optional[str]
         "patient_phone": body.patient_phone,
         "notes": body.notes,
         "preferred_time": body.preferred_time,
+        "requested_time": slot_info["requested_time"],
+        "assigned_time": slot_info["assigned_time"],
+        "assigned_time_minutes": slot_info["assigned_time_minutes"],
         "service_id": service.get("id", body.service_id or ""),
         "service_name": service.get("name", body.service_name or ""),
         "service_price": float(service.get("price", body.service_price or 0) or 0),
@@ -1054,12 +1227,14 @@ async def _book_service(cid: str, body: AppointmentCreate, source: Optional[str]
 
 @public_api.get("/providers/{cid}")
 async def public_provider_profile(cid: str):
-    return await _public_service_profile(cid)
+    client = await _resolve_public_client_ref(cid)
+    return await _public_service_profile(client["id"])
 
 
 @public_api.post("/providers/{cid}/book")
 async def public_provider_book(cid: str, body: AppointmentCreate):
-    return await _book_service(cid, body, source="public")
+    client = await _resolve_public_client_ref(cid)
+    return await _book_service(client["id"], body, source="public")
 
 
 @public_api.get("/doctors/{cid}")
@@ -1383,12 +1558,21 @@ async def debug_media(mid: str, _: dict = Depends(get_current_user)):
 # ==================== Playlists (template-driven zones) ====================
 class PlaylistItem(BaseModel):
     # Support multiple item types: media (old), text (new), youtube (new)
-    type: Optional[str] = None  # "media", "text", "youtube"
+    type: Optional[str] = None  # "media", "text", "youtube", "clock", "weather", "bookings", "queue", "notices"
     media_id: Optional[str] = None  # for media items
     content: Optional[str] = None  # for text items
     url: Optional[str] = None  # for youtube items
     fit: Optional[Literal["cover", "contain"]] = "cover"  # for media items
     duration: int = 10  # seconds
+    title: Optional[str] = None
+    location: Optional[str] = None
+    temperature: Optional[float] = None
+    condition: Optional[str] = None
+    high: Optional[float] = None
+    low: Optional[float] = None
+    humidity: Optional[float] = None
+    entries: Optional[List[dict]] = None
+    notices: Optional[List[dict]] = None
 
 class PlaylistIn(BaseModel):
     name: str
@@ -1615,6 +1799,60 @@ def _hhmm_to_min(s: str) -> int:
         h, m = s.split(":"); return int(h) * 60 + int(m)
     except Exception: return 0
 
+
+def _parse_time_to_min(value: Optional[str]) -> Optional[int]:
+    if not value:
+        return None
+    text = str(value).strip().upper()
+    if not text:
+        return None
+    formats = ["%H:%M", "%H.%M", "%I:%M %p", "%I %p", "%I:%M%p", "%I%p"]
+    for fmt in formats:
+        try:
+            parsed = datetime.strptime(text, fmt)
+            return parsed.hour * 60 + parsed.minute
+        except Exception:
+            continue
+    return None
+
+
+def _format_min_to_time(minute_value: int) -> str:
+    minute_value = max(0, min(23 * 60 + 59, int(minute_value)))
+    rendered = (datetime(2000, 1, 1) + timedelta(minutes=minute_value)).strftime("%I:%M %p")
+    return rendered.lstrip("0")
+
+
+async def _assign_next_available_time(cid: str, day: str, requested_time: Optional[str], service_duration_mins: int) -> Dict[str, Any]:
+    now_min = datetime.now(timezone.utc).hour * 60 + datetime.now(timezone.utc).minute
+    requested_min = _parse_time_to_min(requested_time)
+    candidate_min = max(requested_min if requested_min is not None else now_min, now_min)
+
+    active_appointments = await db.appointments.find(
+        {"client_id": cid, "date": day, "status": {"$in": ["pending", "called"]}},
+        {"_id": 0},
+    ).sort([("token", 1), ("created_at", 1)]).to_list(200)
+
+    occupied: List[tuple[int, int]] = []
+    for item in active_appointments:
+        start_min = _parse_time_to_min(item.get("assigned_time") or item.get("preferred_time") or "")
+        if start_min is None:
+          continue
+        duration = int(item.get("service_duration_mins") or service_duration_mins or 15)
+        occupied.append((start_min, start_min + max(5, duration)))
+
+    occupied.sort(key=lambda pair: pair[0])
+    while True:
+        conflicting = next((slot for slot in occupied if candidate_min < slot[1] and candidate_min + service_duration_mins > slot[0]), None)
+        if not conflicting:
+            break
+        candidate_min = max(candidate_min, conflicting[1])
+
+    return {
+        "requested_time": requested_time or "",
+        "assigned_time": _format_min_to_time(candidate_min),
+        "assigned_time_minutes": candidate_min,
+    }
+
 @public_api.get("/player/{pair_code}")
 async def player_payload(pair_code: str):
     """Returns current playlist items for a device based on schedules + current time."""
@@ -1622,6 +1860,7 @@ async def player_payload(pair_code: str):
     if not device: raise HTTPException(status_code=404, detail="Device not found. Check pair code.")
     # enforce subscription: do not return playlist if client's subscription is inactive
     client = await db.clients.find_one({"id": device.get("client_id")}, {"_id": 0})
+    weather = _resolve_weather_snapshot(client.get("address", "")) if client else None
     plan = await _resolve_storage_plan_for_client(client)
     active = True
     if not plan:
@@ -1638,7 +1877,7 @@ async def player_payload(pair_code: str):
     if not active:
         # return minimal payload indicating subscription required
         await db.devices.update_one({"id": device["id"]}, {"$set": {"status": "suspended", "last_seen": now_iso()}})
-        return {"device_id": device["id"], "client_id": device["client_id"], "subscription_active": False, "message": "Subscription required to run signage"}
+        return {"device_id": device["id"], "client_id": device["client_id"], "subscription_active": False, "weather": weather, "message": "Subscription required to run signage"}
     now = datetime.now(timezone.utc)
     dow = now.weekday()
     cur_min = now.hour * 60 + now.minute
@@ -1680,6 +1919,13 @@ async def player_payload(pair_code: str):
             elif item.get("type") == "youtube":
                 out.append({"type": "youtube", "url": item.get("url", ""),
                            "duration": item.get("duration", 10)})
+            elif item.get("type") in {"clock", "weather", "bookings", "queue", "notices"}:
+                widget_type = item.get("type")
+                widget = {"type": widget_type, "duration": item.get("duration", 10)}
+                for key in ("title", "location", "temperature", "condition", "high", "low", "humidity", "entries", "notices"):
+                    if item.get(key) is not None:
+                        widget[key] = item.get(key)
+                out.append(widget)
             elif item.get("type") == "media" or item.get("media_id"):
                 # Media item - fetch from database
                 media_id = item.get("media_id")
@@ -1752,6 +1998,7 @@ async def player_payload(pair_code: str):
 
     return {"device_id": device["id"], "device_name": device["name"],
             "client_id": device["client_id"],
+            "weather": weather,
             "orientation": device.get("orientation", "auto"),
             "brightness": int(device.get("brightness", 100) or 100),
             "zones": zones, "template": template,
@@ -2060,8 +2307,13 @@ for item in frontend.split(",") if frontend else []:
 origins.extend([
     "http://localhost:3000",
     "http://localhost:4000",
+    "http://localhost",
+    "https://localhost",
+    "capacitor://localhost",
+    "ionic://localhost",
     "http://127.0.0.1:3000",
     "http://127.0.0.1:4000",
+    "http://127.0.0.1",
 ])
 app.add_middleware(CORSMiddleware, allow_origins=origins or ["*"],
                    allow_credentials=True, allow_methods=["*"], allow_headers=["*"])

@@ -23,10 +23,17 @@ function ServicePanel({ vertical, label, icon: Icon }) {
   const [manualOpen, setManualOpen] = useState(false);
   const [manualForm, setManualForm] = useState({ patient_name: "", patient_phone: "", preferred_time: "", service_id: "", notes: "" });
   const [uploadingImage, setUploadingImage] = useState(false);
+  const [showPastBookings, setShowPastBookings] = useState(false);
 
   const title = label === "Salon" ? "Salon profile" : "Clinic profile";
   const bookingCta = label === "Salon" ? "Book service" : "Book appointment";
   const services = Array.isArray(profile.services) ? profile.services : [];
+  const todayIso = new Date().toISOString().slice(0, 10);
+  const visibleAppointments = useMemo(() => {
+    if (showPastBookings) return apts;
+    return apts.filter((item) => String(item.date || "") === todayIso);
+  }, [apts, showPastBookings, todayIso]);
+  const pastCount = Math.max(0, apts.length - visibleAppointments.length);
 
   const sortAppointments = useCallback((appointments = []) => {
     const rank = (status) => ({ called: 0, pending: 1, done: 2, cancelled: 3 }[status || ""] ?? 9);
@@ -82,13 +89,31 @@ function ServicePanel({ vertical, label, icon: Icon }) {
     if (typeof payload.tags === "string") payload.tags = payload.tags.split(/[;,|]/).map((t) => t.trim()).filter(Boolean);
     if (serviceIndex === null) next.push(payload);
     else next[serviceIndex] = { ...(next[serviceIndex] || {}), ...payload, id: next[serviceIndex]?.id || payload.id };
-    setProfile({ ...profile, services: next });
+    const nextProfile = { ...profile, services: next };
+    setProfile(nextProfile);
     setServiceOpen(false);
+    api.put(`/client/${vertical}/profile`, nextProfile)
+      .then(() => {
+        toast.success(serviceIndex === null ? `${label} service added` : `${label} service updated`);
+        load();
+      })
+      .catch((e) => {
+        toast.error(formatErr(e.response?.data?.detail));
+      });
   };
 
   const removeService = (index) => {
     const next = services.filter((_, i) => i !== index);
-    setProfile({ ...profile, services: next });
+    const nextProfile = { ...profile, services: next };
+    setProfile(nextProfile);
+    api.put(`/client/${vertical}/profile`, nextProfile)
+      .then(() => {
+        toast.success(`${label} service removed`);
+        load();
+      })
+      .catch((e) => {
+        toast.error(formatErr(e.response?.data?.detail));
+      });
   };
 
   const uploadServiceImage = async (file) => {
@@ -137,7 +162,12 @@ function ServicePanel({ vertical, label, icon: Icon }) {
     }
   };
 
-  const bookingUrl = me ? `${window.location.origin}/book/${me.id}` : "";
+  const bookingSlug = useMemo(() => {
+    if (!me) return "";
+    const base = String(me.public_booking_slug || me.name || "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 48);
+    return base || me.id;
+  }, [me]);
+  const bookingUrl = me ? `${window.location.origin}/book/${bookingSlug}` : "";
   const copyLink = async () => {
     try {
       await navigator.clipboard.writeText(bookingUrl);
@@ -266,7 +296,16 @@ function ServicePanel({ vertical, label, icon: Icon }) {
             <div className="text-[11px] font-semibold uppercase tracking-[0.2em] text-[#6B7280] mb-1">Live queue</div>
             <h3 className="font-display text-2xl font-extrabold tracking-tight">Bookings and tokens</h3>
           </div>
-          <Button variant="outline" className="rounded-sm" onClick={openManualBooking}>Add walk-in</Button>
+          <div className="flex items-center gap-2 flex-wrap justify-end">
+            <Button
+              variant="outline"
+              className="rounded-sm"
+              onClick={() => setShowPastBookings((value) => !value)}
+            >
+              {showPastBookings ? "Show today only" : `Show past bookings${pastCount ? ` (${pastCount})` : ""}`}
+            </Button>
+            <Button variant="outline" className="rounded-sm" onClick={openManualBooking}>Add walk-in</Button>
+          </div>
         </div>
         <Table>
           <TableHeader>
@@ -281,7 +320,14 @@ function ServicePanel({ vertical, label, icon: Icon }) {
           </TableHeader>
           <TableBody>
             {apts.length === 0 && <TableRow><TableCell colSpan={6} className="text-center py-10 text-sm text-[#6B7280]">No bookings yet. Share your link to start receiving tokens.</TableCell></TableRow>}
-            {apts.map((a) => (
+            {apts.length > 0 && visibleAppointments.length === 0 && !showPastBookings && (
+              <TableRow>
+                <TableCell colSpan={6} className="text-center py-10 text-sm text-[#6B7280]">
+                  No bookings for today. Toggle past bookings to view older queue items.
+                </TableCell>
+              </TableRow>
+            )}
+            {visibleAppointments.map((a) => (
               <TableRow key={a.id}>
                 <TableCell><span className="inline-flex items-center justify-center w-9 h-9 rounded-sm bg-[#111827] text-white font-mono font-bold">{a.token}</span></TableCell>
                 <TableCell>
@@ -289,7 +335,7 @@ function ServicePanel({ vertical, label, icon: Icon }) {
                   <div className="text-xs text-[#6B7280]">{a.service_name || bookingCta}</div>
                 </TableCell>
                 <TableCell className="font-mono text-xs">{a.patient_phone}</TableCell>
-                <TableCell className="font-mono text-xs">{a.preferred_time || "ASAP"}</TableCell>
+                <TableCell className="font-mono text-xs">{a.assigned_time || a.preferred_time || "ASAP"}</TableCell>
                 <TableCell><span className="text-[11px] uppercase tracking-wider font-semibold">{a.status}</span></TableCell>
                 <TableCell className="text-right">
                   {a.status === "pending" && <Button size="sm" variant="outline" className="rounded-sm mr-2" onClick={() => setStatus(a.id, "called")}>Call</Button>}

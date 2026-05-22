@@ -76,7 +76,7 @@ const isTickerZone = (zone) => zone?.role === "ticker" || /ticker/i.test(`${zone
 const isQueueZone = (zone) => zone?.role === "queue" || /queue|token/i.test(`${zone?.id || ""} ${zone?.name || ""}`);
 const isLogoZone = (zone) => zone?.role === "logo" || /logo|brand/i.test(`${zone?.id || ""} ${zone?.name || ""}`);
 
-const isAutoZone = (zone) => isQueueZone(zone);
+const isAutoZone = (zone) => /^(header|weather|bookings)$/i.test(zone?.role || "") || isQueueZone(zone);
 
 function ZonePicker({ media, items, setItems }) {
   const [addType, setAddType] = useState(""); // for managing add dialog
@@ -108,6 +108,20 @@ function ZonePicker({ media, items, setItems }) {
     }
   };
 
+  const addWidget = (type) => {
+    const widgetDefaults = {
+      clock: { type: "clock", title: "Today", duration: 10 },
+      weather: { type: "weather", title: "Weather", location: "Local area", duration: 10 },
+      bookings: { type: "bookings", title: "Today's bookings", duration: 14 },
+      queue: { type: "queue", title: "Live queue", duration: 14 },
+      notices: { type: "notices", title: "Notices", duration: 12 },
+    };
+    const next = widgetDefaults[type];
+    if (!next) return;
+    setItems([...items, next]);
+    setAddType("");
+  };
+
   const remove = (idx) => setItems(items.filter((_, i) => i !== idx));
   const setDur = (idx, d) => setItems(items.map((it, i) => (i === idx ? { ...it, duration: d } : it)));
   const setFit = (idx, fit) => setItems(items.map((it, i) => (i === idx ? { ...it, fit } : it)));
@@ -130,6 +144,17 @@ function ZonePicker({ media, items, setItems }) {
       <div>
         <div className="text-[10px] uppercase tracking-wider font-semibold text-[#6B7280] mb-2">Add Content</div>
         <div className="border border-[#E5E7EB] rounded-sm max-h-80 overflow-y-auto p-3 bg-[#F9FAFB] space-y-3">
+          <div>
+            <div className="text-[9px] font-semibold uppercase text-[#6B7280] mb-2">⚡ Widgets</div>
+            <div className="grid grid-cols-2 gap-2">
+              <Button type="button" variant="outline" className="h-9 rounded-sm text-xs justify-start" onClick={() => addWidget("clock")}>+ Date & Time</Button>
+              <Button type="button" variant="outline" className="h-9 rounded-sm text-xs justify-start" onClick={() => addWidget("weather")}>+ Weather</Button>
+              <Button type="button" variant="outline" className="h-9 rounded-sm text-xs justify-start" onClick={() => addWidget("bookings")}>+ Bookings</Button>
+              <Button type="button" variant="outline" className="h-9 rounded-sm text-xs justify-start" onClick={() => addWidget("queue")}>+ Queue</Button>
+              <Button type="button" variant="outline" className="h-9 rounded-sm text-xs justify-start col-span-2" onClick={() => addWidget("notices")}>+ Notices</Button>
+            </div>
+          </div>
+
           {/* Media Library Tab */}
           <div>
             <div className="text-[9px] font-semibold uppercase text-[#6B7280] mb-2">📁 Media Library</div>
@@ -188,12 +213,22 @@ function ZonePicker({ media, items, setItems }) {
                   {it.type === "media" && m?.kind === "video" && <div className="text-center"><Film className="w-3 h-3 text-white/50" /></div>}
                   {it.type === "text" && <div className="text-[8px] font-bold text-[#111827]">TXT</div>}
                   {it.type === "youtube" && ytId && <div className="text-[6px] font-bold text-red-600">YT</div>}
+                  {it.type === "clock" && <div className="text-[8px] font-bold text-[#111827]">CLK</div>}
+                  {it.type === "weather" && <div className="text-[8px] font-bold text-[#111827]">WTH</div>}
+                  {it.type === "bookings" && <div className="text-[8px] font-bold text-[#111827]">BK</div>}
+                  {it.type === "queue" && <div className="text-[8px] font-bold text-[#111827]">Q</div>}
+                  {it.type === "notices" && <div className="text-[8px] font-bold text-[#111827]">N</div>}
                 </div>
                 <div className="flex-1 min-w-0">
                   <div className="text-xs font-semibold truncate">
                     {it.type === "media" && (m?.name || "Missing media")}
                     {it.type === "text" && `"${it.content.substring(0, 20)}..."`}
                     {it.type === "youtube" && (ytId ? "YouTube video" : "Invalid YT URL")}
+                    {it.type === "clock" && (it.title || "Date & Time")}
+                    {it.type === "weather" && (it.title || "Weather")}
+                    {it.type === "bookings" && (it.title || "Today's bookings")}
+                    {it.type === "queue" && (it.title || "Queue")}
+                    {it.type === "notices" && (it.title || "Notices")}
                   </div>
                   <div className="flex items-center gap-1 mt-0.5">
                     <Input type="number" min="1" value={it.duration} onChange={(e) => setDur(idx, parseInt(e.target.value || 1))} className="h-6 w-16 text-xs rounded-sm" />
@@ -211,6 +246,21 @@ function ZonePicker({ media, items, setItems }) {
                         </SelectContent>
                       </Select>
                     </div>
+                  )}
+                  {it.type === "clock" && (
+                    <Input value={it.title || ""} onChange={(e) => setItems(items.map((item, i) => (i === idx ? { ...item, title: e.target.value } : item)))} placeholder="Header title" className="mt-1 h-6 rounded-sm text-xs" />
+                  )}
+                  {it.type === "weather" && (
+                    <Input value={it.location || ""} onChange={(e) => setItems(items.map((item, i) => (i === idx ? { ...item, location: e.target.value } : item)))} placeholder="Weather label" className="mt-1 h-6 rounded-sm text-xs" />
+                  )}
+                  {it.type === "bookings" && (
+                    <Input value={it.title || ""} onChange={(e) => setItems(items.map((item, i) => (i === idx ? { ...item, title: e.target.value } : item)))} placeholder="Bookings title" className="mt-1 h-6 rounded-sm text-xs" />
+                  )}
+                  {it.type === "queue" && (
+                    <Input value={it.title || ""} onChange={(e) => setItems(items.map((item, i) => (i === idx ? { ...item, title: e.target.value } : item)))} placeholder="Queue title" className="mt-1 h-6 rounded-sm text-xs" />
+                  )}
+                  {it.type === "notices" && (
+                    <Input value={it.title || ""} onChange={(e) => setItems(items.map((item, i) => (i === idx ? { ...item, title: e.target.value } : item)))} placeholder="Notices title" className="mt-1 h-6 rounded-sm text-xs" />
                   )}
                 </div>
                 <button type="button" onClick={() => remove(idx)} className="text-red-600 px-1">×</button>

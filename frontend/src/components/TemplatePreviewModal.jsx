@@ -44,6 +44,19 @@ const DEMO_CONTENT = {
       "zone-4": [{ kind: "text", text: "✅ On Track\nAll Targets Met\nQuarter Strong", duration: 10 }],
     }
   },
+  "modern-booking-board": {
+    zones: {
+      "zone-1": [{ kind: "clock", title: "Today", location: "Main lobby", duration: 10 }],
+      "zone-2": [{ kind: "weather", location: "Current weather", temperature: 32, condition: "Partly cloudy", high: 34, low: 25, humidity: 61, duration: 10 }],
+      "zone-3": [{ kind: "bookings", title: "Today's bookings", entries: [
+        { name: "Ava Khan", time: "09:30 AM", service: "Consultation" },
+        { name: "Rohan Mehta", time: "10:15 AM", service: "Haircut" },
+        { name: "Meera Shah", time: "11:00 AM", service: "Facial" },
+        { name: "Kabir Ali", time: "12:30 PM", service: "Walk-in" },
+      ], duration: 14 }],
+      "zone-4": [{ kind: "text", text: "WELCOME\n\nQuiet check-in\nPremium service\nLive updates", duration: 10 }],
+    }
+  },
   "sports": {
     zones: {
       "zone-1": [{ kind: "image", url: "https://images.unsplash.com/photo-1517836357463-d25ddfcbf042?w=1200&h=800&fit=crop", name: "Stadium", duration: 10 }],
@@ -85,6 +98,14 @@ const DEMO_CONTENT = {
   }
 };
 
+function formatClockValue() {
+  const now = new Date();
+  return {
+    date: now.toLocaleDateString(undefined, { weekday: "long", month: "short", day: "numeric" }),
+    time: now.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" }),
+  };
+}
+
 // MediaSlot component - similar to SignagePlayer's MediaSlot
 function MediaSlot({ items, label }) {
   const [idx, setIdx] = useState(0);
@@ -109,6 +130,76 @@ function MediaSlot({ items, label }) {
 
   const cur = items[idx];
   if (!cur) return null;
+
+  if (cur.kind === "clock") {
+    const clock = formatClockValue();
+    return (
+      <div className="w-full h-full bg-[radial-gradient(circle_at_top,_rgba(255,255,255,0.18),_transparent_35%),linear-gradient(180deg,#111827,#0B1120)] p-5 text-white flex flex-col justify-between">
+        <div>
+          <div className="text-[10px] uppercase tracking-[0.45em] text-white/50">{cur.title || "Today"}</div>
+          <div className="mt-2 text-sm text-white/70">{cur.location || "Local time"}</div>
+        </div>
+        <div>
+          <div className="font-display text-6xl font-black tracking-tight leading-none">{clock.time}</div>
+          <div className="mt-2 text-lg text-white/80">{clock.date}</div>
+          <div className="mt-4 inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1.5 text-xs uppercase tracking-[0.25em] text-white/60">
+            <span className="h-2 w-2 rounded-full bg-emerald-400" /> Live
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (cur.kind === "weather") {
+    return (
+      <div className="w-full h-full bg-[radial-gradient(circle_at_top,_rgba(56,189,248,0.22),_transparent_40%),linear-gradient(180deg,#0F172A,#111827)] p-5 text-white flex flex-col justify-between">
+        <div>
+          <div className="text-[10px] uppercase tracking-[0.45em] text-cyan-200/70">Weather</div>
+          <div className="mt-2 text-sm text-white/70">{cur.location || "Outside"}</div>
+        </div>
+        <div className="space-y-3">
+          <div className="font-display text-7xl font-black tracking-tight leading-none">{cur.temperature ?? "--"}°</div>
+          <div className="text-lg font-semibold text-white/90">{cur.condition || "Clear skies"}</div>
+          <div className="flex flex-wrap gap-2 text-xs uppercase tracking-[0.22em] text-white/60">
+            <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1.5">H {cur.high ?? "--"}°</span>
+            <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1.5">L {cur.low ?? "--"}°</span>
+            <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1.5">Humidity {cur.humidity ?? "--"}%</span>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (cur.kind === "bookings") {
+    const entries = Array.isArray(cur.entries) ? cur.entries : [];
+    return (
+      <div className="w-full h-full bg-[linear-gradient(180deg,#F8FAFC,#EEF2FF)] p-5 text-[#111827] flex flex-col">
+        <div className="flex items-end justify-between gap-3 mb-4">
+          <div>
+            <div className="text-[10px] uppercase tracking-[0.45em] text-[#6B7280]">Queue</div>
+            <div className="mt-2 font-display text-3xl font-black tracking-tight">{cur.title || "Today's bookings"}</div>
+          </div>
+          <div className="text-right text-xs text-[#6B7280] uppercase tracking-[0.25em]">Live board</div>
+        </div>
+        <div className="space-y-3 overflow-hidden">
+          {entries.length === 0 ? (
+            <div className="rounded-2xl border border-dashed border-[#CBD5E1] bg-white p-4 text-sm text-[#6B7280]">No bookings yet.</div>
+          ) : entries.map((entry, index) => (
+            <div key={`${entry.name}-${index}`} className="rounded-2xl border border-white bg-white/90 shadow-[0_12px_30px_-20px_rgba(15,23,42,0.5)] px-4 py-3 flex items-center justify-between gap-4">
+              <div className="min-w-0">
+                <div className="font-semibold text-lg truncate">{entry.name}</div>
+                <div className="text-sm text-[#6B7280] truncate">{entry.service || "Appointment"}</div>
+              </div>
+              <div className="text-right shrink-0">
+                <div className="font-display text-2xl font-black tracking-tight">{entry.time}</div>
+                <div className="text-[10px] uppercase tracking-[0.3em] text-[#94A3B8]">{entry.service || "Booking"}</div>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+  }
 
   if (cur.kind === "text") {
     return (
@@ -146,6 +237,7 @@ export default function TemplatePreviewModal({ open, onOpenChange, template, lay
     : template.id?.includes("news") ? "news-wall"
     : template.id?.includes("retail") ? "retail-promo"
     : template.id?.includes("corporate") || template.id?.includes("dashboard") ? "corporate-dashboard"
+    : template.id?.includes("booking") || template.id?.includes("modern") || template.id?.includes("concierge") ? "modern-booking-board"
     : template.id?.includes("sports") ? "sports"
     : template.id?.includes("ticker") || template.id?.includes("hero-ticker") ? "hero-ticker"
     : template.id?.includes("hotel") ? "hotel-welcome"

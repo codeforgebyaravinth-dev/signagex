@@ -5,11 +5,36 @@ import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
 import { Label } from "../components/ui/label";
 import { Textarea } from "../components/ui/textarea";
-import { Stethoscope, Clock, MapPin, Phone, CalendarCheck, IndianRupee, CircleSlash } from "lucide-react";
+import { Stethoscope, Clock, MapPin, Phone, CalendarCheck, IndianRupee, CircleSlash, ArrowLeft, ShoppingBag, Tag } from "lucide-react";
 import { toast } from "sonner";
 import { formatErr } from "../lib/api";
 
-const BASE = `${process.env.REACT_APP_BACKEND_URL}/api/public`;
+const BASE = `${(process.env.REACT_APP_BACKEND_URL || "https://rpsignage.com").replace(/\/$/, "")}/api/public`;
+
+function parseTimeToMinutes(value) {
+  if (!value) return null;
+  const text = String(value).trim().toUpperCase();
+  const match = text.match(/^(\d{1,2})(?::(\d{2}))?\s*(AM|PM)?$/);
+  if (!match) return null;
+  let hours = Number(match[1]);
+  const minutes = Number(match[2] || 0);
+  const period = match[3];
+  if (!Number.isFinite(hours) || !Number.isFinite(minutes)) return null;
+  if (period) {
+    const upper = String(period).toUpperCase();
+    hours = hours % 12 + (upper === "PM" ? 12 : 0);
+  }
+  return hours * 60 + minutes;
+}
+
+function formatMinutesToTime(minutes) {
+  const safeMinutes = Math.max(0, Math.min(23 * 60 + 59, Number(minutes) || 0));
+  const hours24 = Math.floor(safeMinutes / 60);
+  const mins = safeMinutes % 60;
+  const suffix = hours24 >= 12 ? "PM" : "AM";
+  const hours12 = hours24 % 12 || 12;
+  return `${hours12}:${String(mins).padStart(2, "0")} ${suffix}`;
+}
 
 export default function PublicBooking() {
   const { clientId } = useParams();
@@ -17,6 +42,7 @@ export default function PublicBooking() {
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [confirmed, setConfirmed] = useState(null);
+  const [detailItem, setDetailItem] = useState(null);
   const [form, setForm] = useState({ patient_name: "", patient_phone: "", preferred_time: "", service_name: "", service_id: "", service_price: 0, notes: "" });
 
   useEffect(() => {
@@ -58,6 +84,71 @@ export default function PublicBooking() {
   const selectedService = services.find((service) => service.id === form.service_id) || services[0] || null;
   const queuePreview = Array.isArray(doc?.queue_preview) ? doc.queue_preview : [];
   const approxWaitMinutes = Number(doc?.queue_total_minutes || 0) + Number(selectedService?.duration_mins || profile.slot_minutes || 15);
+  const availableSlots = useMemo(() => {
+    const slotMinutes = Math.max(5, Number(selectedService?.duration_mins || profile.slot_minutes || 15));
+    const occupied = queuePreview
+      .map((item) => {
+        const start = parseTimeToMinutes(item.assigned_time || item.preferred_time);
+        if (start == null) return null;
+        const duration = Math.max(5, Number(item.service_duration_mins || slotMinutes));
+        return { start, end: start + duration };
+      })
+      .filter(Boolean)
+      .sort((a, b) => a.start - b.start);
+
+    const options = [];
+    let cursor = Math.ceil((new Date().getHours() * 60 + new Date().getMinutes()) / slotMinutes) * slotMinutes;
+    cursor = Math.max(cursor, new Date().getHours() * 60 + new Date().getMinutes());
+
+    while (options.length < 12) {
+      const conflict = occupied.find((slot) => cursor < slot.end && cursor + slotMinutes > slot.start);
+      if (conflict) {
+        cursor = conflict.end;
+        continue;
+      }
+      options.push(formatMinutesToTime(cursor));
+      cursor += slotMinutes;
+    }
+
+    return options;
+  }, [profile.slot_minutes, queuePreview, selectedService?.duration_mins]);
+
+  useEffect(() => {
+    if (!availableSlots.length) {
+      if (form.preferred_time) setForm((prev) => ({ ...prev, preferred_time: "" }));
+      return;
+    }
+    if (!form.preferred_time || !availableSlots.includes(form.preferred_time)) {
+      setForm((prev) => ({ ...prev, preferred_time: availableSlots[0] }));
+    }
+  }, [availableSlots, form.preferred_time]);
+
+  const openServiceDetail = (service) => {
+    setDetailItem({
+      kind: "service",
+      id: service.id,
+      name: service.name || "Service",
+      price: Number(service.price || 0),
+      description: service.description || "Premium service details are available here.",
+      image_url: service.image_url || profile.image_url || "",
+      duration_mins: Number(service.duration_mins || profile.slot_minutes || 15),
+      stock: null,
+    });
+  };
+
+  const openProductDetail = (product) => {
+    setDetailItem({
+      kind: "product",
+      id: product.id,
+      name: product.name || "Product",
+      price: Number(product.price || 0),
+      description: product.description || "Product details are available here.",
+      image_url: product.image_url || "",
+      stock: Number(product.stock || 0),
+    });
+  };
+
+  const closeDetail = () => setDetailItem(null);
 
   const submit = async (e) => {
     e.preventDefault(); setBusy(true);
@@ -91,9 +182,139 @@ export default function PublicBooking() {
           <div className="text-[11px] font-semibold uppercase tracking-[0.2em] text-[#6B7280] mb-2">Booking confirmed</div>
           <h2 className="font-display text-3xl font-extrabold tracking-tighter">Your token</h2>
           <div className="font-display text-7xl font-extrabold tracking-tighter my-6">#{confirmed.token}</div>
-          <p className="text-sm text-[#6B7280]">Visit <strong>{doc.name}</strong> on <strong>{confirmed.date}</strong>. Show this token at the {providerLabel.toLowerCase()}.</p>
+          <p className="text-sm text-[#6B7280]">Visit <strong>{doc.name}</strong> on <strong>{confirmed.date}</strong>. Your time is <strong>{confirmed.assigned_time || confirmed.preferred_time || "ASAP"}</strong>.</p>
           <Button onClick={() => { setConfirmed(null); setForm({ patient_name: "", patient_phone: "", preferred_time: "", service_name: "", service_id: "", service_price: 0, notes: "" }); }} variant="outline" className="rounded-sm mt-6" data-testid="book-another">Book another</Button>
         </div>
+      </div>
+    );
+  }
+
+  if (detailItem && detailItem.kind === "product" && doc.vertical === "retailer") {
+    return (
+      <div className="min-h-screen bg-[radial-gradient(circle_at_top,_rgba(17,24,39,0.12),_transparent_42%),linear-gradient(180deg,#F8FAFC,#EEF2FF)] text-[#111827]">
+        <header className="px-6 py-5">
+          <div className="max-w-6xl mx-auto flex items-center justify-between gap-4 rounded-2xl bg-[#111827] text-white px-5 py-4 shadow-[0_24px_60px_-36px_rgba(15,23,42,0.7)]">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 bg-white text-[#111827] flex items-center justify-center rounded-xl"><ShoppingBag className="w-5 h-5" /></div>
+              <div>
+                <div className="font-display font-extrabold text-lg tracking-tight">SIGNAGE OS · Storefront</div>
+                <div className="text-xs text-white/60 uppercase tracking-[0.2em]">Product details</div>
+              </div>
+            </div>
+            <Button type="button" variant="outline" onClick={closeDetail} className="rounded-xl bg-white/10 text-white border-white/15 hover:bg-white/20">
+              <ArrowLeft className="w-4 h-4 mr-2" /> Back to products
+            </Button>
+          </div>
+        </header>
+
+        <main className="max-w-6xl mx-auto px-6 pb-10">
+          <div className="grid gap-6 lg:grid-cols-[1.05fr_0.95fr] items-start">
+            <div className="rounded-[2rem] overflow-hidden border border-white/60 bg-white shadow-[0_30px_80px_-50px_rgba(15,23,42,0.45)]">
+              <div className="relative min-h-[420px] bg-[#0F172A]">
+                {detailItem.image_url ? <img src={detailItem.image_url} alt={detailItem.name} className="absolute inset-0 w-full h-full object-cover" /> : <div className="absolute inset-0 bg-[radial-gradient(circle_at_top,rgba(255,255,255,0.15),transparent_35%),linear-gradient(135deg,#0F172A,#334155)]" />}
+                <div className="absolute inset-0 bg-gradient-to-t from-black/75 via-black/20 to-transparent" />
+                <div className="absolute inset-x-0 bottom-0 p-6 text-white">
+                  <div className="inline-flex items-center gap-2 rounded-full border border-white/15 bg-white/10 px-3 py-1 text-[10px] uppercase tracking-[0.35em] text-white/70">
+                    <Tag className="w-3.5 h-3.5" /> Product
+                  </div>
+                  <h1 className="mt-3 font-display text-4xl md:text-5xl font-extrabold tracking-tighter max-w-2xl">{detailItem.name}</h1>
+                </div>
+              </div>
+            </div>
+
+            <div className="rounded-[2rem] border border-[#E5E7EB] bg-white p-6 shadow-[0_24px_60px_-36px_rgba(15,23,42,0.25)] lg:sticky lg:top-6">
+              <div className="text-[10px] uppercase tracking-[0.4em] text-[#6B7280]">Ecommerce details</div>
+              <div className="mt-2 font-display text-3xl font-extrabold tracking-tight text-[#0F172A]">{detailItem.name}</div>
+              <div className="mt-4 flex items-center justify-between gap-4 rounded-2xl border border-[#E5E7EB] bg-[#F8FAFC] px-4 py-3">
+                <div>
+                  <div className="text-[10px] uppercase tracking-[0.35em] text-[#6B7280]">Price</div>
+                  <div className="mt-1 font-display text-3xl font-black text-[#111827]">₹{Number(detailItem.price || 0).toLocaleString()}</div>
+                </div>
+                <div className="text-right">
+                  <div className="text-[10px] uppercase tracking-[0.35em] text-[#6B7280]">Stock</div>
+                  <div className="mt-1 font-semibold text-[#111827]">{detailItem.stock ?? "—"}</div>
+                </div>
+              </div>
+              <div className="mt-5 space-y-3 text-sm text-[#374151] leading-6">
+                <p>{detailItem.description || "Product details are available here."}</p>
+              </div>
+              <div className="mt-6 flex gap-3">
+                <a href={doc.phone ? `tel:${doc.phone}` : "#"} className="flex-1 text-center rounded-2xl py-3 bg-[#111827] text-white font-semibold">Contact seller</a>
+                <Button type="button" variant="outline" className="rounded-2xl" onClick={closeDetail}>Close</Button>
+              </div>
+            </div>
+          </div>
+        </main>
+      </div>
+    );
+  }
+
+  if (detailItem && detailItem.kind === "service") {
+    return (
+      <div className="min-h-screen bg-[radial-gradient(circle_at_top,_rgba(17,24,39,0.12),_transparent_42%),linear-gradient(180deg,#F8FAFC,#EEF2FF)] text-[#111827]">
+        <header className="px-6 py-5">
+          <div className="max-w-6xl mx-auto flex items-center justify-between gap-4 rounded-2xl bg-[#111827] text-white px-5 py-4 shadow-[0_24px_60px_-36px_rgba(15,23,42,0.7)]">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 bg-white text-[#111827] flex items-center justify-center rounded-xl"><Stethoscope className="w-5 h-5" /></div>
+              <div>
+                <div className="font-display font-extrabold text-lg tracking-tight">SIGNAGE OS · Storefront</div>
+                <div className="text-xs text-white/60 uppercase tracking-[0.2em]">Service details</div>
+              </div>
+            </div>
+            <Button type="button" variant="outline" onClick={closeDetail} className="rounded-xl bg-white/10 text-white border-white/15 hover:bg-white/20">
+              <ArrowLeft className="w-4 h-4 mr-2" /> Back to services
+            </Button>
+          </div>
+        </header>
+
+        <main className="max-w-6xl mx-auto px-6 pb-10">
+          <div className="grid gap-6 lg:grid-cols-[1.05fr_0.95fr] items-start">
+            <div className="rounded-[2rem] overflow-hidden border border-white/60 bg-white shadow-[0_30px_80px_-50px_rgba(15,23,42,0.45)]">
+              <div className="relative min-h-[420px] bg-[#0F172A]">
+                {detailItem.image_url ? <img src={detailItem.image_url} alt={detailItem.name} className="absolute inset-0 w-full h-full object-cover" /> : <div className="absolute inset-0 bg-[radial-gradient(circle_at_top,rgba(255,255,255,0.15),transparent_35%),linear-gradient(135deg,#0F172A,#334155)]" />}
+                <div className="absolute inset-0 bg-gradient-to-t from-black/75 via-black/20 to-transparent" />
+                <div className="absolute inset-x-0 bottom-0 p-6 text-white">
+                  <div className="inline-flex items-center gap-2 rounded-full border border-white/15 bg-white/10 px-3 py-1 text-[10px] uppercase tracking-[0.35em] text-white/70">
+                    <Clock className="w-3.5 h-3.5" /> Service
+                  </div>
+                  <h1 className="mt-3 font-display text-4xl md:text-5xl font-extrabold tracking-tighter max-w-2xl">{detailItem.name}</h1>
+                </div>
+              </div>
+            </div>
+
+            <div className="rounded-[2rem] border border-[#E5E7EB] bg-white p-6 shadow-[0_24px_60px_-36px_rgba(15,23,42,0.25)] lg:sticky lg:top-6">
+              <div className="text-[10px] uppercase tracking-[0.4em] text-[#6B7280]">Service details</div>
+              <div className="mt-2 font-display text-3xl font-extrabold tracking-tight text-[#0F172A]">{detailItem.name}</div>
+              <div className="mt-4 flex items-center justify-between gap-4 rounded-2xl border border-[#E5E7EB] bg-[#F8FAFC] px-4 py-3">
+                <div>
+                  <div className="text-[10px] uppercase tracking-[0.35em] text-[#6B7280]">Price</div>
+                  <div className="mt-1 font-display text-3xl font-black text-[#111827]">₹{Number(detailItem.price || 0).toLocaleString()}</div>
+                </div>
+                <div className="text-right">
+                  <div className="text-[10px] uppercase tracking-[0.35em] text-[#6B7280]">Duration</div>
+                  <div className="mt-1 font-semibold text-[#111827]">{detailItem.duration_mins || profile.slot_minutes || 15} min</div>
+                </div>
+              </div>
+              <div className="mt-5 space-y-3 text-sm text-[#374151] leading-6">
+                <p>{detailItem.description || "Service details are available here."}</p>
+              </div>
+              <div className="mt-6 flex gap-3">
+                <Button type="button" className="flex-1 rounded-2xl bg-[#111827] hover:bg-[#374151] text-white" onClick={() => {
+                  setForm((prev) => ({
+                    ...prev,
+                    service_id: detailItem.id,
+                    service_name: detailItem.name,
+                    service_price: detailItem.price,
+                  }));
+                  closeDetail();
+                }}>
+                  Book this service
+                </Button>
+                <Button type="button" variant="outline" className="rounded-2xl" onClick={closeDetail}>Close</Button>
+              </div>
+            </div>
+          </div>
+        </main>
       </div>
     );
   }
@@ -139,7 +360,14 @@ export default function PublicBooking() {
               </div>
               <div className="grid gap-6 grid-cols-1 sm:grid-cols-2 md:grid-cols-3">
                 {products.map((p) => (
-                  <div key={p.id} className="rounded-2xl bg-white border border-[#E5E7EB] overflow-hidden shadow-sm">
+                  <div
+                    key={p.id}
+                    role="button"
+                    tabIndex={0}
+                    onClick={() => openProductDetail(p)}
+                    onKeyDown={(e) => (e.key === "Enter" || e.key === " ") && openProductDetail(p)}
+                    className="cursor-pointer text-left rounded-2xl bg-white border border-[#E5E7EB] overflow-hidden shadow-sm hover:shadow-md transition-shadow focus:outline-none focus:ring-2 focus:ring-[#111827]"
+                  >
                     <div className="h-44 bg-[#F8FAFC] relative">
                       {p.image_url ? <img src={p.image_url} alt={p.name} className="absolute inset-0 w-full h-full object-cover" /> : <div className="absolute inset-0 bg-gradient-to-br from-gray-200 to-gray-300" />}
                     </div>
@@ -151,8 +379,8 @@ export default function PublicBooking() {
                         <div className="text-sm text-[#6B7280]">{p.stock} in stock</div>
                       </div>
                       <div className="mt-4 flex gap-2">
-                        <a href={doc.phone ? `tel:${doc.phone}` : "#"} className="flex-1 text-center rounded-xl py-2 bg-[#111827] text-white">Contact seller</a>
-                        <button className="px-3 py-2 rounded-xl border border-[#E5E7EB]">Details</button>
+                        <a href={doc.phone ? `tel:${doc.phone}` : "#"} onClick={(e) => e.stopPropagation()} className="flex-1 text-center rounded-xl py-2 bg-[#111827] text-white">Contact seller</a>
+                        <span className="px-3 py-2 rounded-xl border border-[#E5E7EB] bg-white">Details</span>
                       </div>
                     </div>
                   </div>
@@ -240,7 +468,7 @@ export default function PublicBooking() {
                       <button
                         key={service.id}
                         type="button"
-                        onClick={() => setForm((prev) => ({ ...prev, service_id: service.id || "", service_name: service.name || prev.service_name, service_price: Number(service.price || 0) }))}
+                        onClick={() => openServiceDetail(service)}
                         className={`text-left rounded-[1.5rem] overflow-hidden border transition shadow-[0_18px_40px_-28px_rgba(15,23,42,0.35)] ${active ? "border-[#111827] ring-2 ring-[#111827]" : "border-[#E5E7EB] hover:border-[#94A3B8]"}`}
                       >
                         <div className="h-44 bg-[#0F172A] relative">
@@ -277,8 +505,16 @@ export default function PublicBooking() {
                 <Input value={form.patient_name} onChange={(e) => setForm({ ...form, patient_name: e.target.value })} required className="rounded-2xl" data-testid="book-name" /></div>
               <div><Label className="text-xs uppercase tracking-wider text-[#6B7280]">Phone</Label>
                 <Input value={form.patient_phone} onChange={(e) => setForm({ ...form, patient_phone: e.target.value })} required className="rounded-2xl" data-testid="book-phone" /></div>
-              <div><Label className="text-xs uppercase tracking-wider text-[#6B7280]">Preferred time</Label>
-                <Input value={form.preferred_time} onChange={(e) => setForm({ ...form, preferred_time: e.target.value })} placeholder="10:30 AM" className="rounded-2xl" /></div>
+              <div><Label className="text-xs uppercase tracking-wider text-[#6B7280]">Available slot</Label>
+                <select
+                  value={form.preferred_time}
+                  onChange={(e) => setForm({ ...form, preferred_time: e.target.value })}
+                  className="w-full h-11 rounded-2xl border border-[#D1D5DB] bg-white px-4 text-sm"
+                >
+                  {availableSlots.length === 0 ? <option value="">No slots available</option> : null}
+                  {availableSlots.map((slot) => <option key={slot} value={slot}>{slot}</option>)}
+                </select>
+                <div className="mt-2 text-xs text-[#6B7280]">Choose a free slot. If it gets taken before confirmation, we’ll move you to the next available time.</div></div>
               {services.length > 0 ? (
                 <div><Label className="text-xs uppercase tracking-wider text-[#6B7280]">Service</Label>
                   <select value={form.service_id} onChange={(e) => {

@@ -65,6 +65,26 @@ This section has moved here: [https://facebook.github.io/create-react-app/docs/a
 
 This section has moved here: [https://facebook.github.io/create-react-app/docs/deployment](https://facebook.github.io/create-react-app/docs/deployment)
 
+## Capacitor Android APK
+
+This frontend is now set up for Capacitor so it can be wrapped as an Android app.
+
+Build the web app first, then sync it into Android:
+
+```bash
+yarn build
+yarn cap:sync
+yarn android
+```
+
+If Android Studio is installed, `yarn android` opens the native project for building an APK or AAB.
+
+Notes:
+
+- The app uses the build-time `REACT_APP_BACKEND_URL` value for API calls.
+- For APK builds, set `REACT_APP_BACKEND_URL` to your VPS HTTPS URL before building.
+- The Capacitor Android project is generated under `frontend/android/`.
+
 ### `npm run build` fails to minify
 
 This section has moved here: [https://facebook.github.io/create-react-app/docs/troubleshooting#npm-run-build-fails-to-minify](https://facebook.github.io/create-react-app/docs/troubleshooting#npm-run-build-fails-to-minify)

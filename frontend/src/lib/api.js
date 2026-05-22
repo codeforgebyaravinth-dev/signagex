@@ -1,6 +1,6 @@
 import axios from "axios";
 
-const RAW_BASE = (process.env.REACT_APP_BACKEND_URL || "").replace(/\/$/, "");
+const RAW_BASE = (process.env.REACT_APP_BACKEND_URL || "https://rpsignage.com").replace(/\/$/, "");
 const BASE = RAW_BASE.replace(/\/api$/, "");
 export const API_BASE = `${BASE}/api`;
 

@@ -2,8 +2,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useParams } from "react-router-dom";
 import axios from "axios";
 import { Monitor, CircleSlash, Maximize } from "lucide-react";
+import { API_BASE } from "../lib/api";
 
-const RAW_BASE = (process.env.REACT_APP_BACKEND_URL || "").replace(/\/$/, "");
+const RAW_BASE = (process.env.REACT_APP_BACKEND_URL || "https://rpsignage.com").replace(/\/$/, "");
 const BASE = RAW_BASE.replace(/\/api$/, "");
 
 function getMediaFit(item) {
@@ -55,7 +56,79 @@ function isImageItem(item) {
   return item?.kind === "image" || (item?.content_type || "").startsWith("image/") || /\.(png|jpe?g|webp|gif|bmp|svg)$/i.test(item?.url || item?.name || "");
 }
 
-function MediaSlot({ items, label }) {
+function getWeatherEmoji(weather = {}, conditionText = "") {
+  const code = Number(weather?.weather_code);
+  if (Number.isFinite(code)) {
+    if (code === 0) return "☀️";
+    if ([1, 2].includes(code)) return "🌤️";
+    if (code === 3) return "☁️";
+    if ([45, 48].includes(code)) return "🌫️";
+    if ([51, 53, 55].includes(code)) return "🌦️";
+    if ([61, 63, 65, 80, 81, 82].includes(code)) return "🌧️";
+    if ([71, 73, 75].includes(code)) return "❄️";
+    if (code === 95) return "⛈️";
+  }
+
+  const text = String(conditionText || weather?.condition || weather?.summary || "").toLowerCase();
+  if (/(sun|clear|bright|hot)/.test(text)) return "☀️";
+  if (/(partly|mostly clear|cloud|overcast)/.test(text)) return "⛅";
+  if (/(fog|mist|haze)/.test(text)) return "🌫️";
+  if (/(drizzle|rain|shower)/.test(text)) return "🌧️";
+  if (/(snow|sleet|hail)/.test(text)) return "❄️";
+  if (/(storm|thunder)/.test(text)) return "⛈️";
+  return "🌡️";
+}
+
+function getWeatherConditionLabel(weather = {}, conditionText = "") {
+  const code = Number(weather?.weather_code);
+  const codeMap = {
+    0: "Clear sky",
+    1: "Mainly clear",
+    2: "Partly cloudy",
+    3: "Overcast",
+    45: "Fog",
+    48: "Rime fog",
+    51: "Light drizzle",
+    53: "Drizzle",
+    55: "Dense drizzle",
+    61: "Light rain",
+    63: "Rain",
+    65: "Heavy rain",
+    71: "Light snow",
+    73: "Snow",
+    75: "Heavy snow",
+    80: "Rain showers",
+    81: "Heavy showers",
+    82: "Violent showers",
+    95: "Thunderstorm",
+  };
+  if (Number.isFinite(code) && codeMap[code]) return codeMap[code];
+  const text = String(conditionText || weather?.condition || weather?.summary || "").trim();
+  return text || "Clear skies";
+}
+
+async function fetchWeatherFromCoords(latitude, longitude) {
+  const response = await fetch(
+    `https://api.open-meteo.com/v1/forecast?latitude=${encodeURIComponent(latitude)}&longitude=${encodeURIComponent(longitude)}&current=temperature_2m,weather_code,relative_humidity_2m&daily=temperature_2m_max,temperature_2m_min&timezone=auto`
+  );
+  if (!response.ok) {
+    throw new Error("Weather lookup failed");
+  }
+  const data = await response.json();
+  const current = data?.current || {};
+  const daily = data?.daily || {};
+  return {
+    location: "Current location",
+    temperature: current.temperature_2m,
+    condition: current.weather_code != null ? `Weather code ${current.weather_code}` : null,
+    high: Array.isArray(daily.temperature_2m_max) ? daily.temperature_2m_max[0] : null,
+    low: Array.isArray(daily.temperature_2m_min) ? daily.temperature_2m_min[0] : null,
+    humidity: current.relative_humidity_2m,
+    weather_code: current.weather_code,
+  };
+}
+
+function MediaSlot({ items, label, queuePreview, weatherData }) {
   const [idx, setIdx] = useState(0);
   const [showFrame, setShowFrame] = useState(true);
   const timerRef = useRef(null);
@@ -84,6 +157,118 @@ function MediaSlot({ items, label }) {
 
   const cur = items[idx];
   if (!cur) return null;
+  const itemType = String(cur.kind || cur.type || "").toLowerCase();
+
+  if (itemType === "clock") {
+    const now = new Date();
+    const time = now.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+    const date = now.toLocaleDateString(undefined, { weekday: "long", month: "short", day: "numeric" });
+    return (
+      <div className="w-full h-full bg-[radial-gradient(circle_at_top,_rgba(255,255,255,0.14),_transparent_35%),linear-gradient(180deg,#111827,#0B1120)] p-5 text-white flex flex-col justify-between">
+        <div>
+          <div className="text-[10px] uppercase tracking-[0.45em] text-white/45">{cur.title || "Today"}</div>
+          <div className="mt-2 text-sm text-white/70">{cur.location || "Local time"}</div>
+        </div>
+        <div>
+          <div className="font-display text-6xl font-black tracking-tight leading-none">{time}</div>
+          <div className="mt-2 text-lg text-white/80">{date}</div>
+          <div className="mt-4 inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1.5 text-xs uppercase tracking-[0.25em] text-white/60">
+            <span className="h-2 w-2 rounded-full bg-emerald-400" /> Live
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (itemType === "weather") {
+    const weather = weatherData || {};
+    const condition = getWeatherConditionLabel(weather, cur.condition || cur.summary || "");
+    const locationLabel = weather.location || "Current conditions";
+    const emoji = getWeatherEmoji(weather, condition);
+    return (
+      <div className="w-full h-full bg-[radial-gradient(circle_at_top,_rgba(56,189,248,0.22),_transparent_40%),linear-gradient(180deg,#0F172A,#111827)] p-5 text-white flex flex-col justify-between">
+        <div>
+          <div className="text-[10px] uppercase tracking-[0.45em] text-cyan-200/70 flex items-center gap-2">Weather <span className="text-base leading-none">{emoji}</span></div>
+          <div className="mt-2 text-sm text-white/70">{locationLabel}</div>
+        </div>
+        <div className="space-y-3">
+          <div className="font-display text-7xl font-black tracking-tight leading-none">{weather.temperature ?? cur.temperature ?? "--"}°</div>
+          <div className="text-lg font-semibold text-white/90 flex items-center gap-2"><span>{emoji}</span><span>{condition}</span></div>
+          <div className="flex flex-wrap gap-2 text-xs uppercase tracking-[0.22em] text-white/60">
+            <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1.5">H {weather.high ?? cur.high ?? "--"}°</span>
+            <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1.5">L {weather.low ?? cur.low ?? "--"}°</span>
+            <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1.5">Humidity {weather.humidity ?? cur.humidity ?? "--"}%</span>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (itemType === "bookings" || itemType === "queue") {
+    const sourceEntries = Array.isArray(cur.entries) && cur.entries.length > 0
+      ? cur.entries
+      : Array.isArray(queuePreview)
+        ? queuePreview
+        : [];
+    const entries = sourceEntries.map((item) => ({
+      token: item.token,
+      name: item.patient_name || item.service_name || "Booking",
+      time: item.assigned_time || item.preferred_time || `${item.wait_after_mins || 0} min`,
+      service: item.service_type || item.service_name || item.patient_name || "Appointment",
+    }));
+    return (
+      <div className="w-full h-full bg-[linear-gradient(180deg,#F8FAFC,#EEF2FF)] p-5 text-[#111827] flex flex-col">
+        <div className="flex items-end justify-between gap-3 mb-4">
+          <div>
+            <div className="text-[10px] uppercase tracking-[0.45em] text-[#6B7280]">Queue</div>
+            <div className="mt-2 font-display text-3xl font-black tracking-tight">{cur.title || "Today's bookings"}</div>
+          </div>
+          <div className="text-right text-xs text-[#6B7280] uppercase tracking-[0.25em]">Live board</div>
+        </div>
+        <div className="space-y-3 overflow-hidden">
+          {entries.length === 0 ? (
+            <div className="rounded-2xl border border-dashed border-[#CBD5E1] bg-white p-4 text-sm text-[#6B7280]">No bookings yet.</div>
+          ) : entries.map((entry, index) => (
+            <div key={`${entry.name}-${index}`} className="rounded-2xl border border-white bg-white/90 shadow-[0_12px_30px_-20px_rgba(15,23,42,0.5)] px-4 py-3 flex items-center justify-between gap-4">
+              <div className="min-w-0">
+                <div className="flex items-center gap-2 text-[10px] uppercase tracking-[0.32em] text-[#94A3B8]">
+                  <span>Token {entry.token || index + 1}</span>
+                </div>
+                <div className="font-semibold text-lg truncate">{entry.name}</div>
+                <div className="text-sm text-[#6B7280] truncate">{entry.service || "Appointment"}</div>
+              </div>
+              <div className="text-right shrink-0">
+                <div className="font-display text-2xl font-black tracking-tight">{entry.time}</div>
+                <div className="text-[10px] uppercase tracking-[0.3em] text-[#94A3B8]">{entry.service || "Booking"}</div>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+  }
+
+  if (itemType === "notices") {
+    const notices = Array.isArray(cur.items) ? cur.items : Array.isArray(cur.notices) ? cur.notices : [];
+    return (
+      <div className="w-full h-full bg-[linear-gradient(180deg,#111827,#0F172A)] p-5 text-white flex flex-col justify-between">
+        <div>
+          <div className="text-[10px] uppercase tracking-[0.45em] text-white/45">{cur.title || "Notices"}</div>
+          <div className="mt-2 text-sm text-white/70">Announcements and updates</div>
+        </div>
+        <div className="space-y-2 overflow-hidden">
+          {notices.length === 0 ? (
+            <div className="rounded-2xl border border-dashed border-white/15 bg-white/5 p-4 text-sm text-white/60">No notices yet.</div>
+          ) : notices.slice(0, 4).map((notice, index) => (
+            <div key={`${notice.title || notice.body || index}`} className="rounded-2xl border border-white/10 bg-white/5 px-4 py-3">
+              <div className="font-semibold text-base truncate">{notice.title || "Notice"}</div>
+              <div className="text-sm text-white/70 line-clamp-2 mt-1">{notice.body || notice.text || ""}</div>
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+  }
 
   const resolveSrc = (it) => {
     const candidate = it?.url || it?.image_url || it?.public_url || it?.media_url || (it?.media_id ? `/api/media/${it.media_id}` : "");
@@ -216,71 +401,99 @@ function QueueBoard({ deviceName, queuePreview, notices }) {
   if (!currentToken && upNext.length === 0 && !highlightNotice) return null;
 
   return (
-    <div className="pointer-events-auto w-full max-w-full overflow-hidden rounded-none border border-white/10 bg-[#080608]/92 text-white shadow-none backdrop-blur-[1px]">
-      <div className="flex flex-col gap-2">
-      <div className="relative shrink-0 border-b border-white/10 px-3 pt-2 pb-2 text-center">
-        <div className="absolute inset-x-0 top-0 h-1 bg-gradient-to-r from-fuchsia-500 via-rose-500 to-fuchsia-500" />
-        <div className="mx-auto mb-1.5 flex h-10 w-10 items-center justify-center rounded-none border border-fuchsia-400/30 bg-fuchsia-500/10 text-fuchsia-200">
-          <span className="text-[10px] font-bold uppercase tracking-[0.35em]">RP</span>
-        </div>
-        <div className="text-[10px] uppercase tracking-[0.5em] text-white/55">{deviceName || "Token Display"}</div>
-        <div className="mt-1 text-xl font-black uppercase tracking-[0.22em] text-white">Now Serving</div>
-        <div className="mt-1 text-[10px] uppercase tracking-[0.35em] text-white/40">Live queue {queueCount ? `· ${queueCount} waiting` : ""}</div>
-      </div>
+    <div className="pointer-events-auto w-full max-w-full overflow-hidden rounded-[2.5rem] border border-white/10 bg-[linear-gradient(180deg,rgba(2,6,23,0.98),rgba(15,23,42,0.96))] text-white shadow-[0_30px_100px_-34px_rgba(0,0,0,0.85)] backdrop-blur-xl">
+      <div className="relative">
+        <div className="absolute inset-x-0 top-0 h-1 bg-gradient-to-r from-fuchsia-500 via-rose-500 to-amber-400" />
+        <div className="absolute -right-16 -top-16 h-44 w-44 rounded-full bg-fuchsia-500/18 blur-3xl" />
+        <div className="absolute -left-10 bottom-0 h-32 w-32 rounded-full bg-cyan-400/12 blur-3xl" />
 
-      <div className="px-3 pb-3 space-y-2.5">
-        {currentToken ? (
-          <div className="rounded-none border border-fuchsia-400/25 bg-[radial-gradient(circle_at_top,rgba(236,72,153,0.24),transparent_60%),linear-gradient(180deg,rgba(236,72,153,0.16),rgba(8,6,8,0.98))] px-3 py-4 text-center shadow-none">
-            <div className="text-[10px] uppercase tracking-[0.4em] text-fuchsia-200/85">Current token</div>
-            <div className="mt-2 font-display text-[clamp(3rem,8vw,5rem)] font-black leading-none tracking-tight text-white">
-              {currentToken.token}
+        <div className="grid h-full gap-4 p-5 lg:grid-cols-[0.95fr_1.05fr]">
+          <div className="rounded-[2rem] border border-white/10 bg-[radial-gradient(circle_at_top_right,rgba(236,72,153,0.24),transparent_42%),linear-gradient(180deg,rgba(15,23,42,0.98),rgba(2,6,23,0.98))] p-5 shadow-[0_20px_60px_-36px_rgba(236,72,153,0.45)]">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <div className="inline-flex items-center gap-2 rounded-full border border-fuchsia-400/25 bg-fuchsia-500/10 px-3 py-1 text-[10px] uppercase tracking-[0.35em] text-fuchsia-100/85">
+                  <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" /> Concierge board
+                </div>
+                <div className="mt-3 text-[10px] uppercase tracking-[0.45em] text-white/45">{deviceName || "Token Display"}</div>
+                <div className="mt-2 font-display text-[clamp(2rem,4vw,3.1rem)] font-black uppercase tracking-[0.08em] text-white">Now Serving</div>
+              </div>
+              <div className="text-right">
+                <div className="text-[10px] uppercase tracking-[0.35em] text-white/45">Waiting</div>
+                <div className="mt-1 font-display text-[clamp(3rem,6vw,4.5rem)] font-black tracking-tight text-white">{String(queueCount).padStart(2, "0")}</div>
+              </div>
             </div>
-            <div className="mt-2 text-[clamp(0.95rem,2.2vw,1.35rem)] font-semibold text-white/90">
-              {currentToken.service_name || currentToken.patient_name || "Queue item"}
-            </div>
-            <div className="mt-1.5 text-[10px] uppercase tracking-[0.4em] text-white/45">
-              {currentToken.service_duration_mins ? `${currentToken.service_duration_mins} min` : "Live queue"}
-            </div>
-          </div>
-        ) : null}
 
-        {upNext.length > 0 ? (
-          <div className="rounded-none border border-white/10 bg-white/5 px-3 py-2.5">
-            <div className="flex items-center justify-between gap-3">
-              <div className="text-[10px] uppercase tracking-[0.35em] text-white/55">Up next</div>
-              <div className="text-[10px] uppercase tracking-[0.35em] text-white/35">Preview</div>
-            </div>
-            <div className="mt-2 space-y-1.5">
-              {upNext.map((item, index) => (
-                <div key={`${item.token}-${index}`} className="flex items-center justify-between rounded-none border border-white/10 bg-black/45 px-2.5 py-2">
-                  <div className="flex items-baseline gap-3 min-w-0">
-                    <div className="text-lg font-black leading-none text-white">{item.token}</div>
-                    <div className="min-w-0">
-                      <div className="text-[11px] font-semibold text-white truncate">{item.service_name || "Service"}</div>
-                      <div className="text-[9px] uppercase tracking-[0.3em] text-white/35">
-                        {item.status || "pending"}
-                      </div>
-                    </div>
+            {currentToken ? (
+              <div className="mt-6 grid gap-4 rounded-[1.75rem] border border-fuchsia-400/18 bg-white/5 p-4 md:grid-cols-[1fr_0.8fr] md:items-stretch">
+                <div className="flex items-center gap-4">
+                  <div className="flex h-24 w-24 shrink-0 items-center justify-center rounded-[1.75rem] bg-[linear-gradient(135deg,#ec4899,#fb7185,#f97316)] text-[2.5rem] font-black tracking-tight text-white shadow-[0_24px_50px_-16px_rgba(236,72,153,0.9)]">
+                    {currentToken.token}
                   </div>
-                  <div className="text-right text-[9px] uppercase tracking-[0.3em] text-white/40">
-                    {item.wait_after_mins ? `${item.wait_after_mins}m wait` : "Queued"}
+                  <div className="min-w-0">
+                    <div className="text-[10px] uppercase tracking-[0.4em] text-fuchsia-100/70">Current token</div>
+                    <div className="mt-2 text-[clamp(1.1rem,2vw,1.8rem)] font-semibold text-white truncate">{currentToken.patient_name || currentToken.service_name || "Queue item"}</div>
+                    <div className="mt-1 text-sm uppercase tracking-[0.28em] text-white/55 truncate">{currentToken.service_type || currentToken.service_name || "Appointment"}</div>
+                    <div className="mt-1 text-sm text-white/70">Live front desk callout</div>
                   </div>
                 </div>
-              ))}
-            </div>
+                <div className="grid gap-2 self-stretch">
+                  <div className="rounded-2xl border border-white/10 bg-black/20 px-4 py-3">
+                    <div className="text-[10px] uppercase tracking-[0.35em] text-white/45">Status</div>
+                    <div className="mt-1 text-sm font-semibold text-white">{currentToken.status || "pending"}</div>
+                  </div>
+                  <div className="rounded-2xl border border-white/10 bg-black/20 px-4 py-3">
+                    <div className="text-[10px] uppercase tracking-[0.35em] text-white/45">Time</div>
+                    <div className="mt-1 text-sm font-semibold text-white">{currentToken.assigned_time || currentToken.preferred_time || "Live queue"}</div>
+                  </div>
+                </div>
+              </div>
+            ) : null}
           </div>
-        ) : null}
 
-        {highlightNotice ? (
-          <div className="max-h-[96px] overflow-hidden rounded-none border border-fuchsia-400/20 bg-gradient-to-br from-fuchsia-500/90 via-rose-500/80 to-pink-400/85 p-2.5 text-white shadow-none">
-            <div className="text-[10px] uppercase tracking-[0.4em] text-white/75">Special offer</div>
-            <div className="mt-0.5 text-base font-black uppercase leading-tight">Live notice</div>
-            <div className="mt-1 text-[11px] font-semibold text-white/90 line-clamp-2">
-              {highlightNotice.title || highlightNotice.body || "Queue updates available"}
-            </div>
+          <div className="grid gap-4">
+            {upNext.length > 0 ? (
+              <div className="rounded-[2rem] border border-white/10 bg-[linear-gradient(180deg,rgba(255,255,255,0.08),rgba(255,255,255,0.04))] p-4">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <div className="text-[10px] uppercase tracking-[0.35em] text-white/55">Next wave</div>
+                    <div className="mt-1 text-sm text-white/75">Upcoming tokens</div>
+                  </div>
+                  <div className="text-[10px] uppercase tracking-[0.35em] text-white/35">{upNext.length} entries</div>
+                </div>
+                <div className="mt-4 grid gap-3">
+                  {upNext.map((item, index) => (
+                    <div key={`${item.token}-${index}`} className="rounded-[1.35rem] border border-white/10 bg-black/30 px-4 py-3.5">
+                      <div className="flex items-center gap-3">
+                        <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-white/10 text-lg font-black text-white">
+                          {item.token}
+                        </div>
+                        <div className="min-w-0 flex-1">
+                          <div className="text-sm font-semibold text-white truncate">{item.patient_name || item.service_name || "Service"}</div>
+                          <div className="mt-1 text-[10px] uppercase tracking-[0.32em] text-white/50 truncate">{item.service_type || item.service_name || "Appointment"}</div>
+                          <div className="mt-1 flex items-center gap-2 text-[10px] uppercase tracking-[0.32em] text-white/40">
+                            <span>{item.status || "pending"}</span>
+                            <span className="h-1 w-1 rounded-full bg-white/20" />
+                            <span>{item.assigned_time || item.preferred_time || (item.wait_after_mins ? `${item.wait_after_mins}m wait` : "Queued")}</span>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+
+            {highlightNotice ? (
+              <div className="overflow-hidden rounded-[2rem] border border-fuchsia-400/20 bg-[linear-gradient(135deg,rgba(217,70,239,0.95),rgba(244,63,94,0.92),rgba(251,146,60,0.9))] p-4 text-white shadow-[0_18px_50px_-24px_rgba(244,63,94,0.8)]">
+                <div className="text-[10px] uppercase tracking-[0.4em] text-white/75">Priority notice</div>
+                <div className="mt-1 text-xl font-black uppercase leading-tight">Live update</div>
+                <div className="mt-2 text-sm font-medium text-white/92 line-clamp-3">
+                  {highlightNotice.title || highlightNotice.body || "Queue updates available"}
+                </div>
+              </div>
+            ) : null}
           </div>
-        ) : null}
-      </div>
+        </div>
       </div>
     </div>
   );
@@ -294,6 +507,132 @@ function isLogoZone(zone) {
   return zone?.role === "logo" || /logo|brand/i.test(`${zone?.id || ""} ${zone?.name || ""}`);
 }
 
+function isAutoWidgetZone(zone) {
+  return /^(header|weather|bookings)$/i.test(zone?.role || "");
+}
+
+function AutoWidgetZone({ zone, queuePreview, payload, providerData, weatherData }) {
+  const role = String(zone?.role || "").toLowerCase();
+
+  if (role === "header") {
+    return (
+      <div className="w-full h-full bg-[linear-gradient(90deg,#111827,#0F172A)] p-4 text-white flex items-center justify-between gap-4">
+        <div>
+          <div className="text-[10px] uppercase tracking-[0.45em] text-white/45">Today</div>
+          <div className="mt-1 font-display text-3xl font-black tracking-tight">
+            {new Date().toLocaleDateString(undefined, { weekday: "long", month: "short", day: "numeric" })}
+          </div>
+        </div>
+        <div className="text-right">
+          <div className="text-[10px] uppercase tracking-[0.45em] text-white/45">Local time</div>
+          <div className="mt-1 font-display text-4xl font-black tracking-tight">
+            {new Date().toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (role === "weather") {
+    const weather = weatherData || payload?.weather || providerData?.weather || {};
+    const temperature = weather.temperature ?? weather.temp ?? "--";
+    const condition = getWeatherConditionLabel(weather, weather.condition || weather.summary || "Weather sync pending");
+    const high = weather.high ?? weather.max ?? "--";
+    const low = weather.low ?? weather.min ?? "--";
+    const emoji = getWeatherEmoji(weather, condition);
+    return (
+      <div className="w-full h-full bg-[radial-gradient(circle_at_top,_rgba(56,189,248,0.22),_transparent_40%),linear-gradient(180deg,#0F172A,#111827)] p-5 text-white flex flex-col justify-between">
+        <div>
+          <div className="text-[10px] uppercase tracking-[0.45em] text-cyan-200/70 flex items-center gap-2">Weather <span className="text-base leading-none">{emoji}</span></div>
+          <div className="mt-2 text-sm text-white/70">{weather.location || zone?.name || "Current conditions"}</div>
+        </div>
+        <div className="space-y-3">
+          <div className="font-display text-7xl font-black tracking-tight leading-none">{temperature}°</div>
+          <div className="text-lg font-semibold text-white/90 flex items-center gap-2"><span>{emoji}</span><span>{condition}</span></div>
+          <div className="flex flex-wrap gap-2 text-xs uppercase tracking-[0.22em] text-white/60">
+            <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1.5">H {high}°</span>
+            <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1.5">L {low}°</span>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (role === "bookings") {
+    const rawEntries = Array.isArray(providerData?.queue_preview) && providerData.queue_preview.length > 0
+      ? providerData.queue_preview
+      : (Array.isArray(queuePreview) ? queuePreview : []);
+    const entries = rawEntries.map((item) => ({
+      token: item.token,
+      name: item.patient_name || item.service_name || "Booking",
+      time: item.assigned_time || item.preferred_time || `${item.wait_after_mins || 0} min`,
+      service: item.service_type || item.service_name || "Appointment",
+    }));
+
+    return (
+      <div className="w-full h-full bg-[linear-gradient(180deg,#F8FAFC,#EEF2FF)] p-5 text-[#111827] flex flex-col">
+        <div className="grid h-full gap-4 lg:grid-cols-[0.85fr_1.15fr]">
+          <div className="relative overflow-hidden rounded-[2rem] border border-[#DBE4F0] bg-[linear-gradient(180deg,#0F172A,#111827)] p-5 text-white shadow-[0_20px_60px_-36px_rgba(15,23,42,0.65)]">
+            <div className="absolute -right-8 -top-8 h-24 w-24 rounded-full bg-fuchsia-400/20 blur-3xl" />
+            <div className="absolute -left-8 bottom-0 h-20 w-20 rounded-full bg-cyan-400/12 blur-3xl" />
+            <div className="relative">
+              <div className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1 text-[10px] uppercase tracking-[0.35em] text-white/65">
+                <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" /> Front desk
+              </div>
+              <div className="mt-4 text-[10px] uppercase tracking-[0.4em] text-white/45">{zone?.name || "Today's bookings"}</div>
+              <div className="mt-2 font-display text-[clamp(2.25rem,4vw,3.5rem)] font-black uppercase tracking-[0.08em] text-white">Booking Lane</div>
+              <div className="mt-3 text-sm text-white/70 max-w-xs">A premium guest list for appointments and walk-ins, designed for lobby screens.</div>
+
+              <div className="mt-8 rounded-[1.75rem] border border-white/10 bg-white/6 p-4">
+                <div className="text-[10px] uppercase tracking-[0.4em] text-white/50">Visible entries</div>
+                <div className="mt-2 font-display text-[clamp(3rem,6vw,4.5rem)] font-black tracking-tight text-white">{String(entries.length).padStart(2, "0")}</div>
+                <div className="mt-1 text-[10px] uppercase tracking-[0.35em] text-white/40">Auto refreshed</div>
+              </div>
+            </div>
+          </div>
+
+          <div className="rounded-[2rem] border border-white/80 bg-white/90 shadow-[0_18px_40px_-24px_rgba(15,23,42,0.3)] p-4 md:p-5 overflow-hidden">
+            <div className="flex items-end justify-between gap-3 pb-4 border-b border-[#E2E8F0]">
+              <div>
+                <div className="text-[10px] uppercase tracking-[0.4em] text-[#94A3B8]">Queue</div>
+                <div className="mt-1 font-display text-[clamp(1.6rem,3vw,2.4rem)] font-black tracking-tight text-[#0F172A]">Today’s bookings</div>
+              </div>
+              <div className="text-[10px] uppercase tracking-[0.35em] text-[#94A3B8]">Live board</div>
+            </div>
+
+            <div className="mt-4 grid gap-3 overflow-hidden">
+              {entries.length === 0 ? (
+                <div className="rounded-[1.5rem] border border-dashed border-[#CBD5E1] bg-[#F8FAFC] p-5 text-sm text-[#64748B]">
+                  No bookings yet.
+                </div>
+              ) : entries.slice(0, 4).map((entry, index) => (
+                <div key={`${entry.name}-${index}`} className="rounded-[1.5rem] border border-[#E2E8F0] bg-white px-4 py-4 shadow-[0_14px_30px_-22px_rgba(15,23,42,0.25)] flex items-center justify-between gap-4">
+                  <div className="min-w-0 flex items-center gap-4">
+                    <div className="flex h-14 w-14 shrink-0 items-center justify-center rounded-[1.25rem] bg-[linear-gradient(135deg,#111827,#334155)] text-white font-display text-base font-black tracking-tight shadow-lg">
+                      {entry.token || String(entry.name || "B").slice(0, 1).toUpperCase()}
+                    </div>
+                    <div className="min-w-0">
+                      <div className="text-[10px] uppercase tracking-[0.32em] text-[#94A3B8]">Token {entry.token || index + 1}</div>
+                      <div className="font-semibold text-lg truncate text-[#0F172A]">{entry.name}</div>
+                      <div className="mt-1 text-sm text-[#64748B] truncate">{entry.service || "Appointment"}</div>
+                    </div>
+                  </div>
+                  <div className="text-right shrink-0">
+                    <div className="inline-flex items-center rounded-full border border-[#E2E8F0] bg-[#F8FAFC] px-3 py-1 text-[10px] uppercase tracking-[0.35em] text-[#64748B]">Scheduled</div>
+                    <div className="mt-2 font-display text-[clamp(1.4rem,2.5vw,2rem)] font-black tracking-tight text-[#0F172A]">{entry.time}</div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  return null;
+}
+
 function getClientLogoUrl(providerData, payload) {
   return providerData?.profile?.image_url || providerData?.image_url || payload?.client_logo_url || "";
 }
@@ -302,6 +641,8 @@ export default function SignagePlayer() {
   const { pairCode } = useParams();
   const [payload, setPayload] = useState(null);
   const [providerData, setProviderData] = useState(null);
+  const [liveWeather, setLiveWeather] = useState(null);
+  const [weatherState, setWeatherState] = useState("idle");
   const [err, setErr] = useState("");
   const lastGreetSpokenRef = useRef(0);
   const wrapRef = useRef(null);
@@ -774,6 +1115,7 @@ export default function SignagePlayer() {
   const canvasHeight = Number(layout.canvas_height) || 1080;
   const brightness = Number(payload?.brightness || 100);
   const orientation = payload?.orientation || "auto";
+  const hasWeatherZone = zoneDefs.some((zone) => /weather/i.test(`${zone?.role || ""} ${zone?.id || ""} ${zone?.name || ""}`));
   const contentStyle = orientation === "portrait"
     ? { position: "absolute", left: 0, top: 0, width: "100vh", height: "100vw", transform: "rotate(90deg) translateY(-100%)", transformOrigin: "top left", filter: `brightness(${brightness}%)` }
     : { filter: `brightness(${brightness}%)` };
@@ -785,6 +1127,42 @@ export default function SignagePlayer() {
       zone.height_px != null
     )
   );
+
+  useEffect(() => {
+    if (!hasWeatherZone) return;
+    if (payload?.weather || providerData?.weather || liveWeather) return;
+    if (weatherState === "denied" || weatherState === "error") return;
+    if (typeof window === "undefined" || !navigator.geolocation) {
+      setWeatherState("unsupported");
+      return;
+    }
+
+    let cancelled = false;
+    setWeatherState("requesting");
+
+    navigator.geolocation.getCurrentPosition(
+      async (position) => {
+        if (cancelled) return;
+        try {
+          const weather = await fetchWeatherFromCoords(position.coords.latitude, position.coords.longitude);
+          if (cancelled) return;
+          setLiveWeather(weather);
+          setWeatherState("ready");
+        } catch {
+          if (!cancelled) setWeatherState("error");
+        }
+      },
+      (error) => {
+        if (cancelled) return;
+        setWeatherState(error?.code === 1 ? "denied" : "error");
+      },
+      { enableHighAccuracy: false, timeout: 8000, maximumAge: 600000 }
+    );
+
+    return () => {
+      cancelled = true;
+    };
+  }, [hasWeatherZone, liveWeather, payload?.weather, providerData?.weather, weatherState]);
 
   if (err) {
     return (
@@ -821,6 +1199,7 @@ export default function SignagePlayer() {
   const notices = Array.isArray(providerData?.notices)
     ? providerData.notices
     : (Array.isArray(payload?.notices) ? payload.notices : []);
+  const weatherData = liveWeather || payload?.weather || providerData?.weather || null;
   const clientLogoUrl = getClientLogoUrl(providerData, payload);
   const colCount = Math.max(1, zoneEntries.length);
   const gridStyle = {
@@ -845,11 +1224,14 @@ export default function SignagePlayer() {
       {showHud ? (
         <div className="flex items-center justify-between px-4 py-2 bg-black/80 border-b border-white/10 text-[10px] uppercase tracking-wider font-mono">
           <div className="flex items-center gap-2"><Monitor className="w-3.5 h-3.5" /> {payload.device_name}</div>
-          <div className="flex items-center gap-4">
+              <div className="flex items-center gap-4">
             <button onClick={goFullscreen} className="hover:text-white/80" data-testid="fullscreen-btn"><Maximize className="w-3.5 h-3.5" /></button>
             <span className={`px-2 py-1 rounded-full border ${voiceState === "listening" ? "border-emerald-400/40 text-emerald-300" : voiceState === "unsupported" || voiceState === "error" ? "border-red-400/40 text-red-300" : "border-white/15 text-white/50"}`}>
               voice {voiceState === "listening" ? "listening" : voiceState === "restarting" ? "restarting" : voiceState === "unsupported" ? "unsupported" : voiceState === "error" ? "error" : "idle"}
             </span>
+                <span className={`px-2 py-1 rounded-full border ${weatherState === "ready" ? "border-cyan-400/40 text-cyan-200" : weatherState === "requesting" ? "border-white/20 text-white/60" : weatherState === "denied" || weatherState === "error" ? "border-amber-400/40 text-amber-200" : "border-white/15 text-white/50"}`}>
+                  weather {weatherState}
+                </span>
             <span className="text-white/40 text-[11px] ml-2">dbg P:{(providerData?.products || payload?.products || []).length} M:{(overlay?.items?.length) || (overlay ? 1 : 0)}</span>
             <span className="text-white/50">code <span className="text-white">{pairCode}</span></span>
             <span className="text-white/50">{orientation}</span>
@@ -950,6 +1332,7 @@ export default function SignagePlayer() {
               <div className="relative w-full h-full overflow-hidden bg-black">
                 {zoneEntries.map(({ zone, items }) => {
                   const queueZone = isQueueZone(zone);
+                  const autoWidgetZone = isAutoWidgetZone(zone);
                   const isTickerZone = /ticker/i.test(`${zone.id} ${zone.name}`);
                   const logoZone = isLogoZone(zone);
                   const rawLeft = ((Number(zone.x) || 0) / canvasWidth) * 100;
@@ -996,8 +1379,10 @@ export default function SignagePlayer() {
                       className={`absolute overflow-hidden ${queueZone ? "bg-transparent" : "bg-black"}`}
                       style={{ left: `${left}%`, top: `${top}%`, width: `${width}%`, height: `${height}%`, zIndex: zoneZIndex }}
                     >
-                      {queueZone ? (
+                      {queueZone && items.length === 0 ? (
                         <QueueBoard deviceName={payload.device_name} queuePreview={queuePreview} notices={notices} />
+                        ) : autoWidgetZone && items.length === 0 ? (
+                          <AutoWidgetZone zone={zone} queuePreview={queuePreview} payload={payload} providerData={providerData} weatherData={weatherData} />
                       ) : isTickerZone ? (
                         <TickerSlot items={items} label={zone.name} />
                       ) : logoZone && items.length === 0 && clientLogoUrl ? (
@@ -1007,7 +1392,7 @@ export default function SignagePlayer() {
                           </div>
                         </div>
                       ) : (
-                        <MediaSlot items={items} label={zone.name} />
+                        <MediaSlot items={items} label={zone.name} queuePreview={queuePreview} weatherData={weatherData} />
                       )}
                     </div>
                   );
@@ -1017,8 +1402,10 @@ export default function SignagePlayer() {
               <div className="grid gap-0 w-full h-full min-h-0" style={gridStyle}>
                 {zoneEntries.map(({ zone, items }) => (
                   <div key={zone.id} className="bg-black overflow-hidden relative min-h-[160px]">
-                    {isQueueZone(zone) ? (
+                    {isQueueZone(zone) && items.length === 0 ? (
                       <QueueBoard deviceName={payload.device_name} queuePreview={queuePreview} notices={notices} />
+                    ) : isAutoWidgetZone(zone) && items.length === 0 ? (
+                      <AutoWidgetZone zone={zone} queuePreview={queuePreview} payload={payload} providerData={providerData} weatherData={weatherData} />
                     ) : /ticker/i.test(`${zone.id} ${zone.name}`) ? (
                       <TickerSlot items={items} label={zone.name} />
                     ) : isLogoZone(zone) && items.length === 0 && clientLogoUrl ? (
@@ -1027,7 +1414,7 @@ export default function SignagePlayer() {
                           <img src={clientLogoUrl} alt={`${payload.device_name || "client"} logo`} className="max-h-[75%] max-w-[75%] object-contain" />
                         </div>
                       </div>
-                    ) : <MediaSlot items={items} label={zone.name} />}
+                    ) : <MediaSlot items={items} label={zone.name} queuePreview={queuePreview} weatherData={weatherData} />}
                   </div>
                 ))}
               </div>

@@ -1,0 +1,6 @@
+{
+  "appId": "com.rpsignage.app",
+  "appName": "RpSignage",
+  "webDir": "build",
+  "bundledWebRuntime": false
+}
