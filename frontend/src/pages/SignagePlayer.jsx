@@ -1671,7 +1671,6 @@ export default function SignagePlayer() {
                           </div>
                         </div>
                       ) : (
-                        {/* default mediaMode: weather/header fill, others fit */}
                         <MediaSlot
                           items={items}
                           label={zone.name}
