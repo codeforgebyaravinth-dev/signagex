@@ -1,11 +1,21 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useParams } from "react-router-dom";
 import axios from "axios";
-import { Monitor, CircleSlash, Maximize } from "lucide-react";
+import { Monitor, CircleSlash, Maximize, Menu, X, Eye, EyeOff, RotateCcw, RefreshCw } from "lucide-react";
 import { API_BASE } from "../lib/api";
 
 const RAW_BASE = (process.env.REACT_APP_BACKEND_URL || "https://rpsignage.com").replace(/\/$/, "");
 const BASE = RAW_BASE.replace(/\/api$/, "");
+
+const ZONE_PLACEMENT_PRESETS = [
+  { id: "auto", label: "Auto" },
+  { id: "full", label: "Full" },
+  { id: "left", label: "Left" },
+  { id: "right", label: "Right" },
+  { id: "top", label: "Top" },
+  { id: "bottom", label: "Bottom" },
+  { id: "center", label: "Center" },
+];
 
 function getMediaFit(item) {
   return item?.fit === "contain" ? "object-contain" : "object-cover";
@@ -54,6 +64,42 @@ function similarityScore(a, b) {
 
 function isImageItem(item) {
   return item?.kind === "image" || (item?.content_type || "").startsWith("image/") || /\.(png|jpe?g|webp|gif|bmp|svg)$/i.test(item?.url || item?.name || "");
+}
+
+function getPlacementRect(placement) {
+  switch (placement) {
+    case "full":
+      return { left: 0, top: 0, width: 100, height: 100 };
+    case "left":
+      return { left: 0, top: 0, width: 35, height: 100 };
+    case "right":
+      return { left: 65, top: 0, width: 35, height: 100 };
+    case "top":
+      return { left: 0, top: 0, width: 100, height: 35 };
+    case "bottom":
+      return { left: 0, top: 65, width: 100, height: 35 };
+    case "center":
+      return { left: 15, top: 15, width: 70, height: 70 };
+    case "auto":
+    default:
+      return null;
+  }
+}
+
+function getZoneRect(zone, canvasWidth, canvasHeight, placement = "auto") {
+  const baseLeft = ((Number(zone?.x) || 0) / canvasWidth) * 100;
+  const baseTop = ((Number(zone?.y) || 0) / canvasHeight) * 100;
+  const baseWidth = ((Number(zone?.width_px) || canvasWidth) / canvasWidth) * 100;
+  const baseHeight = ((Number(zone?.height_px) || canvasHeight) / canvasHeight) * 100;
+
+  const clampedLeft = Math.max(0, Math.min(100, baseLeft));
+  const clampedTop = Math.max(0, Math.min(100, baseTop));
+  const clampedWidth = Math.max(0, Math.min(100, baseWidth, 100 - clampedLeft));
+  const clampedHeight = Math.max(0, Math.min(100, baseHeight, 100 - clampedTop));
+
+  const preset = getPlacementRect(placement);
+  if (!preset) return { left: clampedLeft, top: clampedTop, width: clampedWidth, height: clampedHeight };
+  return preset;
 }
 
 let youtubeApiPromise = null;
@@ -784,14 +830,37 @@ export default function SignagePlayer() {
   const [voiceTranscript, setVoiceTranscript] = useState("");
   const voiceGreetingPlayedRef = useRef(false);
   const [showSplash, setShowSplash] = useState(true);
-  const [showHud, setShowHud] = useState(false);
-  const hudTimerRef = useRef(null);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [hiddenZoneIds, setHiddenZoneIds] = useState([]);
+  const [fillBlankSpaces, setFillBlankSpaces] = useState(true);
+  const [customPlacementEnabled, setCustomPlacementEnabled] = useState(false);
+  const [zonePlacements, setZonePlacements] = useState({});
 
-  const revealHud = useCallback(() => {
-    setShowHud(true);
-    if (hudTimerRef.current) clearTimeout(hudTimerRef.current);
-    hudTimerRef.current = setTimeout(() => setShowHud(false), 3000);
+  const zonePrefsKey = useMemo(() => `signage-player-zone-prefs:${pairCode || "default"}`, [pairCode]);
+
+  const toggleZoneVisibility = useCallback((zoneId) => {
+    setHiddenZoneIds((current) => (
+      current.includes(zoneId)
+        ? current.filter((id) => id !== zoneId)
+        : [...current, zoneId]
+    ));
   }, []);
+
+  const setZonePlacement = useCallback((zoneId, placement) => {
+    setZonePlacements((current) => ({
+      ...current,
+      [zoneId]: placement,
+    }));
+  }, []);
+
+  const resetZoneVisibility = useCallback(() => {
+    setHiddenZoneIds([]);
+    setFillBlankSpaces(true);
+    setCustomPlacementEnabled(false);
+    setZonePlacements({});
+  }, []);
+
+  const toggleMenu = useCallback(() => setMenuOpen((current) => !current), []);
 
   const poll = useCallback(async () => {
     try {
@@ -819,9 +888,27 @@ export default function SignagePlayer() {
     return () => clearTimeout(t);
   }, [payload, showSplash]);
 
-  useEffect(() => () => {
-    if (hudTimerRef.current) clearTimeout(hudTimerRef.current);
-  }, []);
+  useEffect(() => {
+    try {
+      const raw = window.localStorage.getItem(zonePrefsKey);
+      if (!raw) return;
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed?.hiddenZoneIds)) setHiddenZoneIds(parsed.hiddenZoneIds);
+      if (typeof parsed?.fillBlankSpaces === "boolean") setFillBlankSpaces(parsed.fillBlankSpaces);
+      if (typeof parsed?.customPlacementEnabled === "boolean") setCustomPlacementEnabled(parsed.customPlacementEnabled);
+      if (parsed?.zonePlacements && typeof parsed.zonePlacements === "object") setZonePlacements(parsed.zonePlacements);
+    } catch {
+      // Ignore malformed local preferences.
+    }
+  }, [zonePrefsKey]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(zonePrefsKey, JSON.stringify({ hiddenZoneIds, fillBlankSpaces, customPlacementEnabled, zonePlacements }));
+    } catch {
+      // Ignore storage failures in restricted webviews.
+    }
+  }, [zonePrefsKey, hiddenZoneIds, fillBlankSpaces, customPlacementEnabled, zonePlacements]);
 
   // fetch vertical-specific public data (products/services/queue/notices/rooms)
   useEffect(() => {
@@ -1243,6 +1330,10 @@ export default function SignagePlayer() {
   const canvasHeight = Number(layout.canvas_height) || 1080;
   const brightness = Number(payload?.brightness || 100);
   const orientation = payload?.orientation || "auto";
+  const visibleZoneDefs = useMemo(
+    () => zoneDefs.filter((zone) => !hiddenZoneIds.includes(zone.id)),
+    [hiddenZoneIds, zoneDefs]
+  );
   const hasWeatherZone = zoneDefs.some((zone) => /weather/i.test(`${zone?.role || ""} ${zone?.id || ""} ${zone?.name || ""}`));
   const contentStyle = orientation === "portrait"
     ? { position: "absolute", left: 0, top: 0, width: "100vh", height: "100vw", transform: "rotate(90deg) translateY(-100%)", transformOrigin: "top left", filter: `brightness(${brightness}%)` }
@@ -1255,6 +1346,7 @@ export default function SignagePlayer() {
       zone.height_px != null
     )
   );
+  const renderAsAbsolute = hasAbsoluteLayout || hasCustomPlacements;
 
   useEffect(() => {
     if (!hasWeatherZone) return;
@@ -1319,7 +1411,9 @@ export default function SignagePlayer() {
     );
   }
 
-  const zoneEntries = zoneDefs.map((zone) => ({ zone, items: payload.zones?.[zone.id] || [] }));
+  const shouldCompactLayout = fillBlankSpaces && hiddenZoneIds.length > 0;
+  const hasCustomPlacements = customPlacementEnabled && Object.keys(zonePlacements || {}).length > 0;
+  const zoneEntries = visibleZoneDefs.map((zone) => ({ zone, items: payload.zones?.[zone.id] || [] }));
   const hasContent = zoneEntries.some(({ items }) => items.length > 0);
   const queuePreview = Array.isArray(providerData?.queue_preview)
     ? providerData.queue_preview
@@ -1348,7 +1442,7 @@ export default function SignagePlayer() {
   })();
 
   return (
-    <div ref={wrapRef} className="min-h-screen bg-black text-white flex flex-col" data-testid="signage-player" onPointerDown={revealHud} onTouchStart={revealHud}>
+    <div ref={wrapRef} className="min-h-screen bg-black text-white flex flex-col" data-testid="signage-player">
       {voiceError ? (
         <div className="px-4 py-2 border-b border-white/10 bg-red-500/10 text-[11px] text-red-200 font-mono uppercase tracking-wider">
           {voiceError}
@@ -1436,41 +1530,34 @@ export default function SignagePlayer() {
       ) : (
         <div className="flex-1 relative min-h-0 bg-black overflow-hidden">
           <div className={`absolute ${orientation === "portrait" ? "" : "inset-0"}`} style={contentStyle}>
-            {hasAbsoluteLayout ? (
+            {renderAsAbsolute && !shouldCompactLayout ? (
               <div className="relative w-full h-full overflow-hidden bg-black">
                 {zoneEntries.map(({ zone, items }) => {
                   const queueZone = isQueueZone(zone);
                   const autoWidgetZone = isAutoWidgetZone(zone);
                   const isTickerZone = /ticker/i.test(`${zone.id} ${zone.name}`);
                   const logoZone = isLogoZone(zone);
-                  const rawLeft = ((Number(zone.x) || 0) / canvasWidth) * 100;
-                  const rawTop = ((Number(zone.y) || 0) / canvasHeight) * 100;
-                  const rawWidth = ((Number(zone.width_px) || canvasWidth) / canvasWidth) * 100;
-                  const rawHeight = ((Number(zone.height_px) || canvasHeight) / canvasHeight) * 100;
-                  // Clamp values to viewport and apply queue safe-area guardrails for cleaner signage composition.
-                  const clampedLeft = Math.max(0, Math.min(100, rawLeft));
-                  const clampedTop = Math.max(0, Math.min(100, rawTop));
-                  const clampedWidth = Math.max(0, Math.min(100, rawWidth, 100 - clampedLeft));
-                  const clampedHeight = Math.max(0, Math.min(100, rawHeight, 100 - clampedTop));
+                  const placement = customPlacementEnabled ? (zonePlacements?.[zone.id] || "auto") : "auto";
+                  const zoneRect = getZoneRect(zone, canvasWidth, canvasHeight, placement);
 
-                  let left = clampedLeft;
-                  let top = clampedTop;
-                  let width = clampedWidth;
-                  let height = clampedHeight;
+                  let left = zoneRect.left;
+                  let top = zoneRect.top;
+                  let width = zoneRect.width;
+                  let height = zoneRect.height;
 
-                  if (orientation !== "portrait" && queueZone) {
-                    const rightEdge = Math.min(100, clampedLeft + clampedWidth);
-                    const targetWidth = Math.min(36, Math.max(28, clampedWidth));
-                    const targetHeight = Math.min(78, Math.max(44, clampedHeight));
+                  if (!customPlacementEnabled && orientation !== "portrait" && queueZone) {
+                    const rightEdge = Math.min(100, left + width);
+                    const targetWidth = Math.min(36, Math.max(28, width));
+                    const targetHeight = Math.min(78, Math.max(44, height));
                     width = Math.min(targetWidth, rightEdge);
-                    height = Math.min(targetHeight, 99 - clampedTop);
+                    height = Math.min(targetHeight, 99 - top);
                     left = queueSidebarLeft != null
                       ? queueSidebarLeft
                       : Math.max(0, Math.min(99 - width, rightEdge - width));
-                    top = Math.max(1, Math.min(clampedTop, 99 - height));
+                    top = Math.max(1, Math.min(top, 99 - height));
                   }
 
-                  if (orientation !== "portrait" && queueSidebarLeft != null && !queueZone && !isTickerZone) {
+                  if (!customPlacementEnabled && orientation !== "portrait" && queueSidebarLeft != null && !queueZone && !isTickerZone) {
                     const safeRightEdge = Math.max(0, queueSidebarLeft - 0.8);
                     const zoneRight = left + width;
                     if (zoneRight > safeRightEdge) {
@@ -1530,6 +1617,152 @@ export default function SignagePlayer() {
           </div>
         </div>
       )}
+
+      <div className="absolute top-4 right-4 z-50 pointer-events-none">
+        <div className="pointer-events-auto relative">
+          <button
+            type="button"
+            onClick={toggleMenu}
+            className="inline-flex items-center gap-2 rounded-full border border-white/15 bg-black/70 px-3 py-2 text-xs font-semibold uppercase tracking-[0.2em] text-white shadow-[0_14px_40px_-24px_rgba(0,0,0,0.8)] backdrop-blur-md"
+            aria-expanded={menuOpen}
+            aria-label="Open player menu"
+          >
+            <Menu className="h-4 w-4" />
+            Menu
+          </button>
+
+          {menuOpen ? (
+            <div className="absolute right-0 mt-3 w-[min(92vw,360px)] overflow-hidden rounded-[1.5rem] border border-white/10 bg-[linear-gradient(180deg,rgba(15,23,42,0.98),rgba(2,6,23,0.98))] text-white shadow-[0_28px_90px_-30px_rgba(0,0,0,0.9)] backdrop-blur-xl">
+              <div className="flex items-center justify-between border-b border-white/10 px-4 py-3">
+                <div>
+                  <div className="text-[10px] uppercase tracking-[0.35em] text-white/45">Player menu</div>
+                  <div className="text-sm font-semibold text-white">Controls and zones</div>
+                </div>
+                <button type="button" onClick={() => setMenuOpen(false)} className="rounded-full border border-white/10 p-2 text-white/70 hover:text-white">
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+
+              <div className="border-b border-white/10 p-4">
+                <div className="text-[10px] uppercase tracking-[0.35em] text-white/45 mb-3">Controls</div>
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={goFullscreen}
+                    className="inline-flex items-center justify-center gap-2 rounded-2xl border border-white/10 bg-white/5 px-3 py-2.5 text-sm font-medium text-white hover:bg-white/10"
+                  >
+                    <Maximize className="h-4 w-4" /> Fullscreen
+                  </button>
+                  <button
+                    type="button"
+                    onClick={poll}
+                    className="inline-flex items-center justify-center gap-2 rounded-2xl border border-white/10 bg-white/5 px-3 py-2.5 text-sm font-medium text-white hover:bg-white/10"
+                  >
+                    <RefreshCw className="h-4 w-4" /> Reload
+                  </button>
+                  <button
+                    type="button"
+                    onClick={resetZoneVisibility}
+                    className="inline-flex items-center justify-center gap-2 rounded-2xl border border-white/10 bg-white/5 px-3 py-2.5 text-sm font-medium text-white hover:bg-white/10 col-span-2"
+                  >
+                    <RotateCcw className="h-4 w-4" /> Restore all zones
+                  </button>
+                </div>
+
+                <label className="mt-3 flex items-center justify-between gap-3 rounded-2xl border border-white/10 bg-white/5 px-3 py-2.5">
+                  <span>
+                    <span className="block text-sm font-medium text-white">Fill blank space</span>
+                    <span className="block text-[11px] text-white/45">Compact the layout when zones are removed</span>
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setFillBlankSpaces((current) => !current)}
+                    className={`inline-flex items-center gap-2 rounded-full px-3 py-1.5 text-xs font-semibold uppercase tracking-[0.18em] ${fillBlankSpaces ? "bg-emerald-500/20 text-emerald-200" : "bg-white/10 text-white/55"}`}
+                  >
+                    {fillBlankSpaces ? <Eye className="h-3.5 w-3.5" /> : <EyeOff className="h-3.5 w-3.5" />}
+                    {fillBlankSpaces ? "On" : "Off"}
+                  </button>
+                </label>
+
+                <label className="mt-3 flex items-center justify-between gap-3 rounded-2xl border border-white/10 bg-white/5 px-3 py-2.5">
+                  <span>
+                    <span className="block text-sm font-medium text-white">Custom placement</span>
+                    <span className="block text-[11px] text-white/45">Choose a preset area for each zone</span>
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setCustomPlacementEnabled((current) => !current)}
+                    className={`inline-flex items-center gap-2 rounded-full px-3 py-1.5 text-xs font-semibold uppercase tracking-[0.18em] ${customPlacementEnabled ? "bg-cyan-500/20 text-cyan-200" : "bg-white/10 text-white/55"}`}
+                  >
+                    {customPlacementEnabled ? <Eye className="h-3.5 w-3.5" /> : <EyeOff className="h-3.5 w-3.5" />}
+                    {customPlacementEnabled ? "On" : "Off"}
+                  </button>
+                </label>
+              </div>
+
+              <div className="p-4">
+                <div className="flex items-center justify-between mb-3">
+                  <div>
+                    <div className="text-[10px] uppercase tracking-[0.35em] text-white/45">Zone settings</div>
+                    <div className="text-sm font-semibold text-white">Hide, restore, or place zones</div>
+                  </div>
+                  <div className="text-[10px] uppercase tracking-[0.3em] text-white/35">{visibleZoneDefs.length}/{zoneDefs.length}</div>
+                </div>
+
+                <div className="max-h-[48vh] space-y-2 overflow-auto pr-1">
+                  {zoneDefs.map((zone) => {
+                    const hidden = hiddenZoneIds.includes(zone.id);
+                    const placement = zonePlacements?.[zone.id] || "auto";
+                    return (
+                      <div key={zone.id} className="rounded-2xl border border-white/10 bg-white/5 p-3">
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="min-w-0">
+                            <div className="truncate text-sm font-medium text-white">{zone.name || zone.id}</div>
+                            <div className="truncate text-[11px] uppercase tracking-[0.25em] text-white/40">{zone.role || "zone"} · {Math.round(Number(zone.width_px || 0))}x{Math.round(Number(zone.height_px || 0))}</div>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => toggleZoneVisibility(zone.id)}
+                            className={`inline-flex shrink-0 items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-semibold uppercase tracking-[0.18em] ${hidden ? "bg-white/10 text-white/70" : "bg-rose-500/15 text-rose-200"}`}
+                          >
+                            {hidden ? <Eye className="h-3.5 w-3.5" /> : <EyeOff className="h-3.5 w-3.5" />}
+                            {hidden ? "Show" : "Hide"}
+                          </button>
+                        </div>
+
+                        {customPlacementEnabled ? (
+                          <div className="mt-3">
+                            <div className="mb-2 text-[10px] uppercase tracking-[0.3em] text-white/40">Placement</div>
+                            <div className="grid grid-cols-3 gap-2">
+                              {ZONE_PLACEMENT_PRESETS.map((preset) => (
+                                <button
+                                  key={preset.id}
+                                  type="button"
+                                  onClick={() => setZonePlacement(zone.id, preset.id)}
+                                  className={`rounded-xl border px-2 py-2 text-[10px] font-semibold uppercase tracking-[0.18em] ${placement === preset.id ? "border-cyan-400/40 bg-cyan-500/20 text-cyan-100" : "border-white/10 bg-white/5 text-white/70 hover:bg-white/10"}`}
+                                >
+                                  {preset.label}
+                                </button>
+                              ))}
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => setZonePlacement(zone.id, "auto")}
+                              className="mt-2 w-full rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-[10px] font-semibold uppercase tracking-[0.18em] text-white/65 hover:bg-white/10"
+                            >
+                              Reset to auto
+                            </button>
+                          </div>
+                        ) : null}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+          ) : null}
+        </div>
+      </div>
 
       <style>{`
         @keyframes marquee { 0% { transform: translateX(0); } 100% { transform: translateX(-50%); } }
