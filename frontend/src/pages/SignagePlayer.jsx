@@ -17,8 +17,10 @@ const ZONE_PLACEMENT_PRESETS = [
   { id: "center", label: "Center" },
 ];
 
-function getMediaFit(item) {
-  return item?.fit === "contain" ? "object-contain" : "object-cover";
+function getMediaFit(item, mediaMode = "fill") {
+  if (item?.fit === "contain") return "object-contain";
+  if (item?.fit === "cover") return "object-cover";
+  return mediaMode === "fit" ? "object-contain" : "object-cover";
 }
 
 function escapeRegExp(string) {
@@ -204,13 +206,13 @@ async function fetchWeatherFromCoords(latitude, longitude) {
   };
 }
 
-function MediaSlot({ items, label, queuePreview, weatherData, zone, canvasWidth, canvasHeight }) {
+function MediaSlot({ items, label, queuePreview, weatherData, zone, canvasWidth, canvasHeight, mediaMode }) {
   const [idx, setIdx] = useState(0);
   const [showFrame, setShowFrame] = useState(true);
   const timerRef = useRef(null);
   const youtubeRef = useRef(null);
   const youtubePlayerRef = useRef(null);
-  const zoneScale = getZoneScale(zone, canvasWidth, canvasHeight);
+  const zoneScale = getZoneScale(zone, canvasWidth, canvasHeight, false);
   const itemCount = Math.max(1, items?.length || 0);
   const handleMediaEnd = useCallback(() => {
     setIdx((i) => (i + 1) % itemCount);
@@ -443,27 +445,27 @@ function MediaSlot({ items, label, queuePreview, weatherData, zone, canvasWidth,
       </div>
     ) : (cur.type === "media" || cur.media_id) ? (
       isImageItem(cur) ? (
-        <img src={resolveSrc(cur)} alt={cur.name} className={`w-full h-full ${getMediaFit(cur)} object-center bg-black`} onError={(e) => { console.error('Media load error', resolveSrc(cur), e); handleMediaEnd(); }} />
+        <img src={resolveSrc(cur)} alt={cur.name} className={`w-full h-full ${getMediaFit(cur, mediaMode)} object-center bg-black`} onError={(e) => { console.error('Media load error', resolveSrc(cur), e); handleMediaEnd(); }} />
       ) : (
         <video
           src={resolveSrc(cur)}
           autoPlay
           muted
           playsInline
-          className={`w-full h-full ${getMediaFit(cur)} object-center bg-black`}
+          className={`w-full h-full ${getMediaFit(cur, mediaMode)} object-center bg-black`}
           onEnded={handleMediaEnd}
           onError={(e) => { console.error('Media load error', resolveSrc(cur), e); handleMediaEnd(); }}
         />
       )
     ) : isImageItem(cur) ? (
-      <img src={resolveSrc(cur)} alt={cur.name} className={`w-full h-full ${getMediaFit(cur)} object-center bg-black`} onError={(e) => { console.error('Media load error', resolveSrc(cur), e); handleMediaEnd(); }} />
+      <img src={resolveSrc(cur)} alt={cur.name} className={`w-full h-full ${getMediaFit(cur, mediaMode)} object-center bg-black`} onError={(e) => { console.error('Media load error', resolveSrc(cur), e); handleMediaEnd(); }} />
     ) : (
       <video
         src={resolveSrc(cur)}
         autoPlay
         muted
         playsInline
-        className={`w-full h-full ${getMediaFit(cur)} object-center bg-black`}
+        className={`w-full h-full ${getMediaFit(cur, mediaMode)} object-center bg-black`}
         onEnded={handleMediaEnd}
         onError={(e) => { console.error('Media load error', resolveSrc(cur), e); handleMediaEnd(); }}
       />
@@ -480,7 +482,7 @@ function MediaSlot({ items, label, queuePreview, weatherData, zone, canvasWidth,
 
 function TickerSlot({ items, label, zone, canvasWidth, canvasHeight }) {
   const [feedEntries, setFeedEntries] = useState([]);
-  const zoneScale = getZoneScale(zone, canvasWidth, canvasHeight);
+  const zoneScale = getZoneScale(zone, canvasWidth, canvasHeight, false);
 
   useEffect(() => {
     let mounted = true;
@@ -526,7 +528,7 @@ function TickerSlot({ items, label, zone, canvasWidth, canvasHeight }) {
   return (
     <ResponsiveZoneShell scale={zoneScale}>
       <div className="w-full h-full overflow-hidden bg-black text-white flex items-center px-4">
-        <div className="animate-marquee flex items-center gap-10 whitespace-nowrap text-sm font-semibold">
+        <div className="animate-marquee flex items-center gap-10 whitespace-nowrap font-semibold" style={{ fontSize: `${Math.max(12, Math.round(14 / Math.max(zoneScale, 0.45)))}px` }}>
           {repeated.map((entry, index) => (
             <span key={`${entry.text}-${index}`} className="inline-flex items-center gap-3">
               <span className="inline-flex h-1.5 w-1.5 rounded-full bg-white/50" />
@@ -544,22 +546,29 @@ function QueueBoard({ deviceName, queuePreview, notices, zone, canvasWidth, canv
   const upNext = Array.isArray(queuePreview) ? queuePreview.slice(1, 4) : [];
   const highlightNotice = Array.isArray(notices) && notices.length > 0 ? notices[0] : null;
   const queueCount = Array.isArray(queuePreview) ? queuePreview.length : 0;
-  const zoneScale = getZoneScale(zone, canvasWidth, canvasHeight);
-  const isCompact = zoneScale < 0.8;
+  const zoneScale = getZoneScale(zone, canvasWidth, canvasHeight, false);
+  // boost queue visuals so current token is readable when zones are small
+  const zoneScaleBoosted = (() => {
+    if (!Number.isFinite(zoneScale)) return 1;
+    if (zoneScale < 0.7) return Math.min(1, zoneScale * 1.45);
+    if (zoneScale < 0.9) return Math.min(1, zoneScale * 1.22);
+    return Math.min(1, zoneScale * 1.06);
+  })();
+  const isCompact = zoneScaleBoosted < 0.8;
 
   if (!currentToken && upNext.length === 0 && !highlightNotice) return null;
 
   return (
-    <ResponsiveZoneShell scale={zoneScale}>
-      <div className="pointer-events-auto w-full max-w-full overflow-hidden rounded-[2.5rem] border border-white/10 bg-[linear-gradient(180deg,rgba(2,6,23,0.98),rgba(15,23,42,0.96))] text-white shadow-[0_30px_100px_-34px_rgba(0,0,0,0.85)] backdrop-blur-xl">
-        <div className="relative">
+    <ResponsiveZoneShell scale={zoneScaleBoosted}>
+      <div className="pointer-events-auto w-full h-full overflow-hidden rounded-[2.5rem] border border-white/10 bg-[linear-gradient(180deg,rgba(2,6,23,0.98),rgba(15,23,42,0.96))] text-white shadow-[0_30px_100px_-34px_rgba(0,0,0,0.85)] backdrop-blur-xl">
+        <div className="relative h-full">
         <div className={`absolute -right-16 -top-16 ${isCompact ? "h-28 w-28" : "h-44 w-44"} rounded-full bg-fuchsia-500/18 blur-3xl`} />
         <div className={`absolute -left-10 bottom-0 ${isCompact ? "h-20 w-20" : "h-32 w-32"} rounded-full bg-cyan-400/12 blur-3xl`} />
 
-        <div className={`grid h-full ${isCompact ? "gap-2 p-3" : "gap-4 p-5"} lg:grid-cols-[0.95fr_1.05fr]`}>
-          <div className={`rounded-[2rem] border border-white/10 bg-[radial-gradient(circle_at_top_right,rgba(236,72,153,0.24),transparent_42%),linear-gradient(180deg,rgba(15,23,42,0.98),rgba(2,6,23,0.98))] ${isCompact ? "p-3" : "p-5"} shadow-[0_20px_60px_-36px_rgba(236,72,153,0.45)]`}>
+        <div className={`flex flex-col h-full ${isCompact ? "gap-2" : "gap-4"}`}>
+          <div className={`rounded-[2rem] border border-white/10 bg-[radial-gradient(circle_at_top_right,rgba(236,72,153,0.24),transparent_42%),linear-gradient(180deg,rgba(15,23,42,0.98),rgba(2,6,23,0.98))] ${isCompact ? "p-2" : "p-3"} shadow-[0_20px_60px_-36px_rgba(236,72,153,0.45)]`}>
             {currentToken ? (
-              <div className={`grid ${isCompact ? "gap-2" : "gap-4"} rounded-[1.75rem] border border-fuchsia-400/18 bg-white/5 ${isCompact ? "p-3" : "p-4"} md:grid-cols-[1fr_0.8fr] md:items-stretch`}>
+              <div className={`grid ${isCompact ? "gap-1" : "gap-2"} rounded-[1.75rem] border border-fuchsia-400/18 bg-white/5 ${isCompact ? "p-2" : "p-3"} md:grid-cols-[1fr_0.8fr] md:items-start`}>
                 <div className={`flex items-center ${isCompact ? "gap-3" : "gap-4"}`}>
                   <div className={`flex ${isCompact ? "h-18 w-18 text-[1.9rem]" : "h-24 w-24 text-[2.5rem]"} shrink-0 items-center justify-center rounded-[1.75rem] bg-[linear-gradient(135deg,#ec4899,#fb7185,#f97316)] font-black tracking-tight text-white shadow-[0_24px_50px_-16px_rgba(236,72,153,0.9)]`}>
                     {currentToken.token}
@@ -585,7 +594,7 @@ function QueueBoard({ deviceName, queuePreview, notices, zone, canvasWidth, canv
             ) : null}
           </div>
 
-          <div className={`grid ${isCompact ? "gap-2" : "gap-4"}`}>
+          <div className={`mt-2 grid ${isCompact ? "gap-1" : "gap-2"}`}>
             {upNext.length > 0 ? (
               <div className={`rounded-[2rem] border border-white/10 bg-[linear-gradient(180deg,rgba(255,255,255,0.08),rgba(255,255,255,0.04))] ${isCompact ? "p-3" : "p-4"}`}>
                 <div className="flex items-center justify-between gap-3">
@@ -595,7 +604,7 @@ function QueueBoard({ deviceName, queuePreview, notices, zone, canvasWidth, canv
                   </div>
                   <div className="text-[10px] uppercase tracking-[0.35em] text-white/35">{upNext.length} entries</div>
                 </div>
-                <div className={`mt-${isCompact ? "3" : "4"} grid ${isCompact ? "gap-2" : "gap-3"}`}>
+                <div className={`mt-2 grid ${isCompact ? "gap-1" : "gap-2"}`}>
                   {upNext.map((item, index) => (
                     <div key={`${item.token}-${index}`} className={`rounded-[1.35rem] border border-white/10 bg-black/30 ${isCompact ? "px-3 py-2.5" : "px-4 py-3.5"}`}>
                       <div className={`flex items-center ${isCompact ? "gap-2.5" : "gap-3"}`}>
@@ -649,7 +658,7 @@ function isAutoWidgetZone(zone) {
 
 function AutoWidgetZone({ zone, queuePreview, payload, providerData, weatherData, canvasWidth, canvasHeight }) {
   const role = String(zone?.role || "").toLowerCase();
-  const zoneScale = getZoneScale(zone, canvasWidth, canvasHeight);
+  const zoneScale = getZoneScale(zone, canvasWidth, canvasHeight, false);
 
   if (role === "header") {
     return (
@@ -780,14 +789,18 @@ function getClientLogoUrl(providerData, payload) {
   return providerData?.profile?.image_url || providerData?.image_url || payload?.client_logo_url || "";
 }
 
-function getZoneScale(zone, canvasWidth, canvasHeight) {
+function getZoneScale(zone, canvasWidth, canvasHeight, preferCover = false) {
   const zoneWidth = Number(zone?.width_px ?? canvasWidth) || canvasWidth || 1920;
   const zoneHeight = Number(zone?.height_px ?? canvasHeight) || canvasHeight || 1080;
   const baseWidth = Number(canvasWidth) || 1920;
   const baseHeight = Number(canvasHeight) || 1080;
   const widthScale = zoneWidth / baseWidth;
   const heightScale = zoneHeight / baseHeight;
-  const rawScale = Math.min(widthScale, heightScale) * 0.94;
+  // preferCover: use cover (fill) scaling so the component fills the zone.
+  // Otherwise use contain scaling to avoid overflowing content.
+  const rawScale = preferCover
+    ? Math.max(widthScale, heightScale) * 0.98
+    : Math.min(widthScale, heightScale) * 0.94;
   return Math.max(0.35, Math.min(1, Number.isFinite(rawScale) ? rawScale : 1));
 }
 
@@ -835,6 +848,7 @@ export default function SignagePlayer() {
   const [fillBlankSpaces, setFillBlankSpaces] = useState(true);
   const [customPlacementEnabled, setCustomPlacementEnabled] = useState(false);
   const [zonePlacements, setZonePlacements] = useState({});
+  const [zoneMediaModes, setZoneMediaModes] = useState({});
 
   const zonePrefsKey = useMemo(() => `signage-player-zone-prefs:${pairCode || "default"}`, [pairCode]);
 
@@ -853,11 +867,19 @@ export default function SignagePlayer() {
     }));
   }, []);
 
+  const setZoneMediaMode = useCallback((zoneId, mode) => {
+    setZoneMediaModes((current) => ({
+      ...current,
+      [zoneId]: mode,
+    }));
+  }, []);
+
   const resetZoneVisibility = useCallback(() => {
     setHiddenZoneIds([]);
     setFillBlankSpaces(true);
     setCustomPlacementEnabled(false);
     setZonePlacements({});
+    setZoneMediaModes({});
   }, []);
 
   const toggleMenu = useCallback(() => setMenuOpen((current) => !current), []);
@@ -897,6 +919,7 @@ export default function SignagePlayer() {
       if (typeof parsed?.fillBlankSpaces === "boolean") setFillBlankSpaces(parsed.fillBlankSpaces);
       if (typeof parsed?.customPlacementEnabled === "boolean") setCustomPlacementEnabled(parsed.customPlacementEnabled);
       if (parsed?.zonePlacements && typeof parsed.zonePlacements === "object") setZonePlacements(parsed.zonePlacements);
+      if (parsed?.zoneMediaModes && typeof parsed.zoneMediaModes === "object") setZoneMediaModes(parsed.zoneMediaModes);
     } catch {
       // Ignore malformed local preferences.
     }
@@ -904,11 +927,69 @@ export default function SignagePlayer() {
 
   useEffect(() => {
     try {
-      window.localStorage.setItem(zonePrefsKey, JSON.stringify({ hiddenZoneIds, fillBlankSpaces, customPlacementEnabled, zonePlacements }));
+      window.localStorage.setItem(zonePrefsKey, JSON.stringify({ hiddenZoneIds, fillBlankSpaces, customPlacementEnabled, zonePlacements, zoneMediaModes }));
     } catch {
       // Ignore storage failures in restricted webviews.
     }
-  }, [zonePrefsKey, hiddenZoneIds, fillBlankSpaces, customPlacementEnabled, zonePlacements]);
+  }, [zonePrefsKey, hiddenZoneIds, fillBlankSpaces, customPlacementEnabled, zonePlacements, zoneMediaModes]);
+
+  // debug overlays
+  const debugZones = typeof window !== "undefined" && window.location.search.includes("debug_zones");
+  const inspectZones = typeof window !== "undefined" && window.location.search.includes("inspect_zones");
+  const absoluteContainerRef = useRef(null);
+  const zoneRefs = useRef({});
+  const [zoneInspections, setZoneInspections] = useState({});
+
+  useEffect(() => {
+    if (!inspectZones) return;
+    let mounted = true;
+    const measure = () => {
+      const container = absoluteContainerRef.current || wrapRef.current;
+      if (!container) return;
+      const cb = container.getBoundingClientRect();
+      const cw = container.clientWidth || Math.max(1, cb.width);
+      const ch = container.clientHeight || Math.max(1, cb.height);
+      // When orientation is portrait the content is rotated: canvas width maps to DOM height and vice versa
+      const renderWidth = orientation === "portrait" ? ch : cw;
+      const renderHeight = orientation === "portrait" ? cw : ch;
+      const next = {};
+      Object.keys(zoneRefs.current || {}).forEach((id) => {
+        try {
+          const el = zoneRefs.current[id];
+          if (!el) return;
+          const r = el.getBoundingClientRect();
+
+          // find zone definition to compute expected size from configured px values
+          const entry = zoneEntries.find((ze) => (ze.zone?.id || String(ze.zone)) === id);
+          const cfgWpx = Number(entry?.zone?.width_px ?? canvasWidth) || canvasWidth || 1920;
+          const cfgHpx = Number(entry?.zone?.height_px ?? canvasHeight) || canvasHeight || 1080;
+
+          const expectedW = Math.round((cfgWpx / (canvasWidth || 1)) * renderWidth);
+          const expectedH = Math.round((cfgHpx / (canvasHeight || 1)) * renderHeight);
+
+          next[id] = {
+            width: Math.round(r.width),
+            height: Math.round(r.height),
+            expectedWidth: expectedW,
+            expectedHeight: expectedH,
+            left: Math.round(r.left - cb.left),
+            top: Math.round(r.top - cb.top),
+          };
+        } catch (e) {
+          // ignore per-zone failures
+        }
+      });
+      if (mounted) setZoneInspections(next);
+    };
+
+    measure();
+    const ro = new ResizeObserver(measure);
+    const container = absoluteContainerRef.current || wrapRef.current;
+    if (container) ro.observe(container);
+    const id = setInterval(measure, 900);
+    window.addEventListener("resize", measure);
+    return () => { mounted = false; try { ro.disconnect(); } catch {} clearInterval(id); window.removeEventListener("resize", measure); };
+  }, [inspectZones, payload]);
 
   // fetch vertical-specific public data (products/services/queue/notices/rooms)
   useEffect(() => {
@@ -1531,7 +1612,8 @@ export default function SignagePlayer() {
         <div className="flex-1 relative min-h-0 bg-black overflow-hidden">
           <div className={`absolute ${orientation === "portrait" ? "" : "inset-0"}`} style={contentStyle}>
             {renderAsAbsolute && !shouldCompactLayout ? (
-              <div className="relative w-full h-full overflow-hidden bg-black">
+              <>
+              <div ref={absoluteContainerRef} className="relative w-full h-full overflow-hidden bg-black">
                 {zoneEntries.map(({ zone, items }) => {
                   const queueZone = isQueueZone(zone);
                   const autoWidgetZone = isAutoWidgetZone(zone);
@@ -1571,9 +1653,11 @@ export default function SignagePlayer() {
                   return (
                     <div
                       key={zone.id}
+                      ref={(el) => { if (el) zoneRefs.current[zone.id] = el; else delete zoneRefs.current[zone.id]; }}
                       className={`absolute overflow-hidden ${queueZone ? "bg-transparent" : "bg-black"}`}
                       style={{ left: `${left}%`, top: `${top}%`, width: `${width}%`, height: `${height}%`, zIndex: zoneZIndex }}
                     >
+                      {/* per-zone overlay removed here; using top-level viewport overlay for inspect_zones */}
                       {queueZone && items.length === 0 ? (
                         <QueueBoard deviceName={payload.device_name} queuePreview={queuePreview} notices={notices} zone={zone} canvasWidth={canvasWidth} canvasHeight={canvasHeight} />
                         ) : autoWidgetZone && items.length === 0 ? (
@@ -1587,12 +1671,32 @@ export default function SignagePlayer() {
                           </div>
                         </div>
                       ) : (
-                        <MediaSlot items={items} label={zone.name} queuePreview={queuePreview} weatherData={weatherData} zone={zone} canvasWidth={canvasWidth} canvasHeight={canvasHeight} />
+                        <MediaSlot items={items} label={zone.name} queuePreview={queuePreview} weatherData={weatherData} zone={zone} canvasWidth={canvasWidth} canvasHeight={canvasHeight} mediaMode={zoneMediaModes?.[zone.id] || "fill"} />
                       )}
                     </div>
                   );
                 })}
               </div>
+              {inspectZones && Object.keys(zoneInspections || {}).length > 0 ? (
+                <div className="absolute inset-0 pointer-events-none z-50">
+                  {zoneEntries.map(({ zone }) => {
+                    const info = zoneInspections?.[zone.id];
+                    if (!info) return null;
+                    return (
+                      <div
+                        key={`inspect-${zone.id}`}
+                        className="absolute pointer-events-none text-xs text-white/90 bg-black/60 px-2 py-1 rounded"
+                        style={{ left: `${info.left}px`, top: `${info.top}px`, transform: "translate(-4px,-4px)" }}
+                      >
+                        <div className="font-semibold">{zone.id}{zone.name ? ` · ${String(zone.name).slice(0,12)}` : ""}</div>
+                        <div className="text-[11px]">cfg: {Math.round(Number(zone.width_px||0))}x{Math.round(Number(zone.height_px||0))}</div>
+                        <div className="text-[11px]">act: {info.width}x{info.height}px</div>
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : null}
+              </>
             ) : (
               <div className="grid gap-0 w-full h-full min-h-0" style={gridStyle}>
                 {zoneEntries.map(({ zone, items }) => (
@@ -1609,7 +1713,7 @@ export default function SignagePlayer() {
                           <img src={clientLogoUrl} alt={`${payload.device_name || "client"} logo`} className="max-h-[75%] max-w-[75%] object-contain" />
                         </div>
                       </div>
-                    ) : <MediaSlot items={items} label={zone.name} queuePreview={queuePreview} weatherData={weatherData} zone={zone} canvasWidth={canvasWidth} canvasHeight={canvasHeight} />}
+                    ) : <MediaSlot items={items} label={zone.name} queuePreview={queuePreview} weatherData={weatherData} zone={zone} canvasWidth={canvasWidth} canvasHeight={canvasHeight} mediaMode={zoneMediaModes?.[zone.id] || "fill"} />}
                   </div>
                 ))}
               </div>
@@ -1713,6 +1817,7 @@ export default function SignagePlayer() {
                   {zoneDefs.map((zone) => {
                     const hidden = hiddenZoneIds.includes(zone.id);
                     const placement = zonePlacements?.[zone.id] || "auto";
+                    const mediaMode = zoneMediaModes?.[zone.id] || "fill";
                     return (
                       <div key={zone.id} className="rounded-2xl border border-white/10 bg-white/5 p-3">
                         <div className="flex items-start justify-between gap-3">
@@ -1754,6 +1859,26 @@ export default function SignagePlayer() {
                             </button>
                           </div>
                         ) : null}
+
+                        <div className="mt-3">
+                          <div className="mb-2 text-[10px] uppercase tracking-[0.3em] text-white/40">Media fit</div>
+                          <div className="grid grid-cols-2 gap-2">
+                            <button
+                              type="button"
+                              onClick={() => setZoneMediaMode(zone.id, "fill")}
+                              className={`rounded-xl border px-2 py-2 text-[10px] font-semibold uppercase tracking-[0.18em] ${mediaMode === "fill" ? "border-cyan-400/40 bg-cyan-500/20 text-cyan-100" : "border-white/10 bg-white/5 text-white/70 hover:bg-white/10"}`}
+                            >
+                              Fill
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setZoneMediaMode(zone.id, "fit")}
+                              className={`rounded-xl border px-2 py-2 text-[10px] font-semibold uppercase tracking-[0.18em] ${mediaMode === "fit" ? "border-cyan-400/40 bg-cyan-500/20 text-cyan-100" : "border-white/10 bg-white/5 text-white/70 hover:bg-white/10"}`}
+                            >
+                              Fit
+                            </button>
+                          </div>
+                        </div>
                       </div>
                     );
                   })}
