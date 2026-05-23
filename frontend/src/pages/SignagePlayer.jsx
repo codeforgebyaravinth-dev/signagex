@@ -554,119 +554,151 @@ function TickerSlot({ items, label, zone, canvasWidth, canvasHeight, viewportSca
     </ResponsiveZoneShell>
   );
 }
-
 function QueueBoard({ deviceName, queuePreview, notices, zone, canvasWidth, canvasHeight, viewportScale = 1 }) {
-  const calledTokens = Array.isArray(queuePreview) ? queuePreview.filter((item) => String(item?.status || "").toLowerCase() === "called").slice(0, 3) : [];
-  const currentToken = calledTokens[0] || queuePreview?.[0] || null;
-  const upNext = Array.isArray(queuePreview)
-    ? queuePreview.filter((item, index) => item !== currentToken && (index > 0 || String(item?.status || "").toLowerCase() !== "called")).slice(0, 4)
-    : [];
-  const highlightNotice = Array.isArray(notices) && notices.length > 0 ? notices[0] : null;
-  const queueCount = Array.isArray(queuePreview) ? queuePreview.length : 0;
-  const zoneScale = getZoneScale(zone, canvasWidth, canvasHeight, false, viewportScale);
-  // boost queue visuals so current token is readable when zones are small
-  const zoneScaleBoosted = (() => {
-    if (!Number.isFinite(zoneScale)) return 1;
-    if (zoneScale < 0.7) return Math.min(1, zoneScale * 1.45);
-    if (zoneScale < 0.9) return Math.min(1, zoneScale * 1.22);
-    return Math.min(1, zoneScale * 1.06);
-  })();
-  const isCompact = zoneScaleBoosted < 0.8;
+  // Get current token and next two tokens
+  const currentToken = queuePreview?.[0] || null;
+  const nextTokens = queuePreview?.slice(1, 3) || [];
 
-  if (!currentToken && upNext.length === 0 && !highlightNotice) return null;
+  // Don't show anything if no token
+  if (!currentToken) return null;
+
+  // Get zone scale and boost for better visibility
+  const zoneScale = getZoneScale(zone, canvasWidth, canvasHeight, false, viewportScale);
+  const zoneScaleBoosted = Math.min(1.8, zoneScale * 1.6);
 
   return (
     <ResponsiveZoneShell scale={zoneScaleBoosted}>
-      <div className="pointer-events-auto w-full h-full overflow-hidden rounded-[2.5rem] border border-white/10 bg-[linear-gradient(180deg,rgba(2,6,23,0.98),rgba(15,23,42,0.96))] text-white shadow-[0_30px_100px_-34px_rgba(0,0,0,0.85)] backdrop-blur-xl">
-        <div className="relative h-full">
-        <div className={`absolute -right-16 -top-16 ${isCompact ? "h-28 w-28" : "h-44 w-44"} rounded-full bg-fuchsia-500/18 blur-3xl`} />
-        <div className={`absolute -left-10 bottom-0 ${isCompact ? "h-20 w-20" : "h-32 w-32"} rounded-full bg-cyan-400/12 blur-3xl`} />
+      <div 
+        className="w-full h-full flex flex-col text-white"
+        style={{
+          background: 'linear-gradient(135deg, #ec4899, #fb7185, #f97316)',
+        }}
+      >
+        {/* Top Status Bar - Bold */}
+        <div className="bg-white/15 py-4 text-center border-b-2 border-white/30">
+          <div 
+            className="text-white font-black uppercase tracking-[0.3em]"
+            style={{ fontSize: 'clamp(13px, 2vw, 18px)', letterSpacing: '0.3em' }}
+          >
+            🔴 LIVE QUEUE STATUS
+          </div>
+        </div>
 
-        <div className={`flex flex-col h-full ${isCompact ? "gap-2" : "gap-4"}`}>
-          <div className={`rounded-[2rem] border border-white/10 bg-[radial-gradient(circle_at_top_right,rgba(236,72,153,0.24),transparent_42%),linear-gradient(180deg,rgba(15,23,42,0.98),rgba(2,6,23,0.98))] ${isCompact ? "p-2" : "p-3"} shadow-[0_20px_60px_-36px_rgba(236,72,153,0.45)]`}>
-            {currentToken ? (
-              <div className={`grid ${isCompact ? "gap-1" : "gap-2"} rounded-[1.75rem] border border-fuchsia-400/18 bg-white/5 ${isCompact ? "p-2" : "p-3"} md:grid-cols-[1fr_0.8fr] md:items-start`}>
-                <div className={`flex items-center ${isCompact ? "gap-3" : "gap-4"}`}>
-                  <div className={`flex ${isCompact ? "h-18 w-18 text-[1.9rem]" : "h-24 w-24 text-[2.5rem]"} shrink-0 items-center justify-center rounded-[1.75rem] bg-[linear-gradient(135deg,#ec4899,#fb7185,#f97316)] font-black tracking-tight text-white shadow-[0_24px_50px_-16px_rgba(236,72,153,0.9)]`}>
-                    {currentToken.token}
-                  </div>
-                  <div className="min-w-0">
-                    <div className="text-[10px] uppercase tracking-[0.4em] text-fuchsia-100/70">Current token</div>
-                    <div className={`mt-2 ${isCompact ? "text-[clamp(0.95rem,1.6vw,1.4rem)]" : "text-[clamp(1.1rem,2vw,1.8rem)]"} font-semibold text-white truncate`}>{currentToken.patient_name || currentToken.service_name || "Queue item"}</div>
-                    <div className={`mt-1 ${isCompact ? "text-[0.7rem] tracking-[0.22em]" : "text-sm tracking-[0.28em]"} uppercase text-white/55 truncate`}>{currentToken.service_type || currentToken.service_name || "Appointment"}</div>
-                    <div className={`${isCompact ? "mt-0.5 text-[0.75rem]" : "mt-1 text-sm"} text-white/70`}>Live front desk callout</div>
-                  </div>
-                </div>
-                <div className={`grid ${isCompact ? "gap-1.5" : "gap-2"} self-stretch`}>
-                  <div className={`rounded-2xl border border-white/10 bg-black/20 ${isCompact ? "px-3 py-2" : "px-4 py-3"}`}>
-                    <div className="text-[10px] uppercase tracking-[0.35em] text-white/45">Status</div>
-                    <div className={`mt-1 ${isCompact ? "text-xs" : "text-sm"} font-semibold text-white`}>{currentToken.status || "pending"}</div>
-                  </div>
-                  <div className={`rounded-2xl border border-white/10 bg-black/20 ${isCompact ? "px-3 py-2" : "px-4 py-3"}`}>
-                    <div className="text-[10px] uppercase tracking-[0.35em] text-white/45">Time</div>
-                    <div className={`mt-1 ${isCompact ? "text-xs" : "text-sm"} font-semibold text-white`}>{currentToken.assigned_time || currentToken.preferred_time || "Live queue"}</div>
-                  </div>
-                </div>
+        {/* Main Content - Current Token */}
+        <div className="flex-1 flex flex-col items-center justify-center px-6 py-8">
+          {/* Currently Serving Label - Bold */}
+          <div 
+            className="text-white/90 font-bold uppercase tracking-[0.25em] mb-4 text-center"
+            style={{ fontSize: 'clamp(13px, 1.8vw, 16px)', letterSpacing: '0.25em' }}
+          >
+            ⚡ CURRENTLY SERVING
+          </div>
+          
+          {/* Current Token Number - Extra Large & Bold */}
+          <div 
+            className="font-black text-center leading-none tracking-tighter"
+            style={{ 
+              fontSize: 'clamp(100px, 22vw, 220px)',
+              textShadow: '4px 4px 0 rgba(0,0,0,0.2)',
+              fontWeight: 900
+            }}
+          >
+            {currentToken.token || "—"}
+          </div>
+          
+          {/* Current Token Name - Bold */}
+          <div 
+            className="font-extrabold text-center mt-6 px-4"
+            style={{ fontSize: 'clamp(22px, 4vw, 38px)' }}
+          >
+            {currentToken.patient_name || currentToken.service_name || "GUEST"}
+          </div>
+          
+          {/* Current Token Service - Bold */}
+          <div 
+            className="text-white/80 font-semibold text-center mt-3 uppercase tracking-wide"
+            style={{ fontSize: 'clamp(13px, 2vw, 16px)' }}
+          >
+            {currentToken.service_type || currentToken.service_name || "→ PLEASE PROCEED TO COUNTER ←"}
+          </div>
+        </div>
+
+        {/* Next Tokens Section */}
+        {nextTokens.length > 0 && (
+          <div className="border-t-2 border-white/30 bg-black/30">
+            <div className="max-w-7xl mx-auto px-6 py-5">
+              {/* Next Up Label - Bold */}
+              <div 
+                className="text-white/70 font-bold uppercase tracking-[0.25em] mb-5 text-center"
+                style={{ fontSize: 'clamp(11px, 1.5vw, 14px)', letterSpacing: '0.25em' }}
+              >
+                ⏩ NEXT IN QUEUE
               </div>
-            ) : null}
-
-            {calledTokens.length > 1 ? (
-              <div className={`mt-2 flex flex-wrap ${isCompact ? "gap-1.5" : "gap-2"}`}>
-                {calledTokens.slice(1).map((item, index) => (
-                  <div key={`parallel-called-${item.token}-${index}`} className={`rounded-full border border-emerald-300/30 bg-emerald-400/15 ${isCompact ? "px-2 py-1" : "px-3 py-1.5"} text-white`}>
-                    <span className={`${isCompact ? "text-[10px]" : "text-xs"} uppercase tracking-[0.28em] text-emerald-100/80`}>Also calling</span>
-                    <span className={`ml-2 font-black ${isCompact ? "text-sm" : "text-base"}`}>#{item.token}</span>
+              
+              {/* Next Tokens Grid */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                {nextTokens.map((token, index) => (
+                  <div 
+                    key={token.token || index}
+                    className="bg-white/15 border-2 border-white/30 p-4"
+                    style={{ backdropFilter: 'blur(10px)' }}
+                  >
+                    <div className="flex items-center gap-4">
+                      {/* Token Number - Bold */}
+                      <div 
+                        className="font-black text-white"
+                        style={{ fontSize: 'clamp(28px, 5vw, 44px)' }}
+                      >
+                        {token.token || "—"}
+                      </div>
+                      
+                      {/* Divider */}
+                      <div className="w-px h-10 bg-white/40" />
+                      
+                      {/* Token Info */}
+                      <div className="flex-1 min-w-0">
+                        <div 
+                          className="font-bold truncate"
+                          style={{ fontSize: 'clamp(16px, 2.5vw, 18px)' }}
+                        >
+                          {token.patient_name || token.service_name || "GUEST"}
+                        </div>
+                        <div 
+                          className="text-white/60 font-medium truncate text-xs uppercase tracking-wide mt-1"
+                          style={{ fontSize: 'clamp(11px, 1.5vw, 12px)' }}
+                        >
+                          {token.service_type || token.service_name || "QUEUE"}
+                        </div>
+                      </div>
+                      
+                      {/* Estimated Wait */}
+                      {token.wait_after_mins && (
+                        <div className="text-right">
+                          <div className="text-white font-black text-lg">
+                            {token.wait_after_mins}m
+                          </div>
+                          <div className="text-white/50 text-[10px] font-bold uppercase">wait</div>
+                        </div>
+                      )}
+                    </div>
                   </div>
                 ))}
               </div>
-            ) : null}
+            </div>
           </div>
-
-          <div className={`mt-2 grid ${isCompact ? "gap-1" : "gap-2"}`}>
-            {upNext.length > 0 ? (
-              <div className={`rounded-[2rem] border border-white/10 bg-[linear-gradient(180deg,rgba(255,255,255,0.08),rgba(255,255,255,0.04))] ${isCompact ? "p-3" : "p-4"}`}>
-                <div className="flex items-center justify-between gap-3">
-                  <div>
-                    <div className="text-[10px] uppercase tracking-[0.35em] text-white/55">Next wave</div>
-                    <div className={`mt-1 ${isCompact ? "text-xs" : "text-sm"} text-white/75`}>Upcoming tokens</div>
-                  </div>
-                  <div className="text-[10px] uppercase tracking-[0.35em] text-white/35">{upNext.length} entries</div>
-                </div>
-                <div className={`mt-2 grid ${isCompact ? "gap-1" : "gap-2"}`}>
-                  {upNext.map((item, index) => (
-                    <div key={`${item.token}-${index}`} className={`rounded-[1.35rem] border border-white/10 bg-black/30 ${isCompact ? "px-3 py-2.5" : "px-4 py-3.5"}`}>
-                      <div className={`flex items-center ${isCompact ? "gap-2.5" : "gap-3"}`}>
-                        <div className={`flex ${isCompact ? "h-10 w-10 text-base" : "h-12 w-12 text-lg"} shrink-0 items-center justify-center rounded-2xl bg-white/10 font-black text-white`}>
-                          {item.token}
-                        </div>
-                        <div className="min-w-0 flex-1">
-                          <div className={`font-semibold text-white truncate ${isCompact ? "text-xs" : "text-sm"}`}>{item.patient_name || item.service_name || "Service"}</div>
-                          <div className={`mt-1 uppercase tracking-[0.32em] text-white/50 truncate ${isCompact ? "text-[9px]" : "text-[10px]"}`}>{item.service_type || item.service_name || "Appointment"}</div>
-                          <div className={`mt-1 flex items-center gap-2 uppercase tracking-[0.32em] text-white/40 ${isCompact ? "text-[9px]" : "text-[10px]"}`}>
-                            <span>{item.status || "pending"}</span>
-                            <span className="h-1 w-1 rounded-full bg-white/20" />
-                            <span>{item.assigned_time || item.preferred_time || (item.wait_after_mins ? `${item.wait_after_mins}m wait` : "Queued")}</span>
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            ) : null}
-
-            {highlightNotice ? (
-              <div className={`overflow-hidden rounded-[2rem] border border-fuchsia-400/20 bg-[linear-gradient(135deg,rgba(217,70,239,0.95),rgba(244,63,94,0.92),rgba(251,146,60,0.9))] ${isCompact ? "p-3" : "p-4"} text-white shadow-[0_18px_50px_-24px_rgba(244,63,94,0.8)]`}>
-                <div className="text-[10px] uppercase tracking-[0.4em] text-white/75">Priority notice</div>
-                <div className={`mt-1 font-black uppercase leading-tight ${isCompact ? "text-base" : "text-xl"}`}>Live update</div>
-                <div className={`mt-2 font-medium text-white/92 line-clamp-3 ${isCompact ? "text-xs" : "text-sm"}`}>
-                  {highlightNotice.title || highlightNotice.body || "Queue updates available"}
-                </div>
-              </div>
-            ) : null}
+        )}
+        
+        {/* Notice Banner - Bold */}
+        {notices && notices.length > 0 && notices[0] && (
+          <div className="bg-black/40 border-t-2 border-white/30 py-4 px-6 text-center">
+            <div 
+              className="text-white/90 font-bold"
+              style={{ fontSize: 'clamp(13px, 2vw, 16px)' }}
+            >
+              📢 {notices[0].title || notices[0].body || "QUEUE UPDATES AVAILABLE"}
+            </div>
           </div>
-        </div>
-        </div>
+        )}
       </div>
     </ResponsiveZoneShell>
   );
@@ -1866,183 +1898,185 @@ export default function SignagePlayer() {
           </button>
 
           {menuOpen ? (
-            <div className="absolute right-0 mt-3 w-[min(92vw,360px)] overflow-hidden rounded-[1.5rem] border border-white/10 bg-[linear-gradient(180deg,rgba(15,23,42,0.98),rgba(2,6,23,0.98))] text-white shadow-[0_28px_90px_-30px_rgba(0,0,0,0.9)] backdrop-blur-xl">
-              <div className="flex items-center justify-between border-b border-white/10 px-4 py-3">
-                <div>
-                  <div className="text-[10px] uppercase tracking-[0.35em] text-white/45">Player menu</div>
-                  <div className="text-sm font-semibold text-white">Controls and zones</div>
+  <div className="absolute right-0 mt-3 w-[min(92vw,400px)] max-h-[85vh] overflow-y-auto rounded-[1.5rem] border border-white/10 bg-[linear-gradient(180deg,rgba(15,23,42,0.98),rgba(2,6,23,0.98))] text-white shadow-[0_28px_90px_-30px_rgba(0,0,0,0.9)] backdrop-blur-xl">
+    <div className="sticky top-0 bg-[linear-gradient(180deg,rgba(15,23,42,0.98),rgba(2,6,23,0.98))] backdrop-blur-xl z-10">
+      <div className="flex items-center justify-between border-b border-white/10 px-4 py-3">
+        <div>
+          <div className="text-[10px] uppercase tracking-[0.35em] text-white/45">Player menu</div>
+          <div className="text-sm font-semibold text-white">Controls and zones</div>
+        </div>
+        <button type="button" onClick={() => setMenuOpen(false)} className="rounded-full border border-white/10 p-2 text-white/70 hover:text-white">
+          <X className="h-4 w-4" />
+        </button>
+      </div>
+    </div>
+
+    <div className="border-b border-white/10 p-4">
+      <div className="text-[10px] uppercase tracking-[0.35em] text-white/45 mb-3">Controls</div>
+      <div className="grid grid-cols-2 gap-2">
+        <button
+          type="button"
+          onClick={goFullscreen}
+          className="inline-flex items-center justify-center gap-2 rounded-2xl border border-white/10 bg-white/5 px-3 py-2.5 text-sm font-medium text-white hover:bg-white/10"
+        >
+          <Maximize className="h-4 w-4" /> Fullscreen
+        </button>
+        <button
+          type="button"
+          onClick={poll}
+          className="inline-flex items-center justify-center gap-2 rounded-2xl border border-white/10 bg-white/5 px-3 py-2.5 text-sm font-medium text-white hover:bg-white/10"
+        >
+          <RefreshCw className="h-4 w-4" /> Reload
+        </button>
+        <button
+          type="button"
+          onClick={resetZoneVisibility}
+          className="inline-flex items-center justify-center gap-2 rounded-2xl border border-white/10 bg-white/5 px-3 py-2.5 text-sm font-medium text-white hover:bg-white/10 col-span-2"
+        >
+          <RotateCcw className="h-4 w-4" /> Restore all zones
+        </button>
+      </div>
+
+      <div className="mt-3">
+        <div className="mb-2 text-[10px] uppercase tracking-[0.35em] text-white/45">Orientation</div>
+        <div className="grid grid-cols-3 gap-2">
+          {[
+            { value: "auto", label: "Auto" },
+            { value: "landscape", label: "Landscape" },
+            { value: "portrait", label: "Portrait" },
+          ].map((option) => (
+            <button
+              key={option.value}
+              type="button"
+              onClick={() => setPlayerOrientation(option.value)}
+              className={`rounded-xl border px-2 py-2 text-[10px] font-semibold uppercase tracking-[0.18em] ${orientationMode === option.value ? "border-cyan-400/40 bg-cyan-500/20 text-cyan-100" : "border-white/10 bg-white/5 text-white/70 hover:bg-white/10"}`}
+            >
+              {option.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <label className="mt-3 flex items-center justify-between gap-3 rounded-2xl border border-white/10 bg-white/5 px-3 py-2.5">
+        <span>
+          <span className="block text-sm font-medium text-white">Fill blank space</span>
+          <span className="block text-[11px] text-white/45">Compact the layout when zones are removed</span>
+        </span>
+        <button
+          type="button"
+          onClick={() => setFillBlankSpaces((current) => !current)}
+          className={`inline-flex items-center gap-2 rounded-full px-3 py-1.5 text-xs font-semibold uppercase tracking-[0.18em] ${fillBlankSpaces ? "bg-emerald-500/20 text-emerald-200" : "bg-white/10 text-white/55"}`}
+        >
+          {fillBlankSpaces ? <Eye className="h-3.5 w-3.5" /> : <EyeOff className="h-3.5 w-3.5" />}
+          {fillBlankSpaces ? "On" : "Off"}
+        </button>
+      </label>
+
+      <label className="mt-3 flex items-center justify-between gap-3 rounded-2xl border border-white/10 bg-white/5 px-3 py-2.5">
+        <span>
+          <span className="block text-sm font-medium text-white">Custom placement</span>
+          <span className="block text-[11px] text-white/45">Choose a preset area for each zone</span>
+        </span>
+        <button
+          type="button"
+          onClick={() => setCustomPlacementEnabled((current) => !current)}
+          className={`inline-flex items-center gap-2 rounded-full px-3 py-1.5 text-xs font-semibold uppercase tracking-[0.18em] ${customPlacementEnabled ? "bg-cyan-500/20 text-cyan-200" : "bg-white/10 text-white/55"}`}
+        >
+          {customPlacementEnabled ? <Eye className="h-3.5 w-3.5" /> : <EyeOff className="h-3.5 w-3.5" />}
+          {customPlacementEnabled ? "On" : "Off"}
+        </button>
+      </label>
+    </div>
+
+    <div className="p-4">
+      <div className="flex items-center justify-between mb-3 sticky top-0 bg-[linear-gradient(180deg,rgba(15,23,42,0.98),rgba(2,6,23,0.98))] py-2 -mt-2">
+        <div>
+          <div className="text-[10px] uppercase tracking-[0.35em] text-white/45">Zone settings</div>
+          <div className="text-sm font-semibold text-white">Hide, restore, or place zones</div>
+        </div>
+        <div className="text-[10px] uppercase tracking-[0.3em] text-white/35">{visibleZoneDefs.length}/{zoneDefs.length}</div>
+      </div>
+
+      <div className="space-y-2 max-h-[50vh] overflow-y-auto pr-1">
+        {zoneDefs.map((zone) => {
+          const hidden = hiddenZoneIds.includes(zone.id);
+          const placement = zonePlacements?.[zone.id] || "auto";
+          const mediaMode = zoneMediaModes?.[zone.id] || getDefaultZoneMediaMode(zone);
+          return (
+            <div key={zone.id} className="rounded-2xl border border-white/10 bg-white/5 p-3">
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0 flex-1">
+                  <div className="truncate text-sm font-medium text-white">{zone.name || zone.id}</div>
+                  <div className="truncate text-[11px] uppercase tracking-[0.25em] text-white/40">{zone.role || "zone"} · {Math.round(Number(zone.width_px || 0))}x{Math.round(Number(zone.height_px || 0))}</div>
                 </div>
-                <button type="button" onClick={() => setMenuOpen(false)} className="rounded-full border border-white/10 p-2 text-white/70 hover:text-white">
-                  <X className="h-4 w-4" />
+                <button
+                  type="button"
+                  onClick={() => toggleZoneVisibility(zone.id)}
+                  className={`inline-flex shrink-0 items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-semibold uppercase tracking-[0.18em] ${hidden ? "bg-white/10 text-white/70" : "bg-rose-500/15 text-rose-200"}`}
+                >
+                  {hidden ? <Eye className="h-3.5 w-3.5" /> : <EyeOff className="h-3.5 w-3.5" />}
+                  {hidden ? "Show" : "Hide"}
                 </button>
               </div>
 
-              <div className="border-b border-white/10 p-4">
-                <div className="text-[10px] uppercase tracking-[0.35em] text-white/45 mb-3">Controls</div>
-                <div className="grid grid-cols-2 gap-2">
-                  <button
-                    type="button"
-                    onClick={goFullscreen}
-                    className="inline-flex items-center justify-center gap-2 rounded-2xl border border-white/10 bg-white/5 px-3 py-2.5 text-sm font-medium text-white hover:bg-white/10"
-                  >
-                    <Maximize className="h-4 w-4" /> Fullscreen
-                  </button>
-                  <button
-                    type="button"
-                    onClick={poll}
-                    className="inline-flex items-center justify-center gap-2 rounded-2xl border border-white/10 bg-white/5 px-3 py-2.5 text-sm font-medium text-white hover:bg-white/10"
-                  >
-                    <RefreshCw className="h-4 w-4" /> Reload
-                  </button>
-                  <button
-                    type="button"
-                    onClick={resetZoneVisibility}
-                    className="inline-flex items-center justify-center gap-2 rounded-2xl border border-white/10 bg-white/5 px-3 py-2.5 text-sm font-medium text-white hover:bg-white/10 col-span-2"
-                  >
-                    <RotateCcw className="h-4 w-4" /> Restore all zones
-                  </button>
-                </div>
-
+              {customPlacementEnabled ? (
                 <div className="mt-3">
-                  <div className="mb-2 text-[10px] uppercase tracking-[0.35em] text-white/45">Orientation</div>
+                  <div className="mb-2 text-[10px] uppercase tracking-[0.3em] text-white/40">Placement</div>
                   <div className="grid grid-cols-3 gap-2">
-                    {[
-                      { value: "auto", label: "Auto" },
-                      { value: "landscape", label: "Landscape" },
-                      { value: "portrait", label: "Portrait" },
-                    ].map((option) => (
+                    {ZONE_PLACEMENT_PRESETS.map((preset) => (
                       <button
-                        key={option.value}
+                        key={preset.id}
                         type="button"
-                        onClick={() => setPlayerOrientation(option.value)}
-                        className={`rounded-xl border px-2 py-2 text-[10px] font-semibold uppercase tracking-[0.18em] ${orientationMode === option.value ? "border-cyan-400/40 bg-cyan-500/20 text-cyan-100" : "border-white/10 bg-white/5 text-white/70 hover:bg-white/10"}`}
+                        onClick={() => setZonePlacement(zone.id, preset.id)}
+                        className={`rounded-xl border px-2 py-2 text-[10px] font-semibold uppercase tracking-[0.18em] ${placement === preset.id ? "border-cyan-400/40 bg-cyan-500/20 text-cyan-100" : "border-white/10 bg-white/5 text-white/70 hover:bg-white/10"}`}
                       >
-                        {option.label}
+                        {preset.label}
                       </button>
                     ))}
                   </div>
-                </div>
-
-                <label className="mt-3 flex items-center justify-between gap-3 rounded-2xl border border-white/10 bg-white/5 px-3 py-2.5">
-                  <span>
-                    <span className="block text-sm font-medium text-white">Fill blank space</span>
-                    <span className="block text-[11px] text-white/45">Compact the layout when zones are removed</span>
-                  </span>
                   <button
                     type="button"
-                    onClick={() => setFillBlankSpaces((current) => !current)}
-                    className={`inline-flex items-center gap-2 rounded-full px-3 py-1.5 text-xs font-semibold uppercase tracking-[0.18em] ${fillBlankSpaces ? "bg-emerald-500/20 text-emerald-200" : "bg-white/10 text-white/55"}`}
+                    onClick={() => setZonePlacement(zone.id, "auto")}
+                    className="mt-2 w-full rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-[10px] font-semibold uppercase tracking-[0.18em] text-white/65 hover:bg-white/10"
                   >
-                    {fillBlankSpaces ? <Eye className="h-3.5 w-3.5" /> : <EyeOff className="h-3.5 w-3.5" />}
-                    {fillBlankSpaces ? "On" : "Off"}
+                    Reset to auto
                   </button>
-                </label>
+                </div>
+              ) : null}
 
-                <label className="mt-3 flex items-center justify-between gap-3 rounded-2xl border border-white/10 bg-white/5 px-3 py-2.5">
-                  <span>
-                    <span className="block text-sm font-medium text-white">Custom placement</span>
-                    <span className="block text-[11px] text-white/45">Choose a preset area for each zone</span>
-                  </span>
+              <div className="mt-3">
+                <div className="mb-2 text-[10px] uppercase tracking-[0.3em] text-white/40">Media fit</div>
+                <div className="grid grid-cols-3 gap-2">
                   <button
                     type="button"
-                    onClick={() => setCustomPlacementEnabled((current) => !current)}
-                    className={`inline-flex items-center gap-2 rounded-full px-3 py-1.5 text-xs font-semibold uppercase tracking-[0.18em] ${customPlacementEnabled ? "bg-cyan-500/20 text-cyan-200" : "bg-white/10 text-white/55"}`}
+                    onClick={() => setZoneMediaMode(zone.id, "fill")}
+                    className={`rounded-xl border px-2 py-2 text-[10px] font-semibold uppercase tracking-[0.18em] ${mediaMode === "fill" ? "border-cyan-400/40 bg-cyan-500/20 text-cyan-100" : "border-white/10 bg-white/5 text-white/70 hover:bg-white/10"}`}
                   >
-                    {customPlacementEnabled ? <Eye className="h-3.5 w-3.5" /> : <EyeOff className="h-3.5 w-3.5" />}
-                    {customPlacementEnabled ? "On" : "Off"}
+                    Fill
                   </button>
-                </label>
-              </div>
-
-              <div className="p-4">
-                <div className="flex items-center justify-between mb-3">
-                  <div>
-                    <div className="text-[10px] uppercase tracking-[0.35em] text-white/45">Zone settings</div>
-                    <div className="text-sm font-semibold text-white">Hide, restore, or place zones</div>
-                  </div>
-                  <div className="text-[10px] uppercase tracking-[0.3em] text-white/35">{visibleZoneDefs.length}/{zoneDefs.length}</div>
-                </div>
-
-                <div className="max-h-[48vh] space-y-2 overflow-auto pr-1">
-                  {zoneDefs.map((zone) => {
-                    const hidden = hiddenZoneIds.includes(zone.id);
-                    const placement = zonePlacements?.[zone.id] || "auto";
-                    const mediaMode = zoneMediaModes?.[zone.id] || getDefaultZoneMediaMode(zone);
-                    return (
-                      <div key={zone.id} className="rounded-2xl border border-white/10 bg-white/5 p-3">
-                        <div className="flex items-start justify-between gap-3">
-                          <div className="min-w-0">
-                            <div className="truncate text-sm font-medium text-white">{zone.name || zone.id}</div>
-                            <div className="truncate text-[11px] uppercase tracking-[0.25em] text-white/40">{zone.role || "zone"} · {Math.round(Number(zone.width_px || 0))}x{Math.round(Number(zone.height_px || 0))}</div>
-                          </div>
-                          <button
-                            type="button"
-                            onClick={() => toggleZoneVisibility(zone.id)}
-                            className={`inline-flex shrink-0 items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-semibold uppercase tracking-[0.18em] ${hidden ? "bg-white/10 text-white/70" : "bg-rose-500/15 text-rose-200"}`}
-                          >
-                            {hidden ? <Eye className="h-3.5 w-3.5" /> : <EyeOff className="h-3.5 w-3.5" />}
-                            {hidden ? "Show" : "Hide"}
-                          </button>
-                        </div>
-
-                        {customPlacementEnabled ? (
-                          <div className="mt-3">
-                            <div className="mb-2 text-[10px] uppercase tracking-[0.3em] text-white/40">Placement</div>
-                            <div className="grid grid-cols-3 gap-2">
-                              {ZONE_PLACEMENT_PRESETS.map((preset) => (
-                                <button
-                                  key={preset.id}
-                                  type="button"
-                                  onClick={() => setZonePlacement(zone.id, preset.id)}
-                                  className={`rounded-xl border px-2 py-2 text-[10px] font-semibold uppercase tracking-[0.18em] ${placement === preset.id ? "border-cyan-400/40 bg-cyan-500/20 text-cyan-100" : "border-white/10 bg-white/5 text-white/70 hover:bg-white/10"}`}
-                                >
-                                  {preset.label}
-                                </button>
-                              ))}
-                            </div>
-                            <button
-                              type="button"
-                              onClick={() => setZonePlacement(zone.id, "auto")}
-                              className="mt-2 w-full rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-[10px] font-semibold uppercase tracking-[0.18em] text-white/65 hover:bg-white/10"
-                            >
-                              Reset to auto
-                            </button>
-                          </div>
-                        ) : null}
-
-                        <div className="mt-3">
-                          <div className="mb-2 text-[10px] uppercase tracking-[0.3em] text-white/40">Media fit</div>
-                          <div className="grid grid-cols-3 gap-2">
-                            <button
-                              type="button"
-                              onClick={() => setZoneMediaMode(zone.id, "fill")}
-                              className={`rounded-xl border px-2 py-2 text-[10px] font-semibold uppercase tracking-[0.18em] ${mediaMode === "fill" ? "border-cyan-400/40 bg-cyan-500/20 text-cyan-100" : "border-white/10 bg-white/5 text-white/70 hover:bg-white/10"}`}
-                            >
-                              Fill
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => setZoneMediaMode(zone.id, "fit")}
-                              className={`rounded-xl border px-2 py-2 text-[10px] font-semibold uppercase tracking-[0.18em] ${mediaMode === "fit" ? "border-cyan-400/40 bg-cyan-500/20 text-cyan-100" : "border-white/10 bg-white/5 text-white/70 hover:bg-white/10"}`}
-                            >
-                              Fit
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => setZoneMediaMode(zone.id, "stretch")}
-                              className={`rounded-xl border px-2 py-2 text-[10px] font-semibold uppercase tracking-[0.18em] ${mediaMode === "stretch" ? "border-cyan-400/40 bg-cyan-500/20 text-cyan-100" : "border-white/10 bg-white/5 text-white/70 hover:bg-white/10"}`}
-                            >
-                              Stretch
-                            </button>
-                          </div>
-                        </div>
-                      </div>
-                    );
-                  })}
+                  <button
+                    type="button"
+                    onClick={() => setZoneMediaMode(zone.id, "fit")}
+                    className={`rounded-xl border px-2 py-2 text-[10px] font-semibold uppercase tracking-[0.18em] ${mediaMode === "fit" ? "border-cyan-400/40 bg-cyan-500/20 text-cyan-100" : "border-white/10 bg-white/5 text-white/70 hover:bg-white/10"}`}
+                  >
+                    Fit
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setZoneMediaMode(zone.id, "stretch")}
+                    className={`rounded-xl border px-2 py-2 text-[10px] font-semibold uppercase tracking-[0.18em] ${mediaMode === "stretch" ? "border-cyan-400/40 bg-cyan-500/20 text-cyan-100" : "border-white/10 bg-white/5 text-white/70 hover:bg-white/10"}`}
+                  >
+                    Stretch
+                  </button>
                 </div>
               </div>
             </div>
-          ) : null}
+          );
+        })}
+      </div>
+    </div>
+  </div>
+) : null}
         </div>
           </div>
         </div>
