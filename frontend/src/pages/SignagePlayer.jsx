@@ -20,7 +20,21 @@ const ZONE_PLACEMENT_PRESETS = [
 function getMediaFit(item, mediaMode = "fill") {
   if (item?.fit === "contain") return "object-contain";
   if (item?.fit === "cover") return "object-cover";
-  return mediaMode === "fit" ? "object-contain" : "object-cover";
+  if (item?.fit === "stretch" || item?.fit === "fill") return "object-fill";
+  if (mediaMode === "fit") return "object-contain";
+  if (mediaMode === "stretch") return "object-fill";
+  return "object-cover";
+}
+
+function getDefaultZoneMediaMode(zone) {
+  return /^(header|weather)$/i.test(zone?.role || "") ? "fill" : "fit";
+}
+
+function normalizeRotation(value) {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return 0;
+  const normalized = ((Math.round(num / 90) * 90) % 360 + 360) % 360;
+  return [0, 90, 180, 270].includes(normalized) ? normalized : 0;
 }
 
 function escapeRegExp(string) {
@@ -206,13 +220,13 @@ async function fetchWeatherFromCoords(latitude, longitude) {
   };
 }
 
-function MediaSlot({ items, label, queuePreview, weatherData, zone, canvasWidth, canvasHeight, mediaMode }) {
+function MediaSlot({ items, label, queuePreview, weatherData, zone, canvasWidth, canvasHeight, mediaMode, viewportScale = 1 }) {
   const [idx, setIdx] = useState(0);
   const [showFrame, setShowFrame] = useState(true);
   const timerRef = useRef(null);
   const youtubeRef = useRef(null);
   const youtubePlayerRef = useRef(null);
-  const zoneScale = getZoneScale(zone, canvasWidth, canvasHeight, /^(header|weather)$/i.test(zone?.role || ""));
+  const zoneScale = getZoneScale(zone, canvasWidth, canvasHeight, /^(header|weather)$/i.test(zone?.role || ""), viewportScale);
   const itemCount = Math.max(1, items?.length || 0);
   const handleMediaEnd = useCallback(() => {
     setIdx((i) => (i + 1) % itemCount);
@@ -480,9 +494,9 @@ function MediaSlot({ items, label, queuePreview, weatherData, zone, canvasWidth,
   );
 }
 
-function TickerSlot({ items, label, zone, canvasWidth, canvasHeight }) {
+function TickerSlot({ items, label, zone, canvasWidth, canvasHeight, viewportScale = 1 }) {
   const [feedEntries, setFeedEntries] = useState([]);
-  const zoneScale = getZoneScale(zone, canvasWidth, canvasHeight, false);
+  const zoneScale = getZoneScale(zone, canvasWidth, canvasHeight, false, viewportScale);
 
   useEffect(() => {
     let mounted = true;
@@ -541,12 +555,15 @@ function TickerSlot({ items, label, zone, canvasWidth, canvasHeight }) {
   );
 }
 
-function QueueBoard({ deviceName, queuePreview, notices, zone, canvasWidth, canvasHeight }) {
-  const currentToken = queuePreview?.[0] || null;
-  const upNext = Array.isArray(queuePreview) ? queuePreview.slice(1, 4) : [];
+function QueueBoard({ deviceName, queuePreview, notices, zone, canvasWidth, canvasHeight, viewportScale = 1 }) {
+  const calledTokens = Array.isArray(queuePreview) ? queuePreview.filter((item) => String(item?.status || "").toLowerCase() === "called").slice(0, 3) : [];
+  const currentToken = calledTokens[0] || queuePreview?.[0] || null;
+  const upNext = Array.isArray(queuePreview)
+    ? queuePreview.filter((item, index) => item !== currentToken && (index > 0 || String(item?.status || "").toLowerCase() !== "called")).slice(0, 4)
+    : [];
   const highlightNotice = Array.isArray(notices) && notices.length > 0 ? notices[0] : null;
   const queueCount = Array.isArray(queuePreview) ? queuePreview.length : 0;
-  const zoneScale = getZoneScale(zone, canvasWidth, canvasHeight, false);
+  const zoneScale = getZoneScale(zone, canvasWidth, canvasHeight, false, viewportScale);
   // boost queue visuals so current token is readable when zones are small
   const zoneScaleBoosted = (() => {
     if (!Number.isFinite(zoneScale)) return 1;
@@ -590,6 +607,17 @@ function QueueBoard({ deviceName, queuePreview, notices, zone, canvasWidth, canv
                     <div className={`mt-1 ${isCompact ? "text-xs" : "text-sm"} font-semibold text-white`}>{currentToken.assigned_time || currentToken.preferred_time || "Live queue"}</div>
                   </div>
                 </div>
+              </div>
+            ) : null}
+
+            {calledTokens.length > 1 ? (
+              <div className={`mt-2 flex flex-wrap ${isCompact ? "gap-1.5" : "gap-2"}`}>
+                {calledTokens.slice(1).map((item, index) => (
+                  <div key={`parallel-called-${item.token}-${index}`} className={`rounded-full border border-emerald-300/30 bg-emerald-400/15 ${isCompact ? "px-2 py-1" : "px-3 py-1.5"} text-white`}>
+                    <span className={`${isCompact ? "text-[10px]" : "text-xs"} uppercase tracking-[0.28em] text-emerald-100/80`}>Also calling</span>
+                    <span className={`ml-2 font-black ${isCompact ? "text-sm" : "text-base"}`}>#{item.token}</span>
+                  </div>
+                ))}
               </div>
             ) : null}
           </div>
@@ -656,9 +684,9 @@ function isAutoWidgetZone(zone) {
   return /^(header|weather|bookings)$/i.test(zone?.role || "");
 }
 
-function AutoWidgetZone({ zone, queuePreview, payload, providerData, weatherData, canvasWidth, canvasHeight }) {
+function AutoWidgetZone({ zone, queuePreview, payload, providerData, weatherData, canvasWidth, canvasHeight, viewportScale = 1 }) {
   const role = String(zone?.role || "").toLowerCase();
-  const zoneScale = getZoneScale(zone, canvasWidth, canvasHeight, false);
+  const zoneScale = getZoneScale(zone, canvasWidth, canvasHeight, /^(header|weather)$/i.test(zone?.role || ""), viewportScale);
 
   if (role === "header") {
     return (
@@ -789,7 +817,7 @@ function getClientLogoUrl(providerData, payload) {
   return providerData?.profile?.image_url || providerData?.image_url || payload?.client_logo_url || "";
 }
 
-function getZoneScale(zone, canvasWidth, canvasHeight, preferCover = false) {
+function getZoneScale(zone, canvasWidth, canvasHeight, preferCover = false, viewportScale = 1) {
   const zoneWidth = Number(zone?.width_px ?? canvasWidth) || canvasWidth || 1920;
   const zoneHeight = Number(zone?.height_px ?? canvasHeight) || canvasHeight || 1080;
   const baseWidth = Number(canvasWidth) || 1920;
@@ -801,11 +829,12 @@ function getZoneScale(zone, canvasWidth, canvasHeight, preferCover = false) {
   const rawScale = preferCover
     ? Math.max(widthScale, heightScale) * 0.98
     : Math.min(widthScale, heightScale) * 0.94;
-  return Math.max(0.35, Math.min(1, Number.isFinite(rawScale) ? rawScale : 1));
+  const withViewport = (Number.isFinite(rawScale) ? rawScale : 1) * (Number.isFinite(viewportScale) ? viewportScale : 1);
+  return Math.max(0.35, Math.min(2.5, withViewport));
 }
 
 function ResponsiveZoneShell({ scale = 1, className = "", children }) {
-  const safeScale = Math.max(0.35, Math.min(1, Number(scale) || 1));
+  const safeScale = Math.max(0.35, Math.min(2.5, Number(scale) || 1));
   const inverseScale = 1 / safeScale;
   return (
     <div className="w-full h-full overflow-hidden" style={{ contain: "layout paint size" }}>
@@ -844,13 +873,19 @@ export default function SignagePlayer() {
   const voiceGreetingPlayedRef = useRef(false);
   const [showSplash, setShowSplash] = useState(true);
   const [menuOpen, setMenuOpen] = useState(false);
+  const [orientationOverride, setOrientationOverride] = useState("auto");
   const [hiddenZoneIds, setHiddenZoneIds] = useState([]);
   const [fillBlankSpaces, setFillBlankSpaces] = useState(true);
   const [customPlacementEnabled, setCustomPlacementEnabled] = useState(false);
   const [zonePlacements, setZonePlacements] = useState({});
   const [zoneMediaModes, setZoneMediaModes] = useState({});
+  const [viewportSize, setViewportSize] = useState(() => {
+    if (typeof window === "undefined") return { width: 1920, height: 1080 };
+    return { width: Math.max(1, window.innerWidth || 1920), height: Math.max(1, window.innerHeight || 1080) };
+  });
 
   const zonePrefsKey = useMemo(() => `signage-player-zone-prefs:${pairCode || "default"}`, [pairCode]);
+  const orientationPrefsKey = useMemo(() => `signage-player-orientation:${pairCode || "default"}`, [pairCode]);
 
   const toggleZoneVisibility = useCallback((zoneId) => {
     setHiddenZoneIds((current) => (
@@ -883,6 +918,19 @@ export default function SignagePlayer() {
   }, []);
 
   const toggleMenu = useCallback(() => setMenuOpen((current) => !current), []);
+  const setPlayerOrientation = useCallback((mode) => {
+    setOrientationOverride(["auto", "landscape", "portrait"].includes(mode) ? mode : "auto");
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const updateViewport = () => {
+      setViewportSize({ width: Math.max(1, window.innerWidth || 1), height: Math.max(1, window.innerHeight || 1) });
+    };
+    updateViewport();
+    window.addEventListener("resize", updateViewport);
+    return () => window.removeEventListener("resize", updateViewport);
+  }, []);
 
   const poll = useCallback(async () => {
     try {
@@ -927,11 +975,30 @@ export default function SignagePlayer() {
 
   useEffect(() => {
     try {
+      const raw = window.localStorage.getItem(orientationPrefsKey);
+      if (!raw) return;
+      const parsed = String(raw || "").toLowerCase();
+      if (["auto", "landscape", "portrait"].includes(parsed)) setOrientationOverride(parsed);
+    } catch {
+      // Ignore malformed local preferences.
+    }
+  }, [orientationPrefsKey]);
+
+  useEffect(() => {
+    try {
       window.localStorage.setItem(zonePrefsKey, JSON.stringify({ hiddenZoneIds, fillBlankSpaces, customPlacementEnabled, zonePlacements, zoneMediaModes }));
     } catch {
       // Ignore storage failures in restricted webviews.
     }
   }, [zonePrefsKey, hiddenZoneIds, fillBlankSpaces, customPlacementEnabled, zonePlacements, zoneMediaModes]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(orientationPrefsKey, orientationOverride);
+    } catch {
+      // Ignore storage failures in restricted webviews.
+    }
+  }, [orientationOverride, orientationPrefsKey]);
 
   // debug overlays
   const debugZones = typeof window !== "undefined" && window.location.search.includes("debug_zones");
@@ -949,9 +1016,9 @@ export default function SignagePlayer() {
       const cb = container.getBoundingClientRect();
       const cw = container.clientWidth || Math.max(1, cb.width);
       const ch = container.clientHeight || Math.max(1, cb.height);
-      // When orientation is portrait the content is rotated: canvas width maps to DOM height and vice versa
-      const renderWidth = orientation === "portrait" ? ch : cw;
-      const renderHeight = orientation === "portrait" ? cw : ch;
+      // On quarter-turn rotations, rendered axes are swapped.
+      const renderWidth = rotatedQuarterTurn ? ch : cw;
+      const renderHeight = rotatedQuarterTurn ? cw : ch;
       const next = {};
       Object.keys(zoneRefs.current || {}).forEach((id) => {
         try {
@@ -1410,15 +1477,63 @@ export default function SignagePlayer() {
   const canvasWidth = Number(layout.canvas_width) || 1920;
   const canvasHeight = Number(layout.canvas_height) || 1080;
   const brightness = Number(payload?.brightness || 100);
-  const orientation = payload?.orientation || "auto";
+  const orientationMode = String(orientationOverride || payload?.orientation || "auto").toLowerCase();
+  const explicitRotation = normalizeRotation(payload?.rotation ?? payload?.rotation_degrees ?? payload?.rotation_angle ?? payload?.rotate);
+  const baseRotation = orientationMode === "portrait"
+    ? 90
+    : orientationMode === "landscape"
+      ? 0
+      : (viewportSize.height > viewportSize.width ? 90 : 0);
+  const rotationDeg = normalizeRotation(baseRotation + explicitRotation);
+  const rotatedQuarterTurn = rotationDeg === 90 || rotationDeg === 270;
+  const effectiveOrientation = rotatedQuarterTurn ? "portrait" : "landscape";
+  const renderSurfaceWidth = rotatedQuarterTurn ? viewportSize.height : viewportSize.width;
+  const renderSurfaceHeight = rotatedQuarterTurn ? viewportSize.width : viewportSize.height;
+  const viewportScale = Math.max(0.55, Math.min(2.5, Math.min(renderSurfaceWidth / canvasWidth, renderSurfaceHeight / canvasHeight)));
   const visibleZoneDefs = useMemo(
     () => zoneDefs.filter((zone) => !hiddenZoneIds.includes(zone.id)),
     [hiddenZoneIds, zoneDefs]
   );
   const hasWeatherZone = zoneDefs.some((zone) => /weather/i.test(`${zone?.role || ""} ${zone?.id || ""} ${zone?.name || ""}`));
-  const contentStyle = orientation === "portrait"
-    ? { position: "absolute", left: 0, top: 0, width: "100vh", height: "100vw", transform: "rotate(90deg) translateY(-100%)", transformOrigin: "top left", filter: `brightness(${brightness}%)` }
-    : { filter: `brightness(${brightness}%)` };
+  const contentStyle = (() => {
+    if (rotationDeg === 90) {
+      return {
+        position: "absolute",
+        left: 0,
+        top: 0,
+        width: "100vh",
+        height: "100vw",
+        transform: "rotate(90deg) translateY(-100%)",
+        transformOrigin: "top left",
+        filter: `brightness(${brightness}%)`,
+      };
+    }
+    if (rotationDeg === 180) {
+      return {
+        position: "absolute",
+        left: 0,
+        top: 0,
+        width: "100%",
+        height: "100%",
+        transform: "rotate(180deg) translate(-100%,-100%)",
+        transformOrigin: "top left",
+        filter: `brightness(${brightness}%)`,
+      };
+    }
+    if (rotationDeg === 270) {
+      return {
+        position: "absolute",
+        left: 0,
+        top: 0,
+        width: "100vh",
+        height: "100vw",
+        transform: "rotate(270deg) translateX(-100%)",
+        transformOrigin: "top left",
+        filter: `brightness(${brightness}%)`,
+      };
+    }
+    return { filter: `brightness(${brightness}%)` };
+  })();
   const hasAbsoluteLayout = zoneDefs.some((zone) =>
     zone && (
       zone.x != null ||
@@ -1509,7 +1624,7 @@ export default function SignagePlayer() {
     gridTemplateColumns: colCount === 1 ? "1fr" : colCount === 2 ? "repeat(2, minmax(0, 1fr))" : colCount === 4 ? "repeat(2, minmax(0, 1fr))" : `repeat(${colCount}, minmax(0, 1fr))`,
   };
   const queueSidebarLeft = (() => {
-    if (orientation === "portrait" || !hasAbsoluteLayout) return null;
+    if (effectiveOrientation === "portrait" || !hasAbsoluteLayout) return null;
     const queueEntry = zoneEntries.find(({ zone }) => isQueueZone(zone));
     if (!queueEntry?.zone) return null;
     const zone = queueEntry.zone;
@@ -1530,89 +1645,86 @@ export default function SignagePlayer() {
         </div>
       ) : null}
 
-      {voiceTranscript ? (
-        null
-      ) : null}
+      {voiceTranscript ? null : null}
 
-      {overlay ? (
-        overlay.takeover ? (
-          <div className="absolute inset-0 z-40 flex items-center justify-center pointer-events-auto">
-            <div className="w-[min(96vw,1200px)] max-h-[92vh] overflow-auto rounded-2xl border border-white/15 bg-black/95 p-6">
-              <div className="flex items-center justify-between mb-4">
-                <div className="text-[12px] uppercase tracking-[0.2em] text-emerald-300/80">Voice result</div>
-                <div className="text-white font-semibold text-lg leading-tight">{overlay.title || "Result"}</div>
+      <div className="flex-1 relative min-h-0 bg-black overflow-hidden">
+        <div className={`absolute ${effectiveOrientation === "portrait" ? "" : "inset-0"}`} style={contentStyle}>
+          {overlay ? (
+            overlay.takeover ? (
+              <div className="absolute inset-0 z-40 flex items-center justify-center pointer-events-auto">
+                <div className="w-[min(96vw,1200px)] max-h-[92vh] overflow-auto rounded-2xl border border-white/15 bg-black/95 p-6">
+                  <div className="flex items-center justify-between mb-4">
+                    <div className="text-[12px] uppercase tracking-[0.2em] text-emerald-300/80">Voice result</div>
+                    <div className="text-white font-semibold text-lg leading-tight">{overlay.title || "Result"}</div>
+                  </div>
+                  {Array.isArray(overlay.items) && overlay.items.length > 0 ? (
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      {overlay.items.map((item) => (
+                        <div key={item.id || item.name} className="rounded-lg border border-white/10 bg-white/3 p-4 flex gap-4">
+                          <div className="w-40 h-40 rounded overflow-hidden bg-white/10 flex-shrink-0">
+                            {item.image ? <img src={item.image} alt={item.name || "product"} className="w-full h-full object-cover" /> : null}
+                          </div>
+                          <div className="min-w-0 flex-1">
+                            <div className="text-lg font-bold text-white truncate">{item.name}</div>
+                            <div className="text-sm text-white/70 mt-2">{item.description}</div>
+                            {item.price != null ? <div className="text-[13px] text-white/60 mt-3">Rs {Number(item.price || 0).toLocaleString()}</div> : null}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="text-white">{overlay.description || "Matched from spoken command"}</div>
+                  )}
+                </div>
               </div>
-              {Array.isArray(overlay.items) && overlay.items.length > 0 ? (
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  {overlay.items.map((item) => (
-                    <div key={item.id || item.name} className="rounded-lg border border-white/10 bg-white/3 p-4 flex gap-4">
-                      <div className="w-40 h-40 rounded overflow-hidden bg-white/10 flex-shrink-0">
-                        {item.image ? <img src={item.image} alt={item.name || "product"} className="w-full h-full object-cover" /> : null}
+            ) : (
+              <div className="absolute z-30 w-[min(92vw,380px)] pointer-events-none bottom-6 left-1/2 -translate-x-1/2 sm:top-20 sm:right-4 sm:left-auto sm:translate-x-0 sm:bottom-auto">
+                <div className="rounded-2xl border border-white/15 bg-black/80 backdrop-blur-md shadow-[0_20px_80px_-30px_rgba(0,0,0,0.85)] p-3">
+                  <div className="text-[10px] uppercase tracking-[0.2em] text-emerald-300/80 mb-1">Voice result</div>
+                  <div className="text-white font-semibold text-base leading-tight truncate">{overlay.title || "Result"}</div>
+
+                  {Array.isArray(overlay.items) && overlay.items.length > 0 ? (
+                    <div className="mt-3 grid grid-cols-2 gap-2 max-h-[56vh] overflow-auto pr-1">
+                      {overlay.items.map((item) => (
+                        <div key={item.id || item.name} className="rounded-xl border border-white/10 bg-white/5 p-2">
+                          <div className="w-full h-20 rounded-lg overflow-hidden bg-white/10 mb-2">
+                            {item.image ? <img src={item.image} alt={item.name || "product"} className="w-full h-full object-cover" /> : null}
+                          </div>
+                          <div className="text-xs text-white font-semibold truncate">{item.name || "Product"}</div>
+                          {item.price != null ? <div className="text-[11px] text-white/60">Rs {Number(item.price || 0).toLocaleString()}</div> : null}
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="mt-3 flex gap-3">
+                      <div className="w-24 h-24 rounded-xl overflow-hidden bg-white/10 shrink-0">
+                        {overlay.image ? (
+                          <img src={overlay.image} alt={overlay.title || "match"} className="w-full h-full object-cover" />
+                        ) : (
+                          <div className="w-full h-full flex items-center justify-center text-[10px] text-white/50 uppercase tracking-wider">No image</div>
+                        )}
                       </div>
                       <div className="min-w-0 flex-1">
-                        <div className="text-lg font-bold text-white truncate">{item.name}</div>
-                        <div className="text-sm text-white/70 mt-2">{item.description}</div>
-                        {item.price != null ? <div className="text-[13px] text-white/60 mt-3">Rs {Number(item.price || 0).toLocaleString()}</div> : null}
+                        <div className="text-xs text-white/65 mt-1 line-clamp-3">{overlay.description || "Matched from spoken command"}</div>
+                        <div className="text-[10px] text-white/45 uppercase tracking-wider mt-2">{overlay.type || "item"}</div>
                       </div>
                     </div>
-                  ))}
+                  )}
                 </div>
-              ) : (
-                <div className="text-white">{overlay.description || "Matched from spoken command"}</div>
-              )}
-            </div>
-          </div>
-        ) : (
-          <div className="absolute z-30 w-[min(92vw,380px)] pointer-events-none bottom-6 left-1/2 -translate-x-1/2 sm:top-20 sm:right-4 sm:left-auto sm:translate-x-0 sm:bottom-auto">
-            <div className="rounded-2xl border border-white/15 bg-black/80 backdrop-blur-md shadow-[0_20px_80px_-30px_rgba(0,0,0,0.85)] p-3">
-              <div className="text-[10px] uppercase tracking-[0.2em] text-emerald-300/80 mb-1">Voice result</div>
-              <div className="text-white font-semibold text-base leading-tight truncate">{overlay.title || "Result"}</div>
+              </div>
+            )
+          ) : null}
 
-              {Array.isArray(overlay.items) && overlay.items.length > 0 ? (
-                <div className="mt-3 grid grid-cols-2 gap-2 max-h-[56vh] overflow-auto pr-1">
-                  {overlay.items.map((item) => (
-                    <div key={item.id || item.name} className="rounded-xl border border-white/10 bg-white/5 p-2">
-                      <div className="w-full h-20 rounded-lg overflow-hidden bg-white/10 mb-2">
-                        {item.image ? <img src={item.image} alt={item.name || "product"} className="w-full h-full object-cover" /> : null}
-                      </div>
-                      <div className="text-xs text-white font-semibold truncate">{item.name || "Product"}</div>
-                      {item.price != null ? <div className="text-[11px] text-white/60">Rs {Number(item.price || 0).toLocaleString()}</div> : null}
-                    </div>
-                  ))}
-                </div>
-              ) : (
-                <div className="mt-3 flex gap-3">
-                  <div className="w-24 h-24 rounded-xl overflow-hidden bg-white/10 shrink-0">
-                    {overlay.image ? (
-                      <img src={overlay.image} alt={overlay.title || "match"} className="w-full h-full object-cover" />
-                    ) : (
-                      <div className="w-full h-full flex items-center justify-center text-[10px] text-white/50 uppercase tracking-wider">No image</div>
-                    )}
-                  </div>
-                  <div className="min-w-0 flex-1">
-                    <div className="text-xs text-white/65 mt-1 line-clamp-3">{overlay.description || "Matched from spoken command"}</div>
-                    <div className="text-[10px] text-white/45 uppercase tracking-wider mt-2">{overlay.type || "item"}</div>
-                  </div>
-                </div>
-              )}
+          {!hasContent ? (
+            <div className="w-full h-full flex items-center justify-center">
+              <div className="text-center max-w-md p-8">
+                <div className="text-[10px] uppercase tracking-[0.25em] text-white/40 mb-3">No content scheduled</div>
+                <h1 className="font-display text-3xl font-extrabold tracking-tighter mb-3">{payload.device_name}</h1>
+                <p className="text-sm text-white/60">Ask your client account to upload media, build a playlist, and schedule it for this device.</p>
+              </div>
             </div>
-          </div>
-        )
-      ) : null}
-
-      {!hasContent ? (
-        <div className="flex-1 flex items-center justify-center">
-          <div className="text-center max-w-md p-8">
-            <div className="text-[10px] uppercase tracking-[0.25em] text-white/40 mb-3">No content scheduled</div>
-            <h1 className="font-display text-3xl font-extrabold tracking-tighter mb-3">{payload.device_name}</h1>
-            <p className="text-sm text-white/60">Ask your client account to upload media, build a playlist, and schedule it for this device.</p>
-          </div>
-        </div>
-      ) : (
-        <div className="flex-1 relative min-h-0 bg-black overflow-hidden">
-          <div className={`absolute ${orientation === "portrait" ? "" : "inset-0"}`} style={contentStyle}>
-            {renderAsAbsolute && !shouldCompactLayout ? (
-              <>
+          ) : (renderAsAbsolute && !shouldCompactLayout ? (
+            <>
               <div ref={absoluteContainerRef} className="relative w-full h-full overflow-hidden bg-black">
                 {zoneEntries.map(({ zone, items }) => {
                   const queueZone = isQueueZone(zone);
@@ -1627,7 +1739,7 @@ export default function SignagePlayer() {
                   let width = zoneRect.width;
                   let height = zoneRect.height;
 
-                  if (!customPlacementEnabled && orientation !== "portrait" && queueZone) {
+                  if (!customPlacementEnabled && effectiveOrientation !== "portrait" && queueZone) {
                     const rightEdge = Math.min(100, left + width);
                     const targetWidth = Math.min(36, Math.max(28, width));
                     const targetHeight = Math.min(78, Math.max(44, height));
@@ -1639,7 +1751,7 @@ export default function SignagePlayer() {
                     top = Math.max(1, Math.min(top, 99 - height));
                   }
 
-                  if (!customPlacementEnabled && orientation !== "portrait" && queueSidebarLeft != null && !queueZone && !isTickerZone) {
+                  if (!customPlacementEnabled && effectiveOrientation !== "portrait" && queueSidebarLeft != null && !queueZone && !isTickerZone) {
                     const safeRightEdge = Math.max(0, queueSidebarLeft - 0.8);
                     const zoneRight = left + width;
                     if (zoneRight > safeRightEdge) {
@@ -1657,13 +1769,12 @@ export default function SignagePlayer() {
                       className={`absolute overflow-hidden ${queueZone ? "bg-transparent" : "bg-black"}`}
                       style={{ left: `${left}%`, top: `${top}%`, width: `${width}%`, height: `${height}%`, zIndex: zoneZIndex }}
                     >
-                      {/* per-zone overlay removed here; using top-level viewport overlay for inspect_zones */}
                       {queueZone && items.length === 0 ? (
-                        <QueueBoard deviceName={payload.device_name} queuePreview={queuePreview} notices={notices} zone={zone} canvasWidth={canvasWidth} canvasHeight={canvasHeight} />
-                        ) : autoWidgetZone && items.length === 0 ? (
-                          <AutoWidgetZone zone={zone} queuePreview={queuePreview} payload={payload} providerData={providerData} weatherData={weatherData} canvasWidth={canvasWidth} canvasHeight={canvasHeight} />
+                        <QueueBoard deviceName={payload.device_name} queuePreview={queuePreview} notices={notices} zone={zone} canvasWidth={canvasWidth} canvasHeight={canvasHeight} viewportScale={viewportScale} />
+                      ) : autoWidgetZone && items.length === 0 ? (
+                        <AutoWidgetZone zone={zone} queuePreview={queuePreview} payload={payload} providerData={providerData} weatherData={weatherData} canvasWidth={canvasWidth} canvasHeight={canvasHeight} viewportScale={viewportScale} />
                       ) : isTickerZone ? (
-                        <TickerSlot items={items} label={zone.name} zone={zone} canvasWidth={canvasWidth} canvasHeight={canvasHeight} />
+                        <TickerSlot items={items} label={zone.name} zone={zone} canvasWidth={canvasWidth} canvasHeight={canvasHeight} viewportScale={viewportScale} />
                       ) : logoZone && items.length === 0 && clientLogoUrl ? (
                         <div className="w-full h-full flex items-center justify-center bg-black p-4">
                           <div className="w-full h-full rounded-[1.5rem] border border-white/10 bg-white/5 flex items-center justify-center overflow-hidden">
@@ -1679,7 +1790,8 @@ export default function SignagePlayer() {
                           zone={zone}
                           canvasWidth={canvasWidth}
                           canvasHeight={canvasHeight}
-                          mediaMode={zoneMediaModes?.[zone.id] || (/^(header|weather)$/i.test(zone?.role || "") ? "fill" : "fit")}
+                          viewportScale={viewportScale}
+                          mediaMode={zoneMediaModes?.[zone.id] || getDefaultZoneMediaMode(zone)}
                         />
                       )}
                     </div>
@@ -1705,44 +1817,42 @@ export default function SignagePlayer() {
                   })}
                 </div>
               ) : null}
-              </>
-            ) : (
-              <div className="grid gap-0 w-full h-full min-h-0" style={gridStyle}>
-                {zoneEntries.map(({ zone, items }) => (
-                  <div key={zone.id} className="bg-black overflow-hidden relative min-h-[160px]">
-                    {isQueueZone(zone) && items.length === 0 ? (
-                      <QueueBoard deviceName={payload.device_name} queuePreview={queuePreview} notices={notices} zone={zone} canvasWidth={canvasWidth} canvasHeight={canvasHeight} />
-                    ) : isAutoWidgetZone(zone) && items.length === 0 ? (
-                      <AutoWidgetZone zone={zone} queuePreview={queuePreview} payload={payload} providerData={providerData} weatherData={weatherData} canvasWidth={canvasWidth} canvasHeight={canvasHeight} />
-                    ) : /ticker/i.test(`${zone.id} ${zone.name}`) ? (
-                      <TickerSlot items={items} label={zone.name} zone={zone} canvasWidth={canvasWidth} canvasHeight={canvasHeight} />
-                    ) : isLogoZone(zone) && items.length === 0 && clientLogoUrl ? (
-                      <div className="w-full h-full flex items-center justify-center bg-black p-4">
-                        <div className="w-full h-full rounded-[1.5rem] border border-white/10 bg-white/5 flex items-center justify-center overflow-hidden">
-                          <img src={clientLogoUrl} alt={`${payload.device_name || "client"} logo`} className="max-h-[75%] max-w-[75%] object-contain" />
-                        </div>
+            </>
+          ) : (
+            <div className="grid gap-0 w-full h-full min-h-0" style={gridStyle}>
+              {zoneEntries.map(({ zone, items }) => (
+                <div key={zone.id} className="bg-black overflow-hidden relative min-h-[160px]">
+                  {isQueueZone(zone) && items.length === 0 ? (
+                    <QueueBoard deviceName={payload.device_name} queuePreview={queuePreview} notices={notices} zone={zone} canvasWidth={canvasWidth} canvasHeight={canvasHeight} viewportScale={viewportScale} />
+                  ) : isAutoWidgetZone(zone) && items.length === 0 ? (
+                    <AutoWidgetZone zone={zone} queuePreview={queuePreview} payload={payload} providerData={providerData} weatherData={weatherData} canvasWidth={canvasWidth} canvasHeight={canvasHeight} viewportScale={viewportScale} />
+                  ) : /ticker/i.test(`${zone.id} ${zone.name}`) ? (
+                    <TickerSlot items={items} label={zone.name} zone={zone} canvasWidth={canvasWidth} canvasHeight={canvasHeight} viewportScale={viewportScale} />
+                  ) : isLogoZone(zone) && items.length === 0 && clientLogoUrl ? (
+                    <div className="w-full h-full flex items-center justify-center bg-black p-4">
+                      <div className="w-full h-full rounded-[1.5rem] border border-white/10 bg-white/5 flex items-center justify-center overflow-hidden">
+                        <img src={clientLogoUrl} alt={`${payload.device_name || "client"} logo`} className="max-h-[75%] max-w-[75%] object-contain" />
                       </div>
-                    ) : (
-                      <MediaSlot
-                        items={items}
-                        label={zone.name}
-                        queuePreview={queuePreview}
-                        weatherData={weatherData}
-                        zone={zone}
-                        canvasWidth={canvasWidth}
-                        canvasHeight={canvasHeight}
-                        mediaMode={zoneMediaModes?.[zone.id] || (/^(header|weather)$/i.test(zone?.role || "") ? "fill" : "fit")}
-                      />
-                    )}
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        </div>
-      )}
+                    </div>
+                  ) : (
+                    <MediaSlot
+                      items={items}
+                      label={zone.name}
+                      queuePreview={queuePreview}
+                      weatherData={weatherData}
+                      zone={zone}
+                      canvasWidth={canvasWidth}
+                      canvasHeight={canvasHeight}
+                      viewportScale={viewportScale}
+                      mediaMode={zoneMediaModes?.[zone.id] || getDefaultZoneMediaMode(zone)}
+                    />
+                  )}
+                </div>
+              ))}
+            </div>
+          ))}
 
-      <div className="absolute top-4 right-4 z-50 pointer-events-none">
+          <div className="absolute top-4 right-4 z-50 pointer-events-none">
         <div className="pointer-events-auto relative">
           <button
             type="button"
@@ -1793,6 +1903,26 @@ export default function SignagePlayer() {
                   </button>
                 </div>
 
+                <div className="mt-3">
+                  <div className="mb-2 text-[10px] uppercase tracking-[0.35em] text-white/45">Orientation</div>
+                  <div className="grid grid-cols-3 gap-2">
+                    {[
+                      { value: "auto", label: "Auto" },
+                      { value: "landscape", label: "Landscape" },
+                      { value: "portrait", label: "Portrait" },
+                    ].map((option) => (
+                      <button
+                        key={option.value}
+                        type="button"
+                        onClick={() => setPlayerOrientation(option.value)}
+                        className={`rounded-xl border px-2 py-2 text-[10px] font-semibold uppercase tracking-[0.18em] ${orientationMode === option.value ? "border-cyan-400/40 bg-cyan-500/20 text-cyan-100" : "border-white/10 bg-white/5 text-white/70 hover:bg-white/10"}`}
+                      >
+                        {option.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
                 <label className="mt-3 flex items-center justify-between gap-3 rounded-2xl border border-white/10 bg-white/5 px-3 py-2.5">
                   <span>
                     <span className="block text-sm font-medium text-white">Fill blank space</span>
@@ -1837,7 +1967,7 @@ export default function SignagePlayer() {
                   {zoneDefs.map((zone) => {
                     const hidden = hiddenZoneIds.includes(zone.id);
                     const placement = zonePlacements?.[zone.id] || "auto";
-                    const mediaMode = zoneMediaModes?.[zone.id] || "fill";
+                    const mediaMode = zoneMediaModes?.[zone.id] || getDefaultZoneMediaMode(zone);
                     return (
                       <div key={zone.id} className="rounded-2xl border border-white/10 bg-white/5 p-3">
                         <div className="flex items-start justify-between gap-3">
@@ -1882,7 +2012,7 @@ export default function SignagePlayer() {
 
                         <div className="mt-3">
                           <div className="mb-2 text-[10px] uppercase tracking-[0.3em] text-white/40">Media fit</div>
-                          <div className="grid grid-cols-2 gap-2">
+                          <div className="grid grid-cols-3 gap-2">
                             <button
                               type="button"
                               onClick={() => setZoneMediaMode(zone.id, "fill")}
@@ -1897,6 +2027,13 @@ export default function SignagePlayer() {
                             >
                               Fit
                             </button>
+                            <button
+                              type="button"
+                              onClick={() => setZoneMediaMode(zone.id, "stretch")}
+                              className={`rounded-xl border px-2 py-2 text-[10px] font-semibold uppercase tracking-[0.18em] ${mediaMode === "stretch" ? "border-cyan-400/40 bg-cyan-500/20 text-cyan-100" : "border-white/10 bg-white/5 text-white/70 hover:bg-white/10"}`}
+                            >
+                              Stretch
+                            </button>
                           </div>
                         </div>
                       </div>
@@ -1906,6 +2043,8 @@ export default function SignagePlayer() {
               </div>
             </div>
           ) : null}
+        </div>
+          </div>
         </div>
       </div>
 

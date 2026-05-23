@@ -14,6 +14,7 @@ import re
 from datetime import datetime, timezone, timedelta
 from typing import List, Optional, Literal, Dict, Any
 from urllib.parse import quote
+from zoneinfo import ZoneInfo
 
 import bcrypt
 import boto3
@@ -42,6 +43,14 @@ JWT_ALGO = "HS256"
 PLAN_TYPES = ("cloud", "usb", "hybrid")
 VERTICALS = ("general", "doctor", "salon", "retailer", "society")
 WEATHER_CACHE: Dict[str, Dict[str, Any]] = {}
+APP_TIMEZONE = os.environ.get("APP_TIMEZONE", "Asia/Kolkata")
+
+
+def _app_now() -> datetime:
+    try:
+        return datetime.now(ZoneInfo(APP_TIMEZONE))
+    except Exception:
+        return datetime.now(timezone.utc)
 
 
 def _weather_description(code: Optional[Any]) -> str:
@@ -326,6 +335,7 @@ class DeviceCreate(BaseModel):
     location: str = ""
     pair_code: Optional[str] = None
     template_id: Optional[str] = None
+    playlist_id: Optional[str] = None
     orientation: Optional[Literal["auto", "landscape", "portrait"]] = "auto"
     brightness: Optional[int] = 100
 
@@ -369,6 +379,7 @@ class DeviceUpdate(BaseModel):
     location: Optional[str] = None
     status: Optional[Literal["paired", "unpaired", "offline"]] = None
     template_id: Optional[str] = None
+    playlist_id: Optional[str] = None
     orientation: Optional[Literal["auto", "landscape", "portrait"]] = None
     brightness: Optional[int] = None
 
@@ -400,10 +411,30 @@ class AppointmentCreate(BaseModel):
     patient_phone: str
     notes: str = ""
     preferred_time: str = ""
+    booking_location: str = ""
+    booking_device_id: Optional[str] = None
     service_name: str = ""
     service_id: Optional[str] = None
+    service_ids: List[str] = Field(default_factory=list)
     service_price: float = 0.0
     source: Literal["public", "manual"] = "public"
+
+
+class ClinicMedicineItem(BaseModel):
+    name: str
+    dosage: str = ""
+    schedule: str = ""
+    duration_days: Optional[int] = None
+    notes: str = ""
+
+
+class ClinicVisitCreate(BaseModel):
+    patient_name: Optional[str] = ""
+    diagnosis: str = ""
+    symptoms: str = ""
+    notes: str = ""
+    medicines: List[ClinicMedicineItem] = Field(default_factory=list)
+    follow_up_on: Optional[str] = None
 
 # Retailer
 class ProductIn(BaseModel):
@@ -443,6 +474,44 @@ def normalize_room_no(r):
 
 def _appointment_status_rank(status: str) -> int:
     return {"called": 0, "pending": 1, "done": 2, "cancelled": 3}.get(status or "", 9)
+
+
+def _normalize_patient_phone_key(phone: Optional[str]) -> str:
+    digits = re.sub(r"\D", "", str(phone or ""))
+    if len(digits) < 10:
+        raise HTTPException(status_code=400, detail="Patient contact number must include at least 10 digits")
+    # Keep last 10 digits as canonical key to avoid country-code format mismatches.
+    return digits[-10:]
+
+
+async def _upsert_clinic_patient(client_id: str, patient_phone: str, patient_name: Optional[str] = "") -> dict:
+    phone_key = _normalize_patient_phone_key(patient_phone)
+    now = now_iso()
+    base_set = {
+        "client_id": client_id,
+        "phone_key": phone_key,
+        "username": phone_key,
+        "contact_number": str(patient_phone or "").strip(),
+        "updated_at": now,
+    }
+    if patient_name and str(patient_name).strip():
+        base_set["name"] = str(patient_name).strip()
+
+    result = await db.clinic_patients.find_one_and_update(
+        {"client_id": client_id, "phone_key": phone_key},
+        {
+            "$set": base_set,
+            "$setOnInsert": {
+                "id": str(uuid.uuid4()),
+                "created_at": now,
+                "history_count": 0,
+            },
+        },
+        upsert=True,
+        return_document=True,
+        projection={"_id": 0},
+    )
+    return result
 
 async def gen_dealer_code() -> str:
     """Generate next dealer code like RP-D101, RP-D102, etc."""
@@ -855,11 +924,16 @@ async def list_client_devices(user: dict = Depends(require_role("client"))):
 @api.post("/client/devices")
 async def create_device(body: DeviceCreate, user: dict = Depends(require_role("client"))):
     c = await db.clients.find_one({"id": user["id"]}, {"_id": 0, "dealer_id": 1})
+    if body.playlist_id:
+        playlist = await db.playlists.find_one({"id": body.playlist_id, "client_id": user["id"]}, {"_id": 0, "id": 1})
+        if not playlist:
+            raise HTTPException(status_code=400, detail="Playlist not assigned to you")
     pair_code = body.pair_code or gen_pair_code()
     doc = {"id": str(uuid.uuid4()), "name": body.name, "location": body.location,
            "pair_code": pair_code, "status": "paired" if body.pair_code else "unpaired",
            "client_id": user["id"], "dealer_id": c.get("dealer_id", ""),
            "template_id": body.template_id, "paired_at": now_iso() if body.pair_code else None,
+        "playlist_id": body.playlist_id or "",
         "orientation": body.orientation or "auto", "brightness": int(body.brightness or 100),
            "created_at": now_iso()}
     await db.devices.insert_one(doc); return clean(doc)
@@ -871,6 +945,13 @@ async def update_device(did: str, body: DeviceUpdate, user: dict = Depends(requi
         c = await db.clients.find_one({"id": user["id"]}, {"_id": 0, "assigned_template_ids": 1})
         if upd["template_id"] not in (c.get("assigned_template_ids") or []):
             raise HTTPException(status_code=400, detail="Template not assigned to you")
+    if "playlist_id" in upd:
+        if upd["playlist_id"]:
+            playlist = await db.playlists.find_one({"id": upd["playlist_id"], "client_id": user["id"]}, {"_id": 0, "id": 1})
+            if not playlist:
+                raise HTTPException(status_code=400, detail="Playlist not assigned to you")
+        else:
+            upd["playlist_id"] = ""
     if "brightness" in upd:
         try:
             upd["brightness"] = max(0, min(100, int(upd["brightness"])))
@@ -978,8 +1059,130 @@ async def _list_service_appointments(user: dict):
     )
 
 
+async def _build_service_appointment_board(client_id: str, recent_limit: int = 500) -> Dict[str, Any]:
+    today = _app_now().date().isoformat()
+    today_items = await db.appointments.find({"client_id": client_id, "date": today}, {"_id": 0}).to_list(1000)
+    recent_items = await db.appointments.find({"client_id": client_id}, {"_id": 0}).sort("created_at", -1).to_list(max(20, recent_limit))
+
+    live_queue = sorted(
+        [item for item in today_items if item.get("status") in ("called", "pending")],
+        key=lambda item: (
+            _appointment_status_rank(item.get("status")),
+            int(item.get("token") or 0),
+            item.get("created_at") or "",
+        ),
+    )
+
+    today_bookings = sorted(
+        today_items,
+        key=lambda item: (
+            int(item.get("token") or 0),
+            _appointment_status_rank(item.get("status")),
+            item.get("created_at") or "",
+        ),
+    )
+
+    today_counts: Dict[str, int] = {"pending": 0, "called": 0, "done": 0, "cancelled": 0}
+    for item in today_bookings:
+        key = str(item.get("status") or "").lower()
+        if key in today_counts:
+            today_counts[key] += 1
+
+    return {
+        "date": today,
+        "live_queue": live_queue,
+        "today_bookings": today_bookings,
+        "recent_bookings": recent_items,
+        "summary": {
+            "live_queue_count": len(live_queue),
+            "today_bookings_count": len(today_bookings),
+            "today_status": today_counts,
+        },
+    }
+
+
+async def _resolve_booking_route(client_id: str, booking_location: Optional[str], booking_device_id: Optional[str]) -> Dict[str, str]:
+    devices = await db.devices.find(
+        {"client_id": client_id},
+        {"_id": 0, "id": 1, "name": 1, "location": 1, "status": 1},
+    ).to_list(1000)
+
+    active_devices = [d for d in devices if str(d.get("status") or "").lower() != "unpaired"] or devices
+    requested_location = str(booking_location or "").strip()
+    requested_device_id = str(booking_device_id or "").strip()
+
+    if requested_device_id:
+        matched_device = next((d for d in active_devices if str(d.get("id")) == requested_device_id), None)
+        if not matched_device:
+            raise HTTPException(status_code=400, detail="Invalid booking device for this provider")
+        return {
+            "route_strategy": "device_id",
+            "requested_booking_location": requested_location,
+            "requested_booking_device_id": requested_device_id,
+            "routed_device_id": str(matched_device.get("id") or ""),
+            "routed_device_name": str(matched_device.get("name") or ""),
+            "routed_location": str(matched_device.get("location") or requested_location or ""),
+        }
+
+    if requested_location:
+        needle = requested_location.lower()
+        exact = next((d for d in active_devices if str(d.get("location") or "").strip().lower() == needle), None)
+        contains = next(
+            (
+                d for d in active_devices
+                if needle in str(d.get("location") or "").strip().lower()
+                or str(d.get("location") or "").strip().lower() in needle
+            ),
+            None,
+        )
+        matched_device = exact or contains
+        if matched_device:
+            return {
+                "route_strategy": "location_match",
+                "requested_booking_location": requested_location,
+                "requested_booking_device_id": requested_device_id,
+                "routed_device_id": str(matched_device.get("id") or ""),
+                "routed_device_name": str(matched_device.get("name") or ""),
+                "routed_location": str(matched_device.get("location") or requested_location or ""),
+            }
+
+    default_device = active_devices[0] if active_devices else None
+    if default_device:
+        return {
+            "route_strategy": "default_device",
+            "requested_booking_location": requested_location,
+            "requested_booking_device_id": requested_device_id,
+            "routed_device_id": str(default_device.get("id") or ""),
+            "routed_device_name": str(default_device.get("name") or ""),
+            "routed_location": str(default_device.get("location") or requested_location or ""),
+        }
+
+    return {
+        "route_strategy": "unrouted",
+        "requested_booking_location": requested_location,
+        "requested_booking_device_id": requested_device_id,
+        "routed_device_id": "",
+        "routed_device_name": "",
+        "routed_location": requested_location,
+    }
+
+
 async def _set_service_appointment_status(aid: str, status: str, user: dict):
-    r = await db.appointments.find_one_and_update({"id": aid, "client_id": user["id"]}, {"$set": {"status": status}}, return_document=True, projection={"_id": 0})
+    current = await db.appointments.find_one({"id": aid, "client_id": user["id"]}, {"_id": 0, "status": 1, "recall_count": 1})
+    if not current:
+        raise HTTPException(status_code=404, detail="Appointment not found")
+
+    update: Dict[str, Any] = {"status": status}
+    if status == "called" and current.get("status") == "called":
+        update["recalled_at"] = now_iso()
+        update["recall_count"] = int(current.get("recall_count") or 0) + 1
+
+    r = await db.appointments.find_one_and_update(
+        {"id": aid, "client_id": user["id"]},
+        {"$set": update},
+        return_document=True,
+        projection={"_id": 0},
+    )
     if not r:
         raise HTTPException(status_code=404, detail="Appointment not found")
     return r
@@ -1003,6 +1206,14 @@ async def list_appointments(user: dict = Depends(require_role("client"))):
 @api.get("/client/salon/appointments")
 async def list_salon_appointments(user: dict = Depends(require_role("client"))):
     return await _list_service_appointments(user)
+
+
+@api.get("/client/{vertical}/appointments/board")
+async def get_service_appointment_board(vertical: Literal["doctor", "salon"], user: dict = Depends(require_role("client"))):
+    c = await db.clients.find_one({"id": user["id"], "vertical": vertical}, {"_id": 0, "id": 1})
+    if not c:
+        raise HTTPException(status_code=403, detail=f"Not a {_service_label(vertical).lower()} account")
+    return await _build_service_appointment_board(user["id"])
 
 
 @api.post("/client/doctor/appointments/{aid}/status")
@@ -1114,6 +1325,7 @@ async def _public_service_profile(cid: str):
         "id": c["id"],
         "name": c["name"],
         "vertical": vertical,
+        "timezone": APP_TIMEZONE,
         "phone": c.get("phone", ""),
         "address": c.get("address", ""),
         "weather": _resolve_weather_snapshot(c.get("address", "")),
@@ -1123,9 +1335,21 @@ async def _public_service_profile(cid: str):
     if vertical in ("doctor", "salon"):
         profile_field = _service_profile_field(vertical)
         profile = _normalize_service_catalog(c.get(profile_field, {}), vertical)
-        today = datetime.now(timezone.utc).date().isoformat()
-        active_filter = {"client_id": cid, "status": {"$in": ["called", "pending"]}, "date": today}
-        active = await db.appointments.find(active_filter, {"_id": 0}).sort([("token", 1), ("created_at", 1)]).to_list(50)
+        board = await _build_service_appointment_board(cid, recent_limit=200)
+        active = board.get("live_queue") or []
+        today_bookings = board.get("today_bookings") or []
+        devices = await db.devices.find({"client_id": cid}, {"_id": 0, "id": 1, "name": 1, "location": 1, "status": 1}).to_list(200)
+        booking_devices = [
+            {
+                "id": str(item.get("id") or ""),
+                "name": item.get("name") or "",
+                "location": item.get("location") or "",
+                "status": item.get("status") or "",
+            }
+            for item in devices
+            if item.get("id")
+        ]
+        booking_locations = sorted({str(item.get("location") or "").strip() for item in devices if str(item.get("location") or "").strip()})
         queue_minutes = 0
         queue_preview = []
         for item in active:
@@ -1141,6 +1365,8 @@ async def _public_service_profile(cid: str):
                 "assigned_time": display_time,
                 "source": item.get("source", "public"),
                 "status": item.get("status", "pending"),
+                "routed_location": item.get("routed_location", ""),
+                "routed_device_name": item.get("routed_device_name", ""),
                 "wait_after_mins": queue_minutes,
             })
             queue_minutes += max(5, duration)
@@ -1150,6 +1376,12 @@ async def _public_service_profile(cid: str):
             "queue_length": len(active),
             "queue_total_minutes": queue_minutes,
             "queue_preview": queue_preview[:8],
+            "live_queue": active,
+            "today_bookings_count": len(today_bookings),
+            "today_bookings_preview": today_bookings[:8],
+            "today_bookings": today_bookings,
+            "booking_locations": booking_locations,
+            "booking_devices": booking_devices,
             "subscription": await _resolve_storage_plan_for_client(c) or None,
         }
 
@@ -1180,18 +1412,62 @@ async def _resolve_service_snapshot(profile: dict, body: AppointmentCreate):
     return chosen or {}
 
 
+async def _resolve_service_snapshots(profile: dict, body: AppointmentCreate) -> List[dict]:
+    services = profile.get("services") or []
+    selected: List[dict] = []
+
+    if body.service_ids:
+        for sid in [str(sid) for sid in body.service_ids if sid]:
+            found = next((s for s in services if str(s.get("id", "")) == sid), None)
+            if found:
+                selected.append(found)
+
+    if not selected:
+        single = await _resolve_service_snapshot(profile, body)
+        if single:
+            selected = [single]
+
+    if not selected:
+        selected = [{
+            "id": body.service_id or "",
+            "name": body.service_name or "Service",
+            "price": float(body.service_price or 0),
+            "duration_mins": int(profile.get("slot_minutes", 15) or 15),
+            "image_url": "",
+        }]
+
+    return selected
+
+
 async def _book_service(cid: str, body: AppointmentCreate, source: Optional[str] = None):
+    patient_name = str(body.patient_name or "").strip()
+    if len(patient_name) < 2:
+        raise HTTPException(status_code=400, detail="Patient name must be at least 2 characters")
+    phone_digits = re.sub(r"\D", "", str(body.patient_phone or ""))
+    if len(phone_digits) < 10 or len(phone_digits) > 15:
+        raise HTTPException(status_code=400, detail="Patient phone must be 10 to 15 digits")
+
     c = await db.clients.find_one({"id": cid, "vertical": {"$in": ["doctor", "salon"]}}, {"_id": 0})
     if not c:
         raise HTTPException(status_code=404, detail="Service provider not found")
     profile = _normalize_service_catalog(c.get(_service_profile_field(c.get("vertical", "doctor")), {}), c.get("vertical", "doctor"))
-    service = await _resolve_service_snapshot(profile, body)
-    today = datetime.now(timezone.utc).date().isoformat()
+    service_items = await _resolve_service_snapshots(profile, body)
+    primary_service = service_items[0] if service_items else {}
+    combined_duration = sum(max(5, int(item.get("duration_mins") or profile.get("slot_minutes", 15) or 15)) for item in service_items)
+    combined_price = float(sum(float(item.get("price") or 0) for item in service_items))
+    dedup_names: List[str] = []
+    for item in service_items:
+        name = str(item.get("name") or "").strip()
+        if name and name.lower() not in {n.lower() for n in dedup_names}:
+            dedup_names.append(name)
+    service_name_label = " + ".join(dedup_names) if dedup_names else (body.service_name or "Service")
+
+    today = _app_now().date().isoformat()
     slot_info = await _assign_next_available_time(
         cid,
         today,
         body.preferred_time,
-        int(service.get("duration_mins", c.get(_service_profile_field(c.get("vertical", "doctor")), {}).get("slot_minutes", 15)) or 15),
+        int(combined_duration or c.get(_service_profile_field(c.get("vertical", "doctor")), {}).get("slot_minutes", 15) or 15),
     )
     counter = await db.counters.find_one_and_update(
         {"_id": f"appointment_token:{cid}:{today}"},
@@ -1200,28 +1476,50 @@ async def _book_service(cid: str, body: AppointmentCreate, source: Optional[str]
         return_document=True,
     )
     token = int(counter.get("next", 1))
+    patient_phone_key = _normalize_patient_phone_key(body.patient_phone)
+    route_info = await _resolve_booking_route(cid, body.booking_location, body.booking_device_id)
     doc = {
         "id": str(uuid.uuid4()),
         "client_id": cid,
         "date": today,
         "token": token,
-        "patient_name": body.patient_name,
+        "patient_name": patient_name,
         "patient_phone": body.patient_phone,
+        "patient_phone_key": patient_phone_key,
         "notes": body.notes,
         "preferred_time": body.preferred_time,
         "requested_time": slot_info["requested_time"],
         "assigned_time": slot_info["assigned_time"],
         "assigned_time_minutes": slot_info["assigned_time_minutes"],
-        "service_id": service.get("id", body.service_id or ""),
-        "service_name": service.get("name", body.service_name or ""),
-        "service_price": float(service.get("price", body.service_price or 0) or 0),
-        "service_duration_mins": int(service.get("duration_mins", c.get(_service_profile_field(c.get("vertical", "doctor")), {}).get("slot_minutes", 15)) or 15),
-        "service_image_url": service.get("image_url", ""),
+        "service_id": primary_service.get("id", body.service_id or ""),
+        "service_ids": [str(item.get("id", "")) for item in service_items if item.get("id")],
+        "service_name": service_name_label,
+        "service_items": [
+            {
+                "id": str(item.get("id", "")),
+                "name": item.get("name", ""),
+                "price": float(item.get("price") or 0),
+                "duration_mins": int(item.get("duration_mins") or 0),
+                "image_url": item.get("image_url", ""),
+            }
+            for item in service_items
+        ],
+        "service_price": combined_price,
+        "service_duration_mins": int(combined_duration or c.get(_service_profile_field(c.get("vertical", "doctor")), {}).get("slot_minutes", 15) or 15),
+        "service_image_url": primary_service.get("image_url", ""),
+        "booking_location": route_info.get("requested_booking_location", ""),
+        "booking_device_id": route_info.get("requested_booking_device_id", ""),
+        "routed_location": route_info.get("routed_location", ""),
+        "routed_device_id": route_info.get("routed_device_id", ""),
+        "routed_device_name": route_info.get("routed_device_name", ""),
+        "route_strategy": route_info.get("route_strategy", "unrouted"),
         "source": source or body.source,
         "status": "pending",
         "created_at": now_iso(),
     }
     await db.appointments.insert_one(doc)
+    if c.get("vertical") == "doctor":
+        await _upsert_clinic_patient(cid, body.patient_phone, body.patient_name)
     return clean(doc)
 
 
@@ -1254,6 +1552,98 @@ async def create_service_appointment(vertical: Literal["doctor", "salon"], body:
         raise HTTPException(status_code=403, detail=f"Not a {_service_label(vertical).lower()} account")
     body.source = "manual"
     return await _book_service(user["id"], body, source="manual")
+
+
+@api.get("/client/doctor/patients")
+async def list_doctor_patients(search: Optional[str] = None, user: dict = Depends(require_role("client"))):
+    client_doc = await db.clients.find_one({"id": user["id"], "vertical": "doctor"}, {"_id": 0, "id": 1})
+    if not client_doc:
+        raise HTTPException(status_code=403, detail="Not a doctor account")
+
+    query: Dict[str, Any] = {"client_id": user["id"]}
+    if search and str(search).strip():
+        token = str(search).strip()
+        digits = re.sub(r"\D", "", token)
+        clauses = [{"name": {"$regex": re.escape(token), "$options": "i"}}]
+        if digits:
+            clauses.append({"phone_key": {"$regex": re.escape(digits[-10:])}})
+            clauses.append({"contact_number": {"$regex": re.escape(digits)}})
+        query["$or"] = clauses
+
+    docs = await db.clinic_patients.find(query, {"_id": 0}).sort("updated_at", -1).to_list(1000)
+    return docs
+
+
+@api.get("/client/doctor/patients/{contact_number}")
+async def get_doctor_patient(contact_number: str, user: dict = Depends(require_role("client"))):
+    client_doc = await db.clients.find_one({"id": user["id"], "vertical": "doctor"}, {"_id": 0, "id": 1})
+    if not client_doc:
+        raise HTTPException(status_code=403, detail="Not a doctor account")
+
+    phone_key = _normalize_patient_phone_key(contact_number)
+    patient = await db.clinic_patients.find_one({"client_id": user["id"], "phone_key": phone_key}, {"_id": 0})
+    if not patient:
+        raise HTTPException(status_code=404, detail="Patient not found")
+    return patient
+
+
+@api.get("/client/doctor/patients/{contact_number}/history")
+async def get_doctor_patient_history(contact_number: str, user: dict = Depends(require_role("client"))):
+    client_doc = await db.clients.find_one({"id": user["id"], "vertical": "doctor"}, {"_id": 0, "id": 1})
+    if not client_doc:
+        raise HTTPException(status_code=403, detail="Not a doctor account")
+
+    phone_key = _normalize_patient_phone_key(contact_number)
+    patient = await db.clinic_patients.find_one({"client_id": user["id"], "phone_key": phone_key}, {"_id": 0})
+    if not patient:
+        raise HTTPException(status_code=404, detail="Patient not found")
+
+    visits = await db.clinic_visits.find(
+        {"client_id": user["id"], "patient_phone_key": phone_key},
+        {"_id": 0},
+    ).sort("visit_at", -1).to_list(1000)
+    appointments = await db.appointments.find(
+        {"client_id": user["id"], "patient_phone_key": phone_key},
+        {"_id": 0},
+    ).sort("created_at", -1).to_list(1000)
+    return {
+        "patient": patient,
+        "appointments": appointments,
+        "history": visits,
+    }
+
+
+@api.post("/client/doctor/patients/{contact_number}/visits")
+async def create_doctor_patient_visit(contact_number: str, body: ClinicVisitCreate, user: dict = Depends(require_role("client"))):
+    client_doc = await db.clients.find_one({"id": user["id"], "vertical": "doctor"}, {"_id": 0, "id": 1})
+    if not client_doc:
+        raise HTTPException(status_code=403, detail="Not a doctor account")
+
+    phone_key = _normalize_patient_phone_key(contact_number)
+    patient = await _upsert_clinic_patient(user["id"], contact_number, body.patient_name or "")
+    visit = {
+        "id": str(uuid.uuid4()),
+        "client_id": user["id"],
+        "patient_id": patient.get("id"),
+        "patient_phone_key": phone_key,
+        "patient_name": body.patient_name or patient.get("name", ""),
+        "diagnosis": body.diagnosis,
+        "symptoms": body.symptoms,
+        "notes": body.notes,
+        "medicines": [m.model_dump() for m in body.medicines],
+        "follow_up_on": body.follow_up_on,
+        "visit_at": now_iso(),
+        "created_at": now_iso(),
+    }
+    await db.clinic_visits.insert_one(visit)
+    await db.clinic_patients.update_one(
+        {"client_id": user["id"], "phone_key": phone_key},
+        {
+            "$inc": {"history_count": 1},
+            "$set": {"last_visit_at": visit["visit_at"], "updated_at": now_iso()},
+        },
+    )
+    return clean(visit)
 
 
 # ==================== Object Storage ====================
@@ -1823,7 +2213,8 @@ def _format_min_to_time(minute_value: int) -> str:
 
 
 async def _assign_next_available_time(cid: str, day: str, requested_time: Optional[str], service_duration_mins: int) -> Dict[str, Any]:
-    now_min = datetime.now(timezone.utc).hour * 60 + datetime.now(timezone.utc).minute
+    app_now = _app_now()
+    now_min = app_now.hour * 60 + app_now.minute
     requested_min = _parse_time_to_min(requested_time)
     candidate_min = max(requested_min if requested_min is not None else now_min, now_min)
 
@@ -1989,6 +2380,10 @@ async def player_payload(pair_code: str):
         seen.add(s["playlist_id"])
         await _ingest(await db.playlists.find_one({"id": s["playlist_id"]}, {"_id": 0}))
 
+    # device-level direct assignment fallback
+    if not any(zones.values()) and device.get("playlist_id"):
+        await _ingest(await db.playlists.find_one({"id": device["playlist_id"]}, {"_id": 0}))
+
     # fallback to latest playlist if no schedule
     if not any(zones.values()):
         pl = await db.playlists.find_one({"client_id": device["client_id"]}, {"_id": 0}, sort=[("created_at", -1)])
@@ -2000,6 +2395,7 @@ async def player_payload(pair_code: str):
             "client_id": device["client_id"],
             "weather": weather,
             "orientation": device.get("orientation", "auto"),
+            "playlist_id": device.get("playlist_id", ""),
             "brightness": int(device.get("brightness", 100) or 100),
             "zones": zones, "template": template,
             "poll_after_seconds": 60}
@@ -2258,6 +2654,12 @@ async def on_startup():
         await db.payments.create_index("id", unique=True)
         await db.payments.create_index("payer_id")
         await db.payments.create_index("payee_id")
+        await db.clinic_patients.create_index("id", unique=True)
+        await db.clinic_patients.create_index([("client_id", 1), ("phone_key", 1)], unique=True)
+        await db.clinic_visits.create_index("id", unique=True)
+        await db.clinic_visits.create_index([("client_id", 1), ("patient_phone_key", 1), ("visit_at", -1)])
+        await db.appointments.create_index([("client_id", 1), ("patient_phone_key", 1), ("created_at", -1)])
+        await db.appointments.create_index([("client_id", 1), ("date", 1), ("status", 1), ("routed_location", 1)])
 
         # init object storage (non-blocking)
         try: init_storage()

@@ -36,6 +36,27 @@ function formatMinutesToTime(minutes) {
   return `${hours12}:${String(mins).padStart(2, "0")} ${suffix}`;
 }
 
+function getTimeMinutesInZone(timeZone) {
+  try {
+    const parts = new Intl.DateTimeFormat("en-US", {
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+      timeZone: timeZone || "Asia/Kolkata",
+    }).formatToParts(new Date());
+    const hours = Number(parts.find((part) => part.type === "hour")?.value || 0);
+    const minutes = Number(parts.find((part) => part.type === "minute")?.value || 0);
+    return hours * 60 + minutes;
+  } catch {
+    const now = new Date();
+    return now.getHours() * 60 + now.getMinutes();
+  }
+}
+
+function normalizePhone(value) {
+  return String(value || "").replace(/\D/g, "");
+}
+
 export default function PublicBooking() {
   const { clientId } = useParams();
   const [doc, setDoc] = useState(null);
@@ -43,7 +64,7 @@ export default function PublicBooking() {
   const [busy, setBusy] = useState(false);
   const [confirmed, setConfirmed] = useState(null);
   const [detailItem, setDetailItem] = useState(null);
-  const [form, setForm] = useState({ patient_name: "", patient_phone: "", preferred_time: "", service_name: "", service_id: "", service_price: 0, notes: "" });
+  const [form, setForm] = useState({ patient_name: "", patient_phone: "", preferred_time: "", booking_location: "", booking_device_id: "", service_name: "", service_id: "", service_ids: [], service_price: 0, notes: "" });
 
   useEffect(() => {
     let mounted = true;
@@ -75,18 +96,58 @@ export default function PublicBooking() {
   }, [profile.description, profile.fee, profile.image_url, profile.services, profile.slot_minutes, profile.specialty, doc?.vertical]);
 
   useEffect(() => {
-    if (services.length && !form.service_id) {
+    if (services.length && !form.service_ids.length && !form.service_id) {
       const first = services[0];
-      setForm((prev) => ({ ...prev, service_id: first.id || "", service_name: first.name || prev.service_name, service_price: Number(first.price || 0) }));
+      setForm((prev) => ({ ...prev, service_id: first.id || "", service_ids: first.id ? [first.id] : [], service_name: first.name || prev.service_name, service_price: Number(first.price || 0) }));
     }
-  }, [services, form.service_id]);
+  }, [services, form.service_id, form.service_ids.length]);
 
-  const selectedService = services.find((service) => service.id === form.service_id) || services[0] || null;
-  const queuePreview = Array.isArray(doc?.queue_preview) ? doc.queue_preview : [];
-  const approxWaitMinutes = Number(doc?.queue_total_minutes || 0) + Number(selectedService?.duration_mins || profile.slot_minutes || 15);
+  const selectedServices = useMemo(() => {
+    const selected = services.filter((service) => form.service_ids.includes(service.id));
+    if (selected.length) return selected;
+    const fallback = services.find((service) => service.id === form.service_id);
+    return fallback ? [fallback] : services.slice(0, 1);
+  }, [form.service_id, form.service_ids, services]);
+  const selectedService = selectedServices[0] || null;
+  const selectedServiceDuration = selectedServices.reduce((sum, item) => sum + Math.max(5, Number(item.duration_mins || profile.slot_minutes || 15)), 0) || Math.max(5, Number(profile.slot_minutes || 15));
+  const queuePreview = useMemo(() => (Array.isArray(doc?.queue_preview) ? doc.queue_preview : []), [doc?.queue_preview]);
+  const todayBookings = useMemo(() => (Array.isArray(doc?.today_bookings_preview) ? doc.today_bookings_preview : []), [doc?.today_bookings_preview]);
+  const bookingDevices = useMemo(() => (Array.isArray(doc?.booking_devices) ? doc.booking_devices : []), [doc?.booking_devices]);
+  const bookingLocations = useMemo(() => {
+    const fromDoc = Array.isArray(doc?.booking_locations) ? doc.booking_locations : [];
+    const fromDevices = bookingDevices.map((item) => String(item.location || "").trim()).filter(Boolean);
+    return [...new Set([...fromDoc, ...fromDevices])];
+  }, [bookingDevices, doc?.booking_locations]);
+
+  useEffect(() => {
+    if (!bookingLocations.length) return;
+    if (!form.booking_location) {
+      setForm((prev) => ({ ...prev, booking_location: bookingLocations[0] }));
+    }
+  }, [bookingLocations, form.booking_location]);
+
+  const filteredQueuePreview = useMemo(() => {
+    if (!form.booking_location && !form.booking_device_id) return queuePreview;
+    return queuePreview.filter((item) => {
+      const byDevice = form.booking_device_id ? String(item?.routed_device_id || "") === String(form.booking_device_id) : true;
+      const byLocation = form.booking_location ? String(item?.routed_location || "").trim().toLowerCase() === String(form.booking_location || "").trim().toLowerCase() : true;
+      return byDevice && byLocation;
+    });
+  }, [form.booking_device_id, form.booking_location, queuePreview]);
+
+  const filteredTodayBookings = useMemo(() => {
+    if (!form.booking_location && !form.booking_device_id) return todayBookings;
+    return todayBookings.filter((item) => {
+      const byDevice = form.booking_device_id ? String(item?.routed_device_id || "") === String(form.booking_device_id) : true;
+      const byLocation = form.booking_location ? String(item?.routed_location || "").trim().toLowerCase() === String(form.booking_location || "").trim().toLowerCase() : true;
+      return byDevice && byLocation;
+    });
+  }, [form.booking_device_id, form.booking_location, todayBookings]);
+
+  const approxWaitMinutes = filteredQueuePreview.reduce((sum, item) => sum + Math.max(5, Number(item?.service_duration_mins || profile.slot_minutes || 15)), 0) + Number(selectedServiceDuration || 15);
   const availableSlots = useMemo(() => {
-    const slotMinutes = Math.max(5, Number(selectedService?.duration_mins || profile.slot_minutes || 15));
-    const occupied = queuePreview
+    const slotMinutes = Math.max(5, Number(selectedServiceDuration || profile.slot_minutes || 15));
+    const occupied = filteredQueuePreview
       .map((item) => {
         const start = parseTimeToMinutes(item.assigned_time || item.preferred_time);
         if (start == null) return null;
@@ -97,8 +158,9 @@ export default function PublicBooking() {
       .sort((a, b) => a.start - b.start);
 
     const options = [];
-    let cursor = Math.ceil((new Date().getHours() * 60 + new Date().getMinutes()) / slotMinutes) * slotMinutes;
-    cursor = Math.max(cursor, new Date().getHours() * 60 + new Date().getMinutes());
+    const zoneNow = getTimeMinutesInZone(doc?.timezone);
+    let cursor = Math.ceil(zoneNow / slotMinutes) * slotMinutes;
+    cursor = Math.max(cursor, zoneNow);
 
     while (options.length < 12) {
       const conflict = occupied.find((slot) => cursor < slot.end && cursor + slotMinutes > slot.start);
@@ -111,7 +173,7 @@ export default function PublicBooking() {
     }
 
     return options;
-  }, [profile.slot_minutes, queuePreview, selectedService?.duration_mins]);
+  }, [doc?.timezone, filteredQueuePreview, profile.slot_minutes, selectedServiceDuration]);
 
   useEffect(() => {
     if (!availableSlots.length) {
@@ -150,14 +212,41 @@ export default function PublicBooking() {
 
   const closeDetail = () => setDetailItem(null);
 
+  const validateForm = () => {
+    if (!String(form.patient_name || "").trim() || String(form.patient_name || "").trim().length < 2) {
+      return "Enter a valid name (minimum 2 characters).";
+    }
+    const phone = normalizePhone(form.patient_phone);
+    if (phone.length < 10 || phone.length > 15) {
+      return "Enter a valid phone number (10 to 15 digits).";
+    }
+    if (!form.preferred_time) {
+      return "Please select an available slot.";
+    }
+    if (services.length > 0 && selectedServices.length === 0) {
+      return "Please select at least one service.";
+    }
+    return "";
+  };
+
   const submit = async (e) => {
     e.preventDefault(); setBusy(true);
     try {
+      const errMsg = validateForm();
+      if (errMsg) {
+        toast.error(errMsg);
+        return;
+      }
+      const totalPrice = selectedServices.reduce((sum, item) => sum + Number(item?.price || 0), 0);
+      const serviceNames = selectedServices.map((item) => item.name).filter(Boolean);
       const payload = {
         ...form,
         service_id: selectedService?.id || form.service_id || "",
-        service_name: selectedService?.name || form.service_name,
-        service_price: Number(selectedService?.price ?? form.service_price ?? 0),
+        booking_location: form.booking_location || "",
+        booking_device_id: form.booking_device_id || "",
+        service_ids: selectedServices.map((item) => item.id).filter(Boolean),
+        service_name: serviceNames.join(" + ") || form.service_name,
+        service_price: Number(totalPrice || form.service_price || 0),
       };
       const { data } = await axios.post(`${BASE}/providers/${clientId}/book`, payload);
       setConfirmed(data);
@@ -183,7 +272,7 @@ export default function PublicBooking() {
           <h2 className="font-display text-3xl font-extrabold tracking-tighter">Your token</h2>
           <div className="font-display text-7xl font-extrabold tracking-tighter my-6">#{confirmed.token}</div>
           <p className="text-sm text-[#6B7280]">Visit <strong>{doc.name}</strong> on <strong>{confirmed.date}</strong>. Your time is <strong>{confirmed.assigned_time || confirmed.preferred_time || "ASAP"}</strong>.</p>
-          <Button onClick={() => { setConfirmed(null); setForm({ patient_name: "", patient_phone: "", preferred_time: "", service_name: "", service_id: "", service_price: 0, notes: "" }); }} variant="outline" className="rounded-sm mt-6" data-testid="book-another">Book another</Button>
+          <Button onClick={() => { setConfirmed(null); setForm({ patient_name: "", patient_phone: "", preferred_time: "", booking_location: "", booking_device_id: "", service_name: "", service_id: "", service_ids: [], service_price: 0, notes: "" }); }} variant="outline" className="rounded-sm mt-6" data-testid="book-another">Book another</Button>
         </div>
       </div>
     );
@@ -303,6 +392,7 @@ export default function PublicBooking() {
                   setForm((prev) => ({
                     ...prev,
                     service_id: detailItem.id,
+                    service_ids: detailItem.id ? [detailItem.id] : prev.service_ids,
                     service_name: detailItem.name,
                     service_price: detailItem.price,
                   }));
@@ -422,8 +512,9 @@ export default function PublicBooking() {
                 </div>
               </div>
               <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4 p-4 sm:p-6">
-                <div className="rounded-2xl bg-[#F8FAFC] p-4 border border-[#E5E7EB]"><div className="text-[10px] uppercase tracking-wider text-[#6B7280]">Queue</div><div className="font-display text-3xl font-extrabold mt-1">{doc.queue_length}</div><div className="text-xs text-[#6B7280]">Waiting today</div></div>
+                <div className="rounded-2xl bg-[#F8FAFC] p-4 border border-[#E5E7EB]"><div className="text-[10px] uppercase tracking-wider text-[#6B7280]">Live Queue</div><div className="font-display text-3xl font-extrabold mt-1">{filteredQueuePreview.length}</div><div className="text-xs text-[#6B7280]">Called + pending now</div></div>
                 <div className="rounded-2xl bg-[#F8FAFC] p-4 border border-[#E5E7EB]"><div className="text-[10px] uppercase tracking-wider text-[#6B7280]">Live wait</div><div className="font-display text-3xl font-extrabold mt-1">~{approxWaitMinutes}m</div><div className="text-xs text-[#6B7280]">Updated every 20 sec</div></div>
+                <div className="rounded-2xl bg-[#F8FAFC] p-4 border border-[#E5E7EB]"><div className="text-[10px] uppercase tracking-wider text-[#6B7280]">Today's bookings</div><div className="font-display text-3xl font-extrabold mt-1">{Number(doc?.today_bookings_count || filteredTodayBookings.length || 0)}</div><div className="text-xs text-[#6B7280]">All statuses for today</div></div>
                 <div className="rounded-2xl bg-[#F8FAFC] p-4 border border-[#E5E7EB]"><div className="text-[10px] uppercase tracking-wider text-[#6B7280]">Hours</div><div className="font-semibold mt-1">{profile.hours || "Open daily"}</div><div className="text-xs text-[#6B7280]">Plan your visit</div></div>
                 <div className="rounded-2xl bg-[#F8FAFC] p-4 border border-[#E5E7EB]"><div className="text-[10px] uppercase tracking-wider text-[#6B7280]">Starting from</div><div className="font-display text-3xl font-extrabold mt-1">₹{Number(selectedService?.price ?? profile.fee ?? 0).toLocaleString()}</div><div className="text-xs text-[#6B7280]">Selected service</div></div>
               </div>
@@ -434,21 +525,45 @@ export default function PublicBooking() {
                       <div className="text-[10px] uppercase tracking-wider text-[#6B7280]">Live queue</div>
                       <div className="font-display text-xl font-extrabold tracking-tight">Now serving</div>
                     </div>
-                    <div className="text-xs text-[#6B7280]">{queuePreview.length ? `${queuePreview.length} upcoming` : "No one waiting"}</div>
+                    <div className="text-xs text-[#6B7280]">{filteredQueuePreview.length ? `${filteredQueuePreview.length} upcoming` : "No one waiting"}</div>
                   </div>
                   <div className="flex gap-2 overflow-x-auto pb-1">
-                    {queuePreview.length === 0 ? (
+                    {filteredQueuePreview.length === 0 ? (
                       <div className="text-sm text-[#6B7280]">The queue is empty right now.</div>
-                    ) : queuePreview.map((item) => (
+                    ) : filteredQueuePreview.map((item) => (
                       <div key={`${item.token}-${item.wait_after_mins}`} className="min-w-[160px] sm:min-w-[180px] rounded-xl bg-white border border-[#E5E7EB] p-3 shadow-sm">
                         <div className="text-[10px] uppercase tracking-wider text-[#6B7280]">Token #{item.token}</div>
                         <div className="font-semibold text-sm mt-1 truncate">{item.service_name || "Service"}</div>
                         <div className="text-xs text-[#6B7280] mt-1">{item.service_duration_mins} min service</div>
+                        <div className="text-xs text-[#6B7280] mt-1 truncate">{item.routed_location || "Default location"}</div>
                         <div className="text-xs font-semibold text-[#111827] mt-2">Approx start in {item.wait_after_mins}m</div>
                       </div>
                     ))}
                   </div>
                 </div>
+              </div>
+            </div>
+
+            <div className="rounded-[1.25rem] border border-[#E5E7EB] bg-white p-4 sm:p-5">
+              <div className="flex items-center justify-between gap-3 mb-3">
+                <div>
+                  <div className="text-[10px] uppercase tracking-wider text-[#6B7280]">Today's bookings</div>
+                  <div className="font-display text-xl font-extrabold tracking-tight">Separate from live queue</div>
+                </div>
+                <div className="text-xs text-[#6B7280]">{filteredTodayBookings.length} items</div>
+              </div>
+              <div className="grid gap-2 sm:grid-cols-2">
+                {filteredTodayBookings.slice(0, 6).map((item) => (
+                  <div key={`today-booking-${item.id || item.token}`} className="rounded-xl border border-[#E5E7EB] bg-[#F8FAFC] p-3">
+                    <div className="flex items-center justify-between">
+                      <div className="text-xs uppercase tracking-wider text-[#6B7280]">Token #{item.token}</div>
+                      <div className="text-[11px] uppercase tracking-wider font-semibold text-[#374151]">{item.status}</div>
+                    </div>
+                    <div className="mt-1 font-semibold text-sm truncate">{item.patient_name || item.service_name || "Booking"}</div>
+                    <div className="mt-1 text-xs text-[#6B7280] truncate">{item.routed_location || "Default location"}</div>
+                  </div>
+                ))}
+                {filteredTodayBookings.length === 0 ? <div className="text-sm text-[#6B7280]">No bookings logged yet for this location filter.</div> : null}
               </div>
             </div>
 
@@ -459,9 +574,9 @@ export default function PublicBooking() {
                     <div className="text-[11px] font-semibold uppercase tracking-[0.2em] text-[#6B7280] mb-1">Services</div>
                     <h2 className="font-display text-2xl font-extrabold tracking-tight">Choose your service</h2>
                   </div>
-                  <div className="text-sm text-[#6B7280]">Tap a card to prefill the booking form</div>
+                  <div className="text-sm text-[#6B7280]">Tap a service row to prefill the booking form</div>
                 </div>
-                <div className="grid gap-4 md:grid-cols-2">
+                <div className="space-y-3">
                   {services.map((service) => {
                     const active = service.id === selectedService?.id;
                     return (
@@ -469,24 +584,24 @@ export default function PublicBooking() {
                         key={service.id}
                         type="button"
                         onClick={() => openServiceDetail(service)}
-                        className={`text-left rounded-[1.5rem] overflow-hidden border transition shadow-[0_18px_40px_-28px_rgba(15,23,42,0.35)] ${active ? "border-[#111827] ring-2 ring-[#111827]" : "border-[#E5E7EB] hover:border-[#94A3B8]"}`}
+                        className={`w-full text-left rounded-[1.25rem] overflow-hidden border transition bg-white shadow-[0_12px_30px_-24px_rgba(15,23,42,0.32)] ${active ? "border-[#111827] ring-2 ring-[#111827]" : "border-[#E5E7EB] hover:border-[#94A3B8]"}`}
                       >
-                        <div className="h-44 bg-[#0F172A] relative">
-                          {service.image_url ? <img src={service.image_url} alt={service.name} className="absolute inset-0 w-full h-full object-cover" /> : <div className="absolute inset-0 bg-[linear-gradient(135deg,#0F172A,#475569)]" />}
-                          <div className="absolute inset-0 bg-gradient-to-t from-black/70 via-black/15 to-transparent" />
-                          <div className="absolute inset-x-0 bottom-0 p-4 text-white flex items-end justify-between gap-4">
-                            <div>
-                              <div className="font-display text-2xl font-extrabold tracking-tight">{service.name}</div>
-                              <div className="text-xs text-white/75">{service.duration_mins || 30} mins</div>
+                        <div className="flex items-stretch">
+                          <div className="w-28 sm:w-36 h-28 sm:h-32 shrink-0 bg-[#0F172A] relative">
+                            {service.image_url ? <img src={service.image_url} alt={service.name} className="absolute inset-0 w-full h-full object-cover" /> : <div className="absolute inset-0 bg-[linear-gradient(135deg,#0F172A,#475569)]" />}
+                            <div className="absolute inset-0 bg-gradient-to-t from-black/40 to-transparent" />
+                          </div>
+                          <div className="flex-1 p-4 sm:p-5 flex items-start justify-between gap-4">
+                            <div className="min-w-0">
+                              <div className="font-display text-xl sm:text-2xl font-extrabold tracking-tight text-[#111827] truncate">{service.name}</div>
+                              <div className="mt-1 text-xs uppercase tracking-wider text-[#6B7280]">{service.duration_mins || 30} mins</div>
+                              <p className="mt-2 text-sm text-[#374151] line-clamp-2">{service.description || (isSalon ? "A polished service designed for a premium salon experience." : "A premium appointment option for your customers.")}</p>
                             </div>
-                            <div className="text-right">
-                              <div className="text-[10px] uppercase tracking-wider text-white/60">Price</div>
-                              <div className="font-display text-3xl font-extrabold">₹{Number(service.price || 0).toLocaleString()}</div>
+                            <div className="text-right shrink-0">
+                              <div className="text-[10px] uppercase tracking-wider text-[#6B7280]">Price</div>
+                              <div className="font-display text-2xl sm:text-3xl font-extrabold text-[#111827]">₹{Number(service.price || 0).toLocaleString()}</div>
                             </div>
                           </div>
-                        </div>
-                        <div className="p-4 bg-white">
-                          <p className="text-sm text-[#374151] line-clamp-2">{service.description || (isSalon ? "A polished service designed for a premium salon experience." : "A premium appointment option for your customers.")}</p>
                         </div>
                       </button>
                     );
@@ -504,7 +619,39 @@ export default function PublicBooking() {
               <div><Label className="text-xs uppercase tracking-wider text-[#6B7280]">Your name</Label>
                 <Input value={form.patient_name} onChange={(e) => setForm({ ...form, patient_name: e.target.value })} required className="rounded-2xl" data-testid="book-name" /></div>
               <div><Label className="text-xs uppercase tracking-wider text-[#6B7280]">Phone</Label>
-                <Input value={form.patient_phone} onChange={(e) => setForm({ ...form, patient_phone: e.target.value })} required className="rounded-2xl" data-testid="book-phone" /></div>
+                <Input value={form.patient_phone} onChange={(e) => setForm({ ...form, patient_phone: e.target.value })} required className="rounded-2xl" data-testid="book-phone" />
+                <div className="mt-1 text-xs text-[#6B7280]">Used as your booking reference.</div>
+              </div>
+              {bookingLocations.length > 0 ? (
+                <div>
+                  <Label className="text-xs uppercase tracking-wider text-[#6B7280]">Location</Label>
+                  <select
+                    value={form.booking_location || ""}
+                    onChange={(e) => setForm({ ...form, booking_location: e.target.value, booking_device_id: "" })}
+                    className="w-full h-11 rounded-2xl border border-[#D1D5DB] bg-white px-4 text-sm"
+                  >
+                    <option value="">Default location</option>
+                    {bookingLocations.map((location) => <option key={location} value={location}>{location}</option>)}
+                  </select>
+                </div>
+              ) : null}
+              {bookingDevices.length > 0 ? (
+                <div>
+                  <Label className="text-xs uppercase tracking-wider text-[#6B7280]">Screen (optional)</Label>
+                  <select
+                    value={form.booking_device_id || ""}
+                    onChange={(e) => setForm({ ...form, booking_device_id: e.target.value })}
+                    className="w-full h-11 rounded-2xl border border-[#D1D5DB] bg-white px-4 text-sm"
+                  >
+                    <option value="">Auto route by location</option>
+                    {bookingDevices
+                      .filter((item) => !form.booking_location || String(item.location || "") === String(form.booking_location || ""))
+                      .map((item) => (
+                        <option key={item.id} value={item.id}>{item.name}{item.location ? ` · ${item.location}` : ""}</option>
+                      ))}
+                  </select>
+                </div>
+              ) : null}
               <div><Label className="text-xs uppercase tracking-wider text-[#6B7280]">Available slot</Label>
                 <select
                   value={form.preferred_time}
@@ -514,15 +661,42 @@ export default function PublicBooking() {
                   {availableSlots.length === 0 ? <option value="">No slots available</option> : null}
                   {availableSlots.map((slot) => <option key={slot} value={slot}>{slot}</option>)}
                 </select>
-                <div className="mt-2 text-xs text-[#6B7280]">Choose a free slot. If it gets taken before confirmation, we’ll move you to the next available time.</div></div>
+                <div className="mt-2 text-xs text-[#6B7280]">Choose a free slot. If it gets taken before confirmation, we’ll move you to the next available time. Timezone: {doc?.timezone || "Asia/Kolkata"}.</div></div>
               {services.length > 0 ? (
-                <div><Label className="text-xs uppercase tracking-wider text-[#6B7280]">Service</Label>
-                  <select value={form.service_id} onChange={(e) => {
-                    const selected = services.find((item) => item.id === e.target.value) || null;
-                    setForm({ ...form, service_id: e.target.value, service_name: selected?.name || "", service_price: Number(selected?.price || 0) });
-                  }} className="w-full h-11 rounded-2xl border border-[#D1D5DB] bg-white px-4 text-sm">
-                    {services.map((service) => <option key={service.id} value={service.id}>{service.name} · ₹{Number(service.price || 0).toLocaleString()}</option>)}
-                  </select></div>
+                <div>
+                  <Label className="text-xs uppercase tracking-wider text-[#6B7280]">Services</Label>
+                  <div className="mt-2 max-h-44 overflow-y-auto rounded-2xl border border-[#D1D5DB] bg-white p-2 space-y-1.5">
+                    {services.map((service) => {
+                      const checked = form.service_ids.includes(service.id);
+                      return (
+                        <label key={service.id} className={`flex items-center justify-between gap-3 rounded-xl px-3 py-2 cursor-pointer border ${checked ? "border-[#111827] bg-[#F9FAFB]" : "border-transparent hover:bg-[#F9FAFB]"}`}>
+                          <span className="flex items-center gap-2 min-w-0">
+                            <input
+                              type="checkbox"
+                              checked={checked}
+                              onChange={(e) => {
+                                const next = e.target.checked
+                                  ? [...new Set([...form.service_ids, service.id])]
+                                  : form.service_ids.filter((sid) => sid !== service.id);
+                                const selectedItems = services.filter((item) => next.includes(item.id));
+                                setForm((prev) => ({
+                                  ...prev,
+                                  service_ids: next,
+                                  service_id: next[0] || "",
+                                  service_name: selectedItems.map((item) => item.name).join(" + "),
+                                  service_price: selectedItems.reduce((sum, item) => sum + Number(item.price || 0), 0),
+                                }));
+                              }}
+                            />
+                            <span className="text-sm truncate">{service.name}</span>
+                          </span>
+                          <span className="text-sm font-semibold">₹{Number(service.price || 0).toLocaleString()}</span>
+                        </label>
+                      );
+                    })}
+                  </div>
+                  <div className="mt-2 text-xs text-[#6B7280]">Select one or more services. Total duration affects your suggested slot.</div>
+                </div>
               ) : (
                 <div><Label className="text-xs uppercase tracking-wider text-[#6B7280]">Service</Label>
                   <Input value={form.service_name} onChange={(e) => setForm({ ...form, service_name: e.target.value })} placeholder={isSalon ? "Haircut" : "General consultation"} className="rounded-2xl" /></div>

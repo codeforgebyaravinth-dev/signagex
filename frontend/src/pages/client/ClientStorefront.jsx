@@ -16,24 +16,26 @@ function ServicePanel({ vertical, label, icon: Icon }) {
   const emptyProfile = useMemo(() => ({ specialty: "", qualifications: "", fee: 0, hours: "", is_open: true, image_url: "", description: "", slot_minutes: 15, services: [] }), []);
   const [profile, setProfile] = useState(emptyProfile);
   const [apts, setApts] = useState([]);
+  const [todayBookings, setTodayBookings] = useState([]);
+  const [liveQueue, setLiveQueue] = useState([]);
+  const [devices, setDevices] = useState([]);
   const [me, setMe] = useState(null);
   const [serviceOpen, setServiceOpen] = useState(false);
   const [serviceIndex, setServiceIndex] = useState(null);
   const [serviceForm, setServiceForm] = useState({ id: "", name: "", price: 0, duration_mins: 30, description: "", image_url: "", active: true });
   const [manualOpen, setManualOpen] = useState(false);
-  const [manualForm, setManualForm] = useState({ patient_name: "", patient_phone: "", preferred_time: "", service_id: "", notes: "" });
+  const [manualForm, setManualForm] = useState({ patient_name: "", patient_phone: "", preferred_time: "", booking_location: "", booking_device_id: "", service_id: "", service_ids: [], notes: "" });
   const [uploadingImage, setUploadingImage] = useState(false);
   const [showPastBookings, setShowPastBookings] = useState(false);
 
   const title = label === "Salon" ? "Salon profile" : "Clinic profile";
   const bookingCta = label === "Salon" ? "Book service" : "Book appointment";
   const services = Array.isArray(profile.services) ? profile.services : [];
-  const todayIso = new Date().toISOString().slice(0, 10);
   const visibleAppointments = useMemo(() => {
     if (showPastBookings) return apts;
-    return apts.filter((item) => String(item.date || "") === todayIso);
-  }, [apts, showPastBookings, todayIso]);
-  const pastCount = Math.max(0, apts.length - visibleAppointments.length);
+    return todayBookings;
+  }, [apts, showPastBookings, todayBookings]);
+  const pastCount = Math.max(0, apts.length - todayBookings.length);
 
   const sortAppointments = useCallback((appointments = []) => {
     const rank = (status) => ({ called: 0, pending: 1, done: 2, cancelled: 3 }[status || ""] ?? 9);
@@ -48,10 +50,25 @@ function ServicePanel({ vertical, label, icon: Icon }) {
 
   const load = useCallback(async () => {
     try {
-      const [m, a] = await Promise.all([api.get("/client/me"), api.get(`/client/${vertical}/appointments`)]);
+      const [m, board, d] = await Promise.all([
+        api.get("/client/me"),
+        api.get(`/client/${vertical}/appointments/board`),
+        api.get("/client/devices"),
+      ]);
       setMe(m.data);
-      setApts(sortAppointments(a.data));
-      if (m.data[profileKey]) setProfile({ ...emptyProfile, ...m.data[profileKey], services: Array.isArray(m.data[profileKey].services) ? m.data[profileKey].services : [] });
+      setApts(sortAppointments(board.data?.recent_bookings || []));
+      setTodayBookings(sortAppointments(board.data?.today_bookings || []));
+      setLiveQueue(sortAppointments(board.data?.live_queue || []));
+      setDevices(Array.isArray(d.data) ? d.data : []);
+      if (m.data[profileKey]) {
+        const fetchedProfile = m.data[profileKey] || {};
+        setProfile((current) => ({
+          ...emptyProfile,
+          ...current,
+          ...fetchedProfile,
+          services: Array.isArray(fetchedProfile.services) ? fetchedProfile.services : (Array.isArray(current.services) ? current.services : []),
+        }));
+      }
     } catch {}
   }, [profileKey, vertical, emptyProfile, sortAppointments]);
   useEffect(() => { load(); }, [load]);
@@ -136,22 +153,37 @@ function ServicePanel({ vertical, label, icon: Icon }) {
   };
 
   const openManualBooking = () => {
-    setManualForm({ patient_name: "", patient_phone: "", preferred_time: "", service_id: services[0]?.id || "", notes: "" });
+    const firstServiceId = services[0]?.id || "";
+    const firstDevice = devices[0] || null;
+    setManualForm({
+      patient_name: "",
+      patient_phone: "",
+      preferred_time: "",
+      booking_location: firstDevice?.location || "",
+      booking_device_id: firstDevice?.id || "",
+      service_id: firstServiceId,
+      service_ids: firstServiceId ? [firstServiceId] : [],
+      notes: "",
+    });
     setManualOpen(true);
   };
 
   const submitManualBooking = async (e) => {
     e.preventDefault();
     try {
-      const selected = services.find((item) => item.id === manualForm.service_id) || services[0] || {};
+      const selected = services.filter((item) => manualForm.service_ids.includes(item.id));
+      const fallback = selected.length ? selected : (services.find((item) => item.id === manualForm.service_id) ? [services.find((item) => item.id === manualForm.service_id)] : (services[0] ? [services[0]] : []));
       await api.post(`/client/${vertical}/appointments`, {
         patient_name: manualForm.patient_name,
         patient_phone: manualForm.patient_phone,
         preferred_time: manualForm.preferred_time,
+        booking_location: manualForm.booking_location || "",
+        booking_device_id: manualForm.booking_device_id || "",
         notes: manualForm.notes,
-        service_id: selected.id || manualForm.service_id || "",
-        service_name: selected.name || "Walk-in booking",
-        service_price: Number(selected.price || 0),
+        service_id: fallback[0]?.id || manualForm.service_id || "",
+        service_ids: fallback.map((item) => item.id).filter(Boolean),
+        service_name: fallback.map((item) => item?.name).filter(Boolean).join(" + ") || "Walk-in booking",
+        service_price: fallback.reduce((sum, item) => sum + Number(item?.price || 0), 0),
         source: "manual",
       });
       toast.success("Walk-in booking added");
@@ -167,7 +199,10 @@ function ServicePanel({ vertical, label, icon: Icon }) {
     const base = String(me.public_booking_slug || me.name || "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 48);
     return base || me.id;
   }, [me]);
-  const bookingUrl = me ? `${window.location.origin}/book/${encodeURIComponent(me.id || bookingSlug)}` : "";
+  const bookingUrl = useMemo(() => {
+    const ref = me?.id || bookingSlug || me?.public_booking_slug || "";
+    return ref ? `${window.location.origin}/book/${encodeURIComponent(ref)}` : "";
+  }, [bookingSlug, me?.id, me?.public_booking_slug]);
   const copyLink = async () => {
     try {
       await navigator.clipboard.writeText(bookingUrl);
@@ -226,10 +261,12 @@ function ServicePanel({ vertical, label, icon: Icon }) {
         <div className="flex flex-wrap items-center justify-between gap-3 mt-6 pt-6 border-t border-white/10">
           <div>
             <div className="text-[10px] uppercase tracking-wider font-semibold text-white/60 mb-1">Public booking link</div>
-            <div className="font-mono text-xs text-white/80 break-all">{bookingUrl}</div>
+            <div className="font-mono text-xs text-white/80 break-all">
+              {bookingUrl || "Loading booking link..."}
+            </div>
           </div>
           <div className="flex flex-wrap gap-2">
-            <Button variant="outline" onClick={copyLink} className="rounded-xl bg-white/10 text-white border-white/15 hover:bg-white/20"><Copy className="w-3.5 h-3.5 mr-2" /> Copy link</Button>
+            <Button variant="outline" onClick={copyLink} disabled={!bookingUrl} className="rounded-xl bg-white/10 text-white border-white/15 hover:bg-white/20 disabled:opacity-50"><Copy className="w-3.5 h-3.5 mr-2" /> Copy link</Button>
             <Button onClick={save} className="rounded-xl bg-white text-[#111827] hover:bg-white/90">Save profile</Button>
           </div>
         </div>
@@ -248,43 +285,58 @@ function ServicePanel({ vertical, label, icon: Icon }) {
         </div>
         <div className="p-4 sm:p-6">
           {services.length === 0 ? (
-            <div className="border border-dashed border-[#D1D5DB] rounded-2xl p-8 text-center text-sm text-[#6B7280]">No services yet. Add one premium service card for your storefront.</div>
+            <div className="border border-dashed border-[#D1D5DB] rounded-2xl p-8 text-center text-sm text-[#6B7280]">No services yet. Add one premium service row for your storefront.</div>
           ) : (
-            <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
-              {services.map((service, index) => (
-                <div key={service.id || index} className="rounded-2xl border border-[#E5E7EB] overflow-hidden bg-white shadow-[0_20px_40px_-30px_rgba(15,23,42,0.35)]">
-                  <div className="h-44 bg-[#111827] relative">
-                    {service.image_url ? (
-                      <img src={service.image_url} alt={service.name} className="w-full h-full object-cover" />
-                    ) : (
-                      <div className="absolute inset-0 bg-[radial-gradient(circle_at_top,rgba(255,255,255,0.2),transparent_55%),linear-gradient(135deg,#111827,#334155)]" />
-                    )}
-                    <div className="absolute inset-x-0 bottom-0 p-4 bg-gradient-to-t from-black/80 to-transparent">
-                      <div className="flex items-center justify-between gap-3 text-white">
-                        <div>
-                          <div className="font-display text-xl font-extrabold tracking-tight">{service.name || "Service"}</div>
-                          <div className="text-xs text-white/70">{service.duration_mins || 30} mins</div>
+            <div className="bg-white border border-[#E5E7EB] rounded-2xl overflow-hidden">
+              <Table>
+                <TableHeader>
+                  <TableRow className="bg-[#F9FAFB] hover:bg-[#F9FAFB]">
+                    <TableHead className="text-[11px] uppercase tracking-wider text-[#6B7280]">Service</TableHead>
+                    <TableHead className="text-[11px] uppercase tracking-wider text-[#6B7280]">Duration</TableHead>
+                    <TableHead className="text-[11px] uppercase tracking-wider text-[#6B7280] text-right">Price</TableHead>
+                    <TableHead className="text-[11px] uppercase tracking-wider text-[#6B7280]">Visibility</TableHead>
+                    <TableHead className="text-[11px] uppercase tracking-wider text-[#6B7280]">Image</TableHead>
+                    <TableHead></TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {services.map((service, index) => (
+                    <TableRow key={service.id || index}>
+                      <TableCell>
+                        <div className="flex items-center gap-3">
+                          <div className="w-12 h-12 rounded-xl bg-[#111827] overflow-hidden shrink-0">
+                            {service.image_url ? (
+                              <img src={service.image_url} alt={service.name} className="w-full h-full object-cover" />
+                            ) : (
+                              <div className="w-full h-full bg-[linear-gradient(135deg,#111827,#334155)]" />
+                            )}
+                          </div>
+                          <div className="min-w-0">
+                            <div className="font-semibold truncate">{service.name || "Service"}</div>
+                            <div className="text-xs text-[#6B7280] line-clamp-1">{service.description || "Premium service item for your storefront."}</div>
+                          </div>
                         </div>
-                        <div className="text-right">
-                          <div className="text-[10px] uppercase tracking-wider text-white/60">Price</div>
-                          <div className="font-display text-2xl font-extrabold">₹{Number(service.price || 0).toLocaleString()}</div>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                  <div className="p-4 space-y-3">
-                    <p className="text-sm text-[#374151] min-h-[40px]">{service.description || "Premium service item for your storefront."}</p>
-                    <div className="flex items-center justify-between text-[11px] uppercase tracking-wider font-semibold text-[#6B7280]">
-                      <span>{service.active === false ? "Hidden" : "Visible"}</span>
-                      <span>{service.image_url ? "Image added" : "No image"}</span>
-                    </div>
-                    <div className="flex gap-2">
-                      <Button variant="outline" className="rounded-xl flex-1" onClick={() => openServiceEditor(service, index)}><Pencil className="w-3.5 h-3.5 mr-2" /> Edit</Button>
-                      <Button variant="outline" className="rounded-xl text-red-600 border-red-200 hover:bg-red-50" onClick={() => removeService(index)}><Trash2 className="w-3.5 h-3.5" /></Button>
-                    </div>
-                  </div>
-                </div>
-              ))}
+                      </TableCell>
+                      <TableCell className="text-sm">{service.duration_mins || 30} mins</TableCell>
+                      <TableCell className="text-right font-mono">₹{Number(service.price || 0).toLocaleString()}</TableCell>
+                      <TableCell>
+                        <span className={`text-[11px] uppercase tracking-wider font-semibold ${service.active === false ? "text-[#9CA3AF]" : "text-emerald-600"}`}>
+                          {service.active === false ? "Hidden" : "Visible"}
+                        </span>
+                      </TableCell>
+                      <TableCell className="text-xs text-[#6B7280]">{service.image_url ? "Added" : "No image"}</TableCell>
+                      <TableCell className="text-right">
+                        <Button variant="outline" className="rounded-xl mr-2" onClick={() => openServiceEditor(service, index)}>
+                          <Pencil className="w-3.5 h-3.5 mr-2" /> Edit
+                        </Button>
+                        <Button variant="outline" className="rounded-xl text-red-600 border-red-200 hover:bg-red-50" onClick={() => removeService(index)}>
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </Button>
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
             </div>
           )}
         </div>
@@ -295,6 +347,7 @@ function ServicePanel({ vertical, label, icon: Icon }) {
           <div>
             <div className="text-[11px] font-semibold uppercase tracking-[0.2em] text-[#6B7280] mb-1">Live queue</div>
             <h3 className="font-display text-2xl font-extrabold tracking-tight">Bookings and tokens</h3>
+            <div className="mt-1 text-xs text-[#6B7280]">Live queue: {liveQueue.length} · Today's bookings: {todayBookings.length}</div>
           </div>
           <div className="flex items-center gap-2 flex-wrap justify-end">
             <Button
@@ -339,6 +392,7 @@ function ServicePanel({ vertical, label, icon: Icon }) {
                 <TableCell><span className="text-[11px] uppercase tracking-wider font-semibold">{a.status}</span></TableCell>
                 <TableCell className="text-right">
                   {a.status === "pending" && <Button size="sm" variant="outline" className="rounded-sm mr-2" onClick={() => setStatus(a.id, "called")}>Call</Button>}
+                  {a.status === "called" && <Button size="sm" variant="outline" className="rounded-sm mr-2" onClick={() => setStatus(a.id, "called")}>Recall</Button>}
                   {a.status === "called" && <Button size="sm" variant="outline" className="rounded-sm mr-2" onClick={() => setStatus(a.id, "done")}>Done</Button>}
                   {a.status !== "cancelled" && a.status !== "done" && <Button size="sm" variant="outline" className="rounded-sm text-red-600" onClick={() => setStatus(a.id, "cancelled")}>Cancel</Button>}
                 </TableCell>
@@ -390,11 +444,63 @@ function ServicePanel({ vertical, label, icon: Icon }) {
               <Input value={manualForm.patient_phone} onChange={(e) => setManualForm({ ...manualForm, patient_phone: e.target.value })} required className="rounded-sm" /></div>
             <div><Label className="text-xs uppercase tracking-wider text-[#6B7280]">Preferred time</Label>
               <Input value={manualForm.preferred_time} onChange={(e) => setManualForm({ ...manualForm, preferred_time: e.target.value })} placeholder="ASAP" className="rounded-sm" /></div>
+            {devices.length > 0 ? (
+              <div>
+                <Label className="text-xs uppercase tracking-wider text-[#6B7280]">Location</Label>
+                <select
+                  value={manualForm.booking_location || ""}
+                  onChange={(e) => setManualForm({ ...manualForm, booking_location: e.target.value, booking_device_id: "" })}
+                  className="w-full h-10 rounded-sm border border-[#D1D5DB] bg-white px-3 text-sm"
+                >
+                  <option value="">Default location</option>
+                  {[...new Set(devices.map((device) => String(device.location || "").trim()).filter(Boolean))].map((location) => (
+                    <option key={location} value={location}>{location}</option>
+                  ))}
+                </select>
+              </div>
+            ) : null}
+            {devices.length > 0 ? (
+              <div>
+                <Label className="text-xs uppercase tracking-wider text-[#6B7280]">Route to device</Label>
+                <select
+                  value={manualForm.booking_device_id || ""}
+                  onChange={(e) => setManualForm({ ...manualForm, booking_device_id: e.target.value })}
+                  className="w-full h-10 rounded-sm border border-[#D1D5DB] bg-white px-3 text-sm"
+                >
+                  <option value="">Auto-select device</option>
+                  {devices
+                    .filter((device) => !manualForm.booking_location || String(device.location || "") === String(manualForm.booking_location || ""))
+                    .map((device) => (
+                      <option key={device.id} value={device.id}>{device.name}{device.location ? ` · ${device.location}` : ""}</option>
+                    ))}
+                </select>
+              </div>
+            ) : null}
             <div><Label className="text-xs uppercase tracking-wider text-[#6B7280]">Service</Label>
-              <select value={manualForm.service_id} onChange={(e) => setManualForm({ ...manualForm, service_id: e.target.value })} className="w-full h-10 rounded-sm border border-[#D1D5DB] bg-white px-3 text-sm">
-                {services.length === 0 && <option value="">No services added</option>}
-                {services.map((service) => <option key={service.id} value={service.id}>{service.name} - ₹{Number(service.price || 0).toLocaleString()}</option>)}
-              </select>
+              <div className="mt-2 max-h-36 overflow-y-auto rounded-sm border border-[#D1D5DB] bg-white p-2 space-y-1">
+                {services.length === 0 && <div className="text-sm text-[#6B7280] px-2 py-1">No services added</div>}
+                {services.map((service) => {
+                  const checked = manualForm.service_ids.includes(service.id);
+                  return (
+                    <label key={service.id} className={`flex items-center justify-between gap-2 px-2 py-1.5 rounded-sm border cursor-pointer ${checked ? "border-[#111827] bg-[#F9FAFB]" : "border-transparent hover:bg-[#F9FAFB]"}`}>
+                      <span className="flex items-center gap-2 text-sm">
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={(e) => {
+                            const next = e.target.checked
+                              ? [...new Set([...manualForm.service_ids, service.id])]
+                              : manualForm.service_ids.filter((sid) => sid !== service.id);
+                            setManualForm({ ...manualForm, service_ids: next, service_id: next[0] || "" });
+                          }}
+                        />
+                        <span>{service.name}</span>
+                      </span>
+                      <span className="text-sm font-semibold">₹{Number(service.price || 0).toLocaleString()}</span>
+                    </label>
+                  );
+                })}
+              </div>
             </div>
             <div><Label className="text-xs uppercase tracking-wider text-[#6B7280]">Notes</Label>
               <Textarea value={manualForm.notes} onChange={(e) => setManualForm({ ...manualForm, notes: e.target.value })} rows={3} className="rounded-sm" /></div>
