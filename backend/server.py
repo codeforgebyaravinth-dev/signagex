@@ -1842,14 +1842,43 @@ async def delete_media(mid: str, user: dict = Depends(require_role("client"))):
     return {"ok": True}
 
 @api.get("/media/serve/{mid}")
-async def serve_media(mid: str):
+async def serve_media(mid: str, request: Request):
     """Public-readable media stream — signage players read this without auth."""
     rec = await db.media.find_one({"id": mid, "is_deleted": False}, {"_id": 0})
     if not rec: raise HTTPException(status_code=404, detail="Media not found")
+
+    def _build_range_response(data: bytes, content_type: str, filename: str = ""):
+        range_header = request.headers.get("range") or request.headers.get("Range")
+        total = len(data)
+        headers = {
+            "Accept-Ranges": "bytes",
+            "Cache-Control": "public, max-age=3600",
+        }
+
+        if not range_header:
+            headers["Content-Length"] = str(total)
+            return Response(content=data, media_type=content_type, headers=headers)
+
+        match = re.match(r"bytes=(\d+)-(\d*)", range_header)
+        if not match:
+            headers["Content-Length"] = str(total)
+            return Response(content=data, media_type=content_type, headers=headers)
+
+        start = int(match.group(1))
+        end = int(match.group(2)) if match.group(2) else total - 1
+        start = max(0, min(start, total - 1))
+        end = max(start, min(end, total - 1))
+        chunk = data[start:end + 1]
+
+        headers.update({
+            "Content-Range": f"bytes {start}-{end}/{total}",
+            "Content-Length": str(len(chunk)),
+        })
+        return Response(content=chunk, status_code=206, media_type=content_type, headers=headers)
+
     try:
         data, ctype = get_object(rec["storage_path"])
-        return StreamingResponse(io.BytesIO(data), media_type=rec.get("content_type") or ctype,
-                                 headers={"Cache-Control": "public, max-age=3600"})
+        return _build_range_response(data, rec.get("content_type") or ctype)
     except HTTPException as e:
         logger.warning(f"Media serve via S3 client failed for {mid}: {e.detail}")
 
@@ -1863,11 +1892,7 @@ async def serve_media(mid: str):
         try:
             r = requests.get(public_url, timeout=15)
             if r.ok:
-                return StreamingResponse(
-                    io.BytesIO(r.content),
-                    media_type=rec.get("content_type") or r.headers.get("Content-Type", "application/octet-stream"),
-                    headers={"Cache-Control": "public, max-age=3600"},
-                )
+                return _build_range_response(r.content, rec.get("content_type") or r.headers.get("Content-Type", "application/octet-stream"))
             logger.warning(f"Media serve public URL failed for {mid}: HTTP {r.status_code}")
         except Exception as ex:
             logger.warning(f"Media serve public URL exception for {mid}: {ex}")

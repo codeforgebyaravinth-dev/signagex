@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useParams } from "react-router-dom";
+import { useParams, useNavigate } from "react-router-dom";
 import axios from "axios";
-import { Monitor, CircleSlash, Maximize, Menu, X, Eye, EyeOff, RotateCcw, RefreshCw } from "lucide-react";
-import { API_BASE } from "../lib/api";
+import { Monitor, CircleSlash, Maximize, Menu, X, Eye, EyeOff, RotateCcw, RefreshCw, Play, Smartphone, Tv, Wifi, CheckCircle, AlertCircle, ArrowRight } from "lucide-react";
+import { API_BASE } from "../../lib/api";
 
 const RAW_BASE = (process.env.REACT_APP_BACKEND_URL || "https://rpsignage.com").replace(/\/$/, "");
 const BASE = RAW_BASE.replace(/\/api$/, "");
@@ -35,6 +35,12 @@ function normalizeRotation(value) {
   if (!Number.isFinite(num)) return 0;
   const normalized = ((Math.round(num / 90) * 90) % 360 + 360) % 360;
   return [0, 90, 180, 270].includes(normalized) ? normalized : 0;
+}
+
+function getYoutubeId(url) {
+  const regex = /(?:youtube\.com\/(?:watch\?v=|shorts\/|embed\/)|youtu\.be\/)([\w-]+)/;
+  const match = url?.match(regex);
+  return match ? match[1] : null;
 }
 
 function escapeRegExp(string) {
@@ -244,7 +250,6 @@ function MediaSlot({ items, label, queuePreview, weatherData, zone, canvasWidth,
     if (!items || items.length === 0) return;
     const cur = items[idx];
     if (!cur) return;
-    // Skip timer for videos and YouTube clips - they advance through their own end handlers.
     if (cur.kind === "video") return;
     timerRef.current = setTimeout(() => setIdx((i) => (i + 1) % items.length), (cur.duration || 10) * 1000);
     return () => clearTimeout(timerRef.current);
@@ -252,7 +257,8 @@ function MediaSlot({ items, label, queuePreview, weatherData, zone, canvasWidth,
 
   useEffect(() => {
     const cur = items?.[idx];
-    if (!cur || String(cur.type || cur.kind || "").toLowerCase() !== "youtube") {
+    const youtubeId = getYoutubeId(cur?.url);
+    if (!cur || (!youtubeId && String(cur.type || cur.kind || "").toLowerCase() !== "youtube")) {
       if (youtubePlayerRef.current) {
         youtubePlayerRef.current.destroy();
         youtubePlayerRef.current = null;
@@ -268,7 +274,7 @@ function MediaSlot({ items, label, queuePreview, weatherData, zone, canvasWidth,
         youtubePlayerRef.current = null;
       }
 
-      const videoId = getYoutubeId(cur.url);
+      const videoId = youtubeId;
       if (!videoId) {
         handleMediaEnd();
         return;
@@ -276,18 +282,18 @@ function MediaSlot({ items, label, queuePreview, weatherData, zone, canvasWidth,
 
       youtubePlayerRef.current = new YT.Player(youtubeRef.current, {
         videoId,
-        host: "https://www.youtube-nocookie.com",
         playerVars: {
           autoplay: 1,
-          controls: 0,
+          controls: 1,
           modestbranding: 1,
           rel: 0,
-          fs: 0,
+          fs: 1,
           playsinline: 1,
           iv_load_policy: 3,
         },
         events: {
           onReady: (event) => {
+            event.target.mute();
             event.target.playVideo();
           },
           onStateChange: (event) => {
@@ -442,18 +448,15 @@ function MediaSlot({ items, label, queuePreview, weatherData, zone, canvasWidth,
     return `${pref}/${candidate}`;
   };
 
-  const getYoutubeId = (url) => {
-    const regex = /(?:youtube\.com\/watch\?v=|youtu\.be\/)([\w-]+)/;
-    const match = url?.match(regex);
-    return match ? match[1] : null;
-  };
+  const youtubeId = getYoutubeId(cur?.url);
+  const isYoutubeSource = Boolean(youtubeId) || String(cur.type || cur.kind || "").toLowerCase() === "youtube";
 
   const content = 
     (cur.type === "text" || cur.kind === "text") ? (
       <div className="w-full h-full flex items-center justify-center bg-black p-6 text-center overflow-hidden">
         <div className="max-w-[90%] text-white font-display text-2xl font-bold leading-tight">{cur.content || cur.text}</div>
       </div>
-    ) : (cur.type === "youtube") ? (
+    ) : isYoutubeSource ? (
       <div className="w-full h-full flex items-center justify-center bg-black overflow-hidden">
         <div ref={youtubeRef} className="w-full h-full" />
       </div>
@@ -479,6 +482,7 @@ function MediaSlot({ items, label, queuePreview, weatherData, zone, canvasWidth,
         autoPlay
         muted
         playsInline
+        controls
         className={`w-full h-full ${getMediaFit(cur, mediaMode)} object-center bg-black`}
         onEnded={handleMediaEnd}
         onError={(e) => { console.error('Media load error', resolveSrc(cur), e); handleMediaEnd(); }}
@@ -554,15 +558,13 @@ function TickerSlot({ items, label, zone, canvasWidth, canvasHeight, viewportSca
     </ResponsiveZoneShell>
   );
 }
+
 function QueueBoard({ deviceName, queuePreview, notices, zone, canvasWidth, canvasHeight, viewportScale = 1 }) {
-  // Get current token and next two tokens
   const currentToken = queuePreview?.[0] || null;
   const nextTokens = queuePreview?.slice(1, 3) || [];
 
-  // Don't show anything if no token
   if (!currentToken) return null;
 
-  // Get zone scale and boost for better visibility
   const zoneScale = getZoneScale(zone, canvasWidth, canvasHeight, false, viewportScale);
   const zoneScaleBoosted = Math.min(1.8, zoneScale * 1.6);
 
@@ -651,10 +653,8 @@ function QueueBoard({ deviceName, queuePreview, notices, zone, canvasWidth, canv
                       >
                         {token.token || "—"}
                       </div>
-                      
                       {/* Divider */}
                       <div className="w-px h-10 bg-white/40" />
-                      
                       {/* Token Info */}
                       <div className="flex-1 min-w-0">
                         <div 
@@ -670,7 +670,6 @@ function QueueBoard({ deviceName, queuePreview, notices, zone, canvasWidth, canv
                           {token.service_type || token.service_name || "QUEUE"}
                         </div>
                       </div>
-                      
                       {/* Estimated Wait */}
                       {token.wait_after_mins && (
                         <div className="text-right">
@@ -716,10 +715,9 @@ function isAutoWidgetZone(zone) {
   return /^(header|weather|bookings)$/i.test(zone?.role || "");
 }
 
-function AutoWidgetZone({ zone, queuePreview, payload, providerData, weatherData, canvasWidth, canvasHeight, viewportScale = 1, mediaMode, fillBlankSpaces = false }) {
+function AutoWidgetZone({ zone, queuePreview, payload, providerData, weatherData, canvasWidth, canvasHeight, viewportScale = 1 }) {
   const role = String(zone?.role || "").toLowerCase();
-  const preferCover = (fillBlankSpaces === true) || (mediaMode === "fill") || (mediaMode === "stretch") || /^(header|weather)$/i.test(zone?.role || "");
-  const zoneScale = getZoneScale(zone, canvasWidth, canvasHeight, preferCover, viewportScale);
+  const zoneScale = getZoneScale(zone, canvasWidth, canvasHeight, /^(header|weather)$/i.test(zone?.role || ""), viewportScale);
 
   if (role === "header") {
     return (
@@ -801,41 +799,37 @@ function AutoWidgetZone({ zone, queuePreview, payload, providerData, weatherData
                 <div className="mt-1 text-[10px] uppercase tracking-[0.35em] text-white/40">Auto refreshed</div>
               </div>
             </div>
-          </div>
-
+            </div>
             <div className="rounded-[2rem] border border-white/80 bg-white/90 shadow-[0_18px_40px_-24px_rgba(15,23,42,0.3)] p-4 md:p-5 overflow-hidden">
-            <div className="flex items-end justify-between gap-3 pb-4 border-b border-[#E2E8F0]">
-              <div>
-                <div className="text-[10px] uppercase tracking-[0.4em] text-[#94A3B8]">Queue</div>
-                <div className="mt-1 font-display text-[clamp(1.6rem,3vw,2.4rem)] font-black tracking-tight text-[#0F172A]">Today’s bookings</div>
+              <div className="flex items-end justify-between gap-3 pb-4 border-b border-[#E2E8F0]">
+                <div>
+                  <div className="text-[10px] uppercase tracking-[0.4em] text-[#94A3B8]">Queue</div>
+                  <div className="mt-1 font-display text-[clamp(1.6rem,3vw,2.4rem)] font-black tracking-tight text-[#0F172A]">Today’s bookings</div>
+                </div>
+                <div className="text-[10px] uppercase tracking-[0.35em] text-[#94A3B8]">Live board</div>
               </div>
-              <div className="text-[10px] uppercase tracking-[0.35em] text-[#94A3B8]">Live board</div>
-            </div>
-
-            <div className="mt-4 grid gap-3 overflow-hidden">
-              {entries.length === 0 ? (
-                <div className="rounded-[1.5rem] border border-dashed border-[#CBD5E1] bg-[#F8FAFC] p-5 text-sm text-[#64748B]">
-                  No bookings yet.
-                </div>
-              ) : entries.slice(0, 4).map((entry, index) => (
-                <div key={`${entry.name}-${index}`} className="rounded-[1.5rem] border border-[#E2E8F0] bg-white px-4 py-4 shadow-[0_14px_30px_-22px_rgba(15,23,42,0.25)] flex items-center justify-between gap-4">
-                  <div className="min-w-0 flex items-center gap-4">
-                    <div className="flex h-14 w-14 shrink-0 items-center justify-center rounded-[1.25rem] bg-[linear-gradient(135deg,#111827,#334155)] text-white font-display text-base font-black tracking-tight shadow-lg">
-                      {entry.token || String(entry.name || "B").slice(0, 1).toUpperCase()}
+              <div className="mt-4 grid gap-3 overflow-hidden">
+                {entries.length === 0 ? (
+                  <div className="rounded-[1.5rem] border border-dashed border-[#CBD5E1] bg-[#F8FAFC] p-5 text-sm text-[#64748B]">No bookings yet.</div>
+                ) : entries.slice(0, 4).map((entry, index) => (
+                  <div key={`${entry.name}-${index}`} className="rounded-[1.5rem] border border-[#E2E8F0] bg-white px-4 py-4 shadow-[0_14px_30px_-22px_rgba(15,23,42,0.25)] flex items-center justify-between gap-4">
+                    <div className="min-w-0 flex items-center gap-4">
+                      <div className="flex h-14 w-14 shrink-0 items-center justify-center rounded-[1.25rem] bg-[linear-gradient(135deg,#111827,#334155)] text-white font-display text-base font-black tracking-tight shadow-lg">
+                        {entry.token || String(entry.name || "B").slice(0, 1).toUpperCase()}
+                      </div>
+                      <div className="min-w-0">
+                        <div className="text-[10px] uppercase tracking-[0.32em] text-[#94A3B8]">Token {entry.token || index + 1}</div>
+                        <div className="font-semibold text-lg truncate text-[#0F172A]">{entry.name}</div>
+                        <div className="mt-1 text-sm text-[#64748B] truncate">{entry.service || "Appointment"}</div>
+                      </div>
                     </div>
-                    <div className="min-w-0">
-                      <div className="text-[10px] uppercase tracking-[0.32em] text-[#94A3B8]">Token {entry.token || index + 1}</div>
-                      <div className="font-semibold text-lg truncate text-[#0F172A]">{entry.name}</div>
-                      <div className="mt-1 text-sm text-[#64748B] truncate">{entry.service || "Appointment"}</div>
+                    <div className="text-right shrink-0">
+                      <div className="inline-flex items-center rounded-full border border-[#E2E8F0] bg-[#F8FAFC] px-3 py-1 text-[10px] uppercase tracking-[0.35em] text-[#64748B]">Scheduled</div>
+                      <div className="mt-2 font-display text-[clamp(1.4rem,2.5vw,2rem)] font-black tracking-tight text-[#0F172A]">{entry.time}</div>
                     </div>
                   </div>
-                  <div className="text-right shrink-0">
-                    <div className="inline-flex items-center rounded-full border border-[#E2E8F0] bg-[#F8FAFC] px-3 py-1 text-[10px] uppercase tracking-[0.35em] text-[#64748B]">Scheduled</div>
-                    <div className="mt-2 font-display text-[clamp(1.4rem,2.5vw,2rem)] font-black tracking-tight text-[#0F172A]">{entry.time}</div>
-                  </div>
-                </div>
-              ))}
-            </div>
+                ))}
+              </div>
             </div>
           </div>
         </div>
@@ -857,8 +851,6 @@ function getZoneScale(zone, canvasWidth, canvasHeight, preferCover = false, view
   const baseHeight = Number(canvasHeight) || 1080;
   const widthScale = zoneWidth / baseWidth;
   const heightScale = zoneHeight / baseHeight;
-  // preferCover: use cover (fill) scaling so the component fills the zone.
-  // Otherwise use contain scaling to avoid overflowing content.
   const rawScale = preferCover
     ? Math.max(widthScale, heightScale) * 0.98
     : Math.min(widthScale, heightScale) * 0.94;
@@ -886,8 +878,226 @@ function ResponsiveZoneShell({ scale = 1, className = "", children }) {
   );
 }
 
+// Splash Screen Component
+function ModernSplashScreen({ onComplete }) {
+  const [progress, setProgress] = useState(0);
+  const [dots, setDots] = useState("");
+  
+  useEffect(() => {
+    // Animated dots for loading text
+    const interval = setInterval(() => {
+      setDots(prev => prev.length >= 3 ? "" : prev + ".");
+    }, 500);
+    
+    // Simulate loading progress
+    const timer = setTimeout(() => {
+      onComplete();
+    }, 2500);
+    
+    const progressInterval = setInterval(() => {
+      setProgress(prev => Math.min(prev + 2, 100));
+    }, 50);
+    
+    return () => {
+      clearInterval(interval);
+      clearTimeout(timer);
+      clearInterval(progressInterval);
+    };
+  }, [onComplete]);
+  
+  return (
+    <div className="fixed inset-0 z-[100] bg-gradient-to-br from-purple-900 via-pink-800 to-orange-700 flex items-center justify-center overflow-hidden">
+      {/* Animated background elements */}
+      <div className="absolute inset-0 overflow-hidden">
+        <div className="absolute -top-40 -right-40 w-80 h-80 bg-white/10 rounded-full blur-3xl animate-pulse" />
+        <div className="absolute -bottom-40 -left-40 w-80 h-80 bg-white/10 rounded-full blur-3xl animate-pulse delay-1000" />
+        <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-96 h-96 bg-white/5 rounded-full blur-3xl animate-ping" />
+      </div>
+      
+      {/* Main content */}
+      <div className="relative z-10 text-center">
+        {/* Logo animation */}
+        <div className="mb-8 animate-bounce">
+          <div className="text-8xl md:text-9xl font-black text-white tracking-tighter animate-pulse">
+            RP
+          </div>
+          <div className="text-sm text-white/70 uppercase tracking-[0.5em] mt-2">
+            SIGNAGE
+          </div>
+        </div>
+        
+        {/* Loading bar */}
+        <div className="w-64 md:w-96 h-1 bg-white/20 rounded-full overflow-hidden mb-4">
+          <div 
+            className="h-full bg-white rounded-full transition-all duration-100 ease-out"
+            style={{ width: `${progress}%` }}
+          />
+        </div>
+        
+        {/* Loading text */}
+        <div className="text-white/60 text-xs uppercase tracking-wider">
+          Loading{dots}
+        </div>
+        
+        {/* Feature tags */}
+        <div className="flex flex-wrap justify-center gap-3 mt-8">
+          <div className="flex items-center gap-2 bg-white/10 backdrop-blur-sm px-3 py-1.5 rounded-full">
+            <Smartphone className="w-3 h-3 text-white/60" />
+            <span className="text-[10px] text-white/60 uppercase">Multi-Device</span>
+          </div>
+          <div className="flex items-center gap-2 bg-white/10 backdrop-blur-sm px-3 py-1.5 rounded-full">
+            <Tv className="w-3 h-3 text-white/60" />
+            <span className="text-[10px] text-white/60 uppercase">4K Ready</span>
+          </div>
+          <div className="flex items-center gap-2 bg-white/10 backdrop-blur-sm px-3 py-1.5 rounded-full">
+            <Wifi className="w-3 h-3 text-white/60" />
+            <span className="text-[10px] text-white/60 uppercase">Cloud Sync</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Pairing Screen Component
+function PairingScreen({ onPair, error: externalError }) {
+  const [pairCode, setPairCode] = useState("");
+  const [isLoading, setIsLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [isConnecting, setIsConnecting] = useState(false);
+  
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    if (!pairCode.trim()) {
+      setError("Please enter a pairing code");
+      return;
+    }
+    
+    setIsLoading(true);
+    setIsConnecting(true);
+    setError("");
+    
+    // Simulate connection check
+    setTimeout(() => {
+      setIsLoading(false);
+      onPair(pairCode.trim().toUpperCase());
+    }, 1500);
+  };
+  
+  return (
+    <div className="fixed inset-0 z-[100] bg-gradient-to-br from-gray-900 via-purple-900 to-gray-900 flex items-center justify-center overflow-hidden">
+      {/* Animated background */}
+      <div className="absolute inset-0">
+        <div className="absolute top-0 left-0 w-full h-full bg-[url('data:image/svg+xml,%3Csvg%20width%3D%2260%22%20height%3D%2260%22%20viewBox%3D%220%200%2060%2060%22%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%3E%3Cg%20fill%3D%22none%22%20fill-rule%3D%22evenodd%22%3E%3Cg%20fill%3D%22%239C92AC%22%20fill-opacity%3D%220.05%22%3E%3Cpath%20d%3D%22M36%2034v-4h-2v4h-4v2h4v4h2v-4h4v-2h-4zm0-30V0h-2v4h-4v2h4v4h2V6h4V4h-4zM6%2034v-4H4v4H0v2h4v4h2v-4h4v-2H6zM6%204V0H4v4H0v2h4v4h2V6h4V4H6z%22%2F%3E%3C%2Fg%3E%3C%2Fg%3E%3C%2Fsvg%3E')] opacity-20" />
+      </div>
+      
+      {/* Floating orbs */}
+      <div className="absolute top-20 left-10 w-64 h-64 bg-purple-500/20 rounded-full blur-3xl animate-pulse" />
+      <div className="absolute bottom-20 right-10 w-64 h-64 bg-pink-500/20 rounded-full blur-3xl animate-pulse delay-1000" />
+      
+      {/* Card */}
+      <div className="relative z-10 w-full max-w-md mx-4">
+        <div className="bg-white/10 backdrop-blur-xl rounded-2xl border border-white/20 shadow-2xl p-8">
+          {/* Logo */}
+          <div className="text-center mb-8">
+            <div className="text-5xl font-black text-white mb-2">RP</div>
+            <div className="text-xs text-white/50 uppercase tracking-[0.3em]">Signage Player</div>
+            <div className="h-px w-12 bg-gradient-to-r from-transparent via-white/30 to-transparent mx-auto mt-4" />
+          </div>
+          
+          {/* Title */}
+          <div className="text-center mb-6">
+            <h2 className="text-2xl font-bold text-white mb-2">Pair Your Device</h2>
+            <p className="text-white/50 text-sm">
+              Enter the pairing code from your client dashboard to start displaying content
+            </p>
+          </div>
+          
+          {/* Form */}
+          <form onSubmit={handleSubmit} className="space-y-6">
+            <div>
+              <label className="block text-white/70 text-sm font-medium mb-2">
+                Pairing Code
+              </label>
+              <input
+                type="text"
+                value={pairCode}
+                onChange={(e) => {
+                  setPairCode(e.target.value.toUpperCase());
+                  setError("");
+                }}
+                placeholder="e.g., ABC123"
+                className="w-full bg-white/10 border border-white/20 rounded-xl px-4 py-3 text-white text-center text-2xl font-mono tracking-wider focus:outline-none focus:border-cyan-400/50 focus:ring-2 focus:ring-cyan-400/20 transition-all"
+                autoFocus
+                maxLength={10}
+              />
+              <p className="text-white/30 text-xs mt-2 text-center">
+                Find this code in your client portal under "Devices"
+              </p>
+            </div>
+            
+            {(error || externalError) && (
+              <div className="bg-red-500/20 border border-red-500/30 rounded-xl p-3 flex items-center gap-2">
+                <AlertCircle className="w-4 h-4 text-red-400" />
+                <p className="text-red-400 text-sm">{error || externalError}</p>
+              </div>
+            )}
+            
+            {isConnecting && (
+              <div className="bg-cyan-500/20 border border-cyan-500/30 rounded-xl p-3 flex items-center gap-2">
+                <div className="w-4 h-4 border-2 border-cyan-400 border-t-transparent rounded-full animate-spin" />
+                <p className="text-cyan-400 text-sm">Connecting to server...</p>
+              </div>
+            )}
+            
+            <button
+              type="submit"
+              disabled={isLoading}
+              className={`w-full bg-gradient-to-r from-purple-500 to-pink-500 hover:from-purple-600 hover:to-pink-600 text-white font-semibold py-3 px-4 rounded-xl transition-all duration-200 flex items-center justify-center gap-2 ${
+                isLoading ? "opacity-70 cursor-not-allowed" : ""
+              }`}
+            >
+              {isLoading ? (
+                <>
+                  <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                  Connecting...
+                </>
+              ) : (
+                <>
+                  Connect Now
+                  <ArrowRight className="w-4 h-4" />
+                </>
+              )}
+            </button>
+          </form>
+          
+          {/* Help text */}
+          <div className="mt-6 text-center">
+            <p className="text-white/30 text-xs">
+              Need help? Contact your system administrator
+            </p>
+          </div>
+        </div>
+        
+        {/* Footer */}
+        <div className="text-center mt-6">
+          <p className="text-white/20 text-[10px] uppercase tracking-wider">
+            Secure connection • End-to-end encrypted
+          </p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function SignagePlayer() {
-  const { pairCode } = useParams();
+  const { pairCode: urlPairCode } = useParams();
+  const navigate = useNavigate();
+  const [showSplash, setShowSplash] = useState(true);
+  const [showPairing, setShowPairing] = useState(!urlPairCode);
+  const [currentPairCode, setCurrentPairCode] = useState(urlPairCode || null);
+  const [pairingError, setPairingError] = useState("");
+  
   const [payload, setPayload] = useState(null);
   const [providerData, setProviderData] = useState(null);
   const [liveWeather, setLiveWeather] = useState(null);
@@ -895,8 +1105,12 @@ export default function SignagePlayer() {
   const [err, setErr] = useState("");
   const lastGreetSpokenRef = useRef(0);
   const wrapRef = useRef(null);
+  // Container refs for absolute layout measurements
+  const absoluteContainerRef = useRef(null);
+  const zoneRefs = useRef({});
+  const [zoneInspections, setZoneInspections] = useState({});
   const recogRef = useRef(null);
-  const [overlay, setOverlay] = useState(null); // single: {title,image,description,meta,type} | multi: {title,type,items[]}
+  const [overlay, setOverlay] = useState(null);
   const overlayTimer = useRef(null);
   const overlayKeyRef = useRef("");
   const genericProductCursorRef = useRef(0);
@@ -904,7 +1118,6 @@ export default function SignagePlayer() {
   const [voiceError, setVoiceError] = useState("");
   const [voiceTranscript, setVoiceTranscript] = useState("");
   const voiceGreetingPlayedRef = useRef(false);
-  const [showSplash, setShowSplash] = useState(true);
   const [menuOpen, setMenuOpen] = useState(false);
   const [orientationOverride, setOrientationOverride] = useState("auto");
   const [hiddenZoneIds, setHiddenZoneIds] = useState([]);
@@ -920,8 +1133,8 @@ export default function SignagePlayer() {
   // Feature flag: set to false to completely disable voice features
   const ENABLE_VOICE = false;
 
-  const zonePrefsKey = useMemo(() => `signage-player-zone-prefs:${pairCode || "default"}`, [pairCode]);
-  const orientationPrefsKey = useMemo(() => `signage-player-orientation:${pairCode || "default"}`, [pairCode]);
+  const zonePrefsKey = useMemo(() => `signage-player-zone-prefs:${currentPairCode || "default"}`, [currentPairCode]);
+  const orientationPrefsKey = useMemo(() => `signage-player-orientation:${currentPairCode || "default"}`, [currentPairCode]);
 
   const toggleZoneVisibility = useCallback((zoneId) => {
     setHiddenZoneIds((current) => (
@@ -958,6 +1171,15 @@ export default function SignagePlayer() {
     setOrientationOverride(["auto", "landscape", "portrait"].includes(mode) ? mode : "auto");
   }, []);
 
+  // Handle pairing
+  const handlePair = (code) => {
+    setCurrentPairCode(code);
+    setShowPairing(false);
+    // Update URL without reload
+    // Navigate to the player route so the app URL matches the player entry
+    navigate(`/play/${code}`, { replace: true });
+  };
+
   useEffect(() => {
     if (typeof window === "undefined") return;
     const updateViewport = () => {
@@ -969,32 +1191,36 @@ export default function SignagePlayer() {
   }, []);
 
   const poll = useCallback(async () => {
+    if (!currentPairCode) return;
     try {
-      const { data } = await axios.get(`${BASE}/api/public/player/${pairCode}`);
+      const { data } = await axios.get(`${BASE}/api/public/player/${currentPairCode}`);
       setPayload(data);
       try { console.debug("player-payload", data); } catch (e) {}
       setErr("");
+      setPairingError("");
     } catch (e) {
-      setErr(e.response?.data?.detail || "Could not load");
+      if (e.response?.status === 404) {
+        setPairingError("Invalid pairing code. Please check and try again.");
+        setShowPairing(true);
+        setCurrentPairCode(null);
+      } else {
+        setErr(e.response?.data?.detail || "Could not load");
+      }
     }
-  }, [pairCode]);
+  }, [currentPairCode]);
 
   useEffect(() => {
-    poll();
-    const id = setInterval(poll, 60_000);
-    return () => clearInterval(id);
-  }, [poll]);
+    if (currentPairCode && !showPairing && !showSplash) {
+      poll();
+      const id = setInterval(poll, 60_000);
+      return () => clearInterval(id);
+    }
+  }, [poll, currentPairCode, showPairing, showSplash]);
 
-  // hide splash when initial payload has arrived (keep min display time)
+  // Load preferences after pairing
   useEffect(() => {
-    if (!showSplash) return;
-    if (!payload) return;
-    const minMs = 700;
-    const t = setTimeout(() => setShowSplash(false), minMs);
-    return () => clearTimeout(t);
-  }, [payload, showSplash]);
-
-  useEffect(() => {
+    if (!currentPairCode || showPairing || showSplash) return;
+    
     try {
       const raw = window.localStorage.getItem(zonePrefsKey);
       if (!raw) return;
@@ -1004,99 +1230,36 @@ export default function SignagePlayer() {
       if (typeof parsed?.customPlacementEnabled === "boolean") setCustomPlacementEnabled(parsed.customPlacementEnabled);
       if (parsed?.zonePlacements && typeof parsed.zonePlacements === "object") setZonePlacements(parsed.zonePlacements);
       if (parsed?.zoneMediaModes && typeof parsed.zoneMediaModes === "object") setZoneMediaModes(parsed.zoneMediaModes);
-    } catch {
-      // Ignore malformed local preferences.
-    }
-  }, [zonePrefsKey]);
+    } catch {}
+  }, [zonePrefsKey, currentPairCode, showPairing, showSplash]);
 
   useEffect(() => {
+    if (!currentPairCode || showPairing || showSplash) return;
     try {
       const raw = window.localStorage.getItem(orientationPrefsKey);
       if (!raw) return;
       const parsed = String(raw || "").toLowerCase();
       if (["auto", "landscape", "portrait"].includes(parsed)) setOrientationOverride(parsed);
-    } catch {
-      // Ignore malformed local preferences.
-    }
-  }, [orientationPrefsKey]);
+    } catch {}
+  }, [orientationPrefsKey, currentPairCode, showPairing, showSplash]);
 
   useEffect(() => {
+    if (!currentPairCode || showPairing || showSplash) return;
     try {
       window.localStorage.setItem(zonePrefsKey, JSON.stringify({ hiddenZoneIds, fillBlankSpaces, customPlacementEnabled, zonePlacements, zoneMediaModes }));
-    } catch {
-      // Ignore storage failures in restricted webviews.
-    }
-  }, [zonePrefsKey, hiddenZoneIds, fillBlankSpaces, customPlacementEnabled, zonePlacements, zoneMediaModes]);
+    } catch {}
+  }, [zonePrefsKey, hiddenZoneIds, fillBlankSpaces, customPlacementEnabled, zonePlacements, zoneMediaModes, currentPairCode, showPairing, showSplash]);
 
   useEffect(() => {
+    if (!currentPairCode || showPairing || showSplash) return;
     try {
       window.localStorage.setItem(orientationPrefsKey, orientationOverride);
-    } catch {
-      // Ignore storage failures in restricted webviews.
-    }
-  }, [orientationOverride, orientationPrefsKey]);
+    } catch {}
+  }, [orientationOverride, orientationPrefsKey, currentPairCode, showPairing, showSplash]);
 
-  // debug overlays
-  const debugZones = typeof window !== "undefined" && window.location.search.includes("debug_zones");
-  const inspectZones = typeof window !== "undefined" && window.location.search.includes("inspect_zones");
-  const absoluteContainerRef = useRef(null);
-  const zoneRefs = useRef({});
-  const [zoneInspections, setZoneInspections] = useState({});
-
+  // Fetch provider data
   useEffect(() => {
-    if (!inspectZones) return;
-    let mounted = true;
-    const measure = () => {
-      const container = absoluteContainerRef.current || wrapRef.current;
-      if (!container) return;
-      const cb = container.getBoundingClientRect();
-      const cw = container.clientWidth || Math.max(1, cb.width);
-      const ch = container.clientHeight || Math.max(1, cb.height);
-      // On quarter-turn rotations, rendered axes are swapped.
-      const renderWidth = rotatedQuarterTurn ? ch : cw;
-      const renderHeight = rotatedQuarterTurn ? cw : ch;
-      const next = {};
-      Object.keys(zoneRefs.current || {}).forEach((id) => {
-        try {
-          const el = zoneRefs.current[id];
-          if (!el) return;
-          const r = el.getBoundingClientRect();
-
-          // find zone definition to compute expected size from configured px values
-          const entry = zoneEntries.find((ze) => (ze.zone?.id || String(ze.zone)) === id);
-          const cfgWpx = Number(entry?.zone?.width_px ?? canvasWidth) || canvasWidth || 1920;
-          const cfgHpx = Number(entry?.zone?.height_px ?? canvasHeight) || canvasHeight || 1080;
-
-          const expectedW = Math.round((cfgWpx / (canvasWidth || 1)) * renderWidth);
-          const expectedH = Math.round((cfgHpx / (canvasHeight || 1)) * renderHeight);
-
-          next[id] = {
-            width: Math.round(r.width),
-            height: Math.round(r.height),
-            expectedWidth: expectedW,
-            expectedHeight: expectedH,
-            left: Math.round(r.left - cb.left),
-            top: Math.round(r.top - cb.top),
-          };
-        } catch (e) {
-          // ignore per-zone failures
-        }
-      });
-      if (mounted) setZoneInspections(next);
-    };
-
-    measure();
-    const ro = new ResizeObserver(measure);
-    const container = absoluteContainerRef.current || wrapRef.current;
-    if (container) ro.observe(container);
-    const id = setInterval(measure, 900);
-    window.addEventListener("resize", measure);
-    return () => { mounted = false; try { ro.disconnect(); } catch {} clearInterval(id); window.removeEventListener("resize", measure); };
-  }, [inspectZones, payload]);
-
-  // fetch vertical-specific public data (products/services/queue/notices/rooms)
-  useEffect(() => {
-    if (!payload?.client_id) return;
+    if (!payload?.client_id || !currentPairCode || showPairing || showSplash) return;
     let mounted = true;
 
     const loadProvider = async () => {
@@ -1114,35 +1277,17 @@ export default function SignagePlayer() {
       mounted = false;
       clearInterval(id);
     };
-  }, [payload?.client_id]);
+  }, [payload?.client_id, currentPairCode, showPairing, showSplash]);
 
-  // show subscription-required overlay if provider subscription inactive
+  // Voice recognition
   useEffect(() => {
-    if (!providerData) return;
-    try {
-      const sub = providerData.subscription;
-      if (sub && sub.active === false) {
-        if (!overlayKeyRef.current) {
-          setOverlay({ title: "Subscription required", description: "This signage requires an active subscription to run.", type: "subscription_required", takeover: true });
-          overlayKeyRef.current = "subscription_required";
-        }
-      } else {
-        if (overlayKeyRef.current === "subscription_required") {
-          overlayKeyRef.current = "";
-          setOverlay(null);
-        }
-      }
-    } catch (e) {}
-  }, [providerData]);
-
-  // continuous voice listening and matching across verticals
-  useEffect(() => {
-    if (typeof window === "undefined") return;
+    if (!currentPairCode || showPairing || showSplash) return;
     if (!ENABLE_VOICE) {
       setVoiceState("disabled");
       setVoiceError("");
       return;
     }
+    if (typeof window === "undefined") return;
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SpeechRecognition) {
       setVoiceState("unsupported");
@@ -1168,7 +1313,6 @@ export default function SignagePlayer() {
       const source = providerData || payload || {};
       const catalog = [];
       try {
-        // products — include tag/keyword support for better matching
         if (source?.products && Array.isArray(source.products)) {
           for (const p of source.products) {
             const rawTags = Array.isArray(p.tags) ? p.tags : (p.tags ? String(p.tags).split(/[,;|]/).map((t) => t.trim()) : []);
@@ -1178,7 +1322,6 @@ export default function SignagePlayer() {
             catalog.push({ type: "product", id: p.id, name: nameNorm, image: p.image_url || "", desc: p.description || "", meta: p, tags, keywords });
           }
         }
-        // services
         if (source?.profile?.services && Array.isArray(source.profile.services)) {
           for (const s of source.profile.services) {
             const rawTags = Array.isArray(s.tags) ? s.tags : (s.tags ? String(s.tags).split(/[,;|]/).map((t) => t.trim()) : []);
@@ -1188,10 +1331,8 @@ export default function SignagePlayer() {
             catalog.push({ type: "service", id: s.id, name: nameNorm, image: s.image_url || "", desc: s.description || "", meta: s, tags, keywords });
           }
         }
-        // provider name and specialty
         if (source?.name) catalog.push({ type: "provider", id: source.id || "provider", name: normalize(source.name || ""), image: source.profile?.image_url || "", desc: source.profile?.description || "", meta: source });
         if (source?.profile?.specialty) catalog.push({ type: "provider_keyword", id: `spec-${source.id || ''}`, name: normalize(source.profile.specialty || ""), image: source.profile.image_url || "", desc: source.profile.description || "", meta: source.profile });
-        // media names
         if (payload?.zones) {
           for (const k of Object.keys(payload.zones || {})) {
             for (const it of payload.zones[k] || []) {
@@ -1199,7 +1340,6 @@ export default function SignagePlayer() {
             }
           }
         }
-        // society rooms & notices
         if (source?.rooms && Array.isArray(source.rooms)) {
           for (const r of source.rooms) {
             const resident = normalize(r.user_name || "");
@@ -1211,14 +1351,11 @@ export default function SignagePlayer() {
         if (source?.notices && Array.isArray(source.notices)) {
           for (const n of source.notices) catalog.push({ type: "notice", id: n.id, name: normalize(n.title || n.body || ""), image: n.image_url || "", desc: n.body || n.title || "", meta: n });
         }
-      } catch (e) {
-        // ignore
-      }
+      } catch (e) {}
 
       const normTranscript = normalize(transcript);
-
       const productCatalog = catalog.filter((c) => c.type === "product");
-      // If user greets the player (hello/hi), respond via TTS and show a small product group
+      
       try {
         const greetingRE = /\b(hello|hi|hey)\b/i;
         const isGreeting = greetingRE.test(normTranscript);
@@ -1232,7 +1369,6 @@ export default function SignagePlayer() {
               window.speechSynthesis.speak(u);
             }
           } catch (e) {}
-          // show up to 5 products (rotate cursor)
           const start = genericProductCursorRef.current % productCatalog.length;
           const count = Math.min(5, productCatalog.length);
           const items = new Array(count).fill(0).map((_, i) => {
@@ -1248,6 +1384,7 @@ export default function SignagePlayer() {
           return;
         }
       } catch (e) {}
+      
       const queryTerms = normTranscript
         .split(/\s+/)
         .map((w) => w.trim())
@@ -1262,7 +1399,6 @@ export default function SignagePlayer() {
       });
       const wantsCollection = groupedProducts.length > 0 && /\b(show|shows|all|list|display|browse)\b/.test(normTranscript);
 
-      // If the user said a category (like "maxi") and multiple products match, show the full product group takeover.
       if (groupedProducts.length > 1 && queryTerms.length > 0) {
         const qtSet = new Set(queryTerms.map((q) => singular(q)));
         const groupMatch = groupedProducts.filter((p) => {
@@ -1281,30 +1417,22 @@ export default function SignagePlayer() {
         }
       }
 
-      // Scored matching with word-boundary checks and fuzzy fallback to avoid accidental substring matches (eg A 01 vs A 201)
       const scored = catalog.map((c) => {
         const n = (c.name || "").toLowerCase();
         let score = 0;
         if (n && normTranscript === n) score += 200;
         if (n && wordBoundaryIncludes(normTranscript, n)) score += 120;
-        // boost resident name exact matches strongly
         if (c.type === "room_resident" && c.name && wordBoundaryIncludes(normTranscript, (c.name || "").toLowerCase())) score += 220;
-        // normalize room numbers and prefer exact normalized match (A01 vs A201)
         if (c.type === "room_no") {
           const normRoom = normalizeRoomToken(c.name || "");
           const normTranscriptToken = normalizeRoomToken(normTranscript);
           if (normRoom && normTranscriptToken && normRoom === normTranscriptToken) score += 240;
-          // if transcript contains the room token as word-boundary
           if (normRoom && normTranscriptToken && normTranscript.includes((c.name || "").toLowerCase())) score += 80;
         }
-        // product-specific boosts to avoid mis-mapping
         if (c.type === "product") {
-          // exact name
           if (n && normTranscript === n) score += 220;
-          // sku exact match if available
           const sku = (c.meta?.sku || "").toLowerCase();
           if (sku && normTranscript.includes(sku)) score += 300;
-          // tag matches
           const tagMatches = (c.tags || []).reduce((s, t) => s + (wordBoundaryIncludes(normTranscript, normalize(t)) ? 1 : 0), 0);
           score += tagMatches * 40;
         }
@@ -1320,16 +1448,13 @@ export default function SignagePlayer() {
 
       const best = scored[0];
       let match = best && best.score > 40 ? best.item : null;
-      // require a slightly stronger score for product matches to avoid accidental cross-products
       if (match && match.type === "product" && best.score < 55) {
         match = null;
       }
-      // If top two product matches have close scores, show a product group overlay instead of picking one
       const second = scored[1];
       if (best && second && best.item && second.item && best.item.type === "product" && second.item.type === "product") {
         const scoreDelta = (best.score || 0) - (second.score || 0);
         if (scoreDelta < 40) {
-          // collect top similar product items
           const topProducts = scored.filter(s => s.item && s.item.type === "product" && s.score > 30).slice(0, 6).map(s => s.item);
           if (topProducts.length > 1) {
             const items = topProducts.map((p) => ({ id: p.id, name: p.meta?.name || p.name, image: p.image || p.meta?.image_url || "", description: p.desc || p.meta?.description || "", price: p.meta?.price }));
@@ -1345,7 +1470,6 @@ export default function SignagePlayer() {
         }
       }
 
-      // debug information for voice matching
       try {
         console.debug("voice-debug", {
           transcript: normTranscript,
@@ -1361,7 +1485,6 @@ export default function SignagePlayer() {
 
       const genericProductRequest = /\b(product|products|item|items|catalog|collection)\b/.test(normTranscript) && /\b(show|any|next|another|browse)\b/.test(normTranscript);
 
-      // If user asked to show a collection or used a category/tag term, show up to 5 related products
       if (!match && (wantsCollection || (genericProductRequest && groupedProducts.length > 0))) {
         const items = groupedProducts.slice(0, 5).map((p) => ({
           id: p.id,
@@ -1379,7 +1502,6 @@ export default function SignagePlayer() {
         return;
       }
 
-      // For generic requests with no category, rotate and show 5 products
       if (!match && genericProductRequest && productCatalog.length > 0) {
         const start = genericProductCursorRef.current % productCatalog.length;
         const count = Math.min(5, productCatalog.length);
@@ -1402,12 +1524,10 @@ export default function SignagePlayer() {
 
       if (resolved) {
         const resolvedKey = `${resolved.type || "item"}:${resolved.id || resolved.meta?.id || resolved.name || ""}`;
-        // Ignore repeated detections of the same item while overlay is visible.
         if (overlayKeyRef.current && overlayKeyRef.current === resolvedKey) {
           return;
         }
 
-        // prepare overlay content depending on type
         let title = resolved.meta?.name || resolved.meta?.user_name || resolved.meta?.title || resolved.name || "";
         let image = resolved.image || resolved.meta?.image_url || resolved.meta?.public_url || "";
         let desc = resolved.desc || "";
@@ -1429,7 +1549,6 @@ export default function SignagePlayer() {
           setOverlay(null);
         }, 30_000);
         try {
-          // speak owner/room name for accessibility and convenience
           if (typeof window !== "undefined" && window.speechSynthesis) {
             const spokenKey = `spoken:${resolvedKey}`;
             if (!window[spokenKey]) {
@@ -1443,7 +1562,6 @@ export default function SignagePlayer() {
                 window.speechSynthesis.cancel();
                 window.speechSynthesis.speak(u);
                 window[spokenKey] = true;
-                // clear spoken flag after overlay timeout
                 setTimeout(() => { try { window[spokenKey] = false; } catch (e) {} }, 31000);
               }
             }
@@ -1465,9 +1583,7 @@ export default function SignagePlayer() {
           window.speechSynthesis.speak(utter);
           voiceGreetingPlayedRef.current = true;
         }
-      } catch (e) {
-        // ignore TTS failures (browser restrictions)
-      }
+      } catch (e) {}
     };
     recognition.onerror = (event) => {
       setVoiceState("error");
@@ -1490,7 +1606,7 @@ export default function SignagePlayer() {
     return () => {
       try { recognition.onend = null; recognition.onstart = null; recognition.onerror = null; recognition.stop(); } catch (e) {}
     };
-  }, [payload, providerData]);
+  }, [ENABLE_VOICE, payload, providerData, currentPairCode, showPairing, showSplash]);
 
   const goFullscreen = () => {
     const el = wrapRef.current;
@@ -1586,8 +1702,9 @@ export default function SignagePlayer() {
   const hasCustomPlacements = customPlacementEnabled && Object.keys(zonePlacements || {}).length > 0;
   const renderAsAbsolute = hasAbsoluteLayout || hasCustomPlacements;
 
+  // Weather initialization
   useEffect(() => {
-    if (!hasWeatherZone) return;
+    if (!hasWeatherZone || !currentPairCode || showPairing || showSplash) return;
     if (payload?.weather || providerData?.weather || liveWeather) return;
     if (weatherState === "denied" || weatherState === "error") return;
     if (typeof window === "undefined" || !navigator.geolocation) {
@@ -1620,37 +1737,40 @@ export default function SignagePlayer() {
     return () => {
       cancelled = true;
     };
-  }, [hasWeatherZone, liveWeather, payload?.weather, providerData?.weather, weatherState]);
+  }, [hasWeatherZone, liveWeather, payload?.weather, providerData?.weather, weatherState, currentPairCode, showPairing, showSplash]);
 
+  // Show splash screen first
+  if (showSplash) {
+    return <ModernSplashScreen onComplete={() => setShowSplash(false)} />;
+  }
+  
+  // Show pairing screen if no pair code
+  if (showPairing) {
+    return <PairingScreen onPair={handlePair} error={pairingError} />;
+  }
+
+  // Error state
   if (err) {
     return (
       <div className="min-h-screen bg-black text-white flex items-center justify-center">
         <div className="text-center">
           <CircleSlash className="w-12 h-12 text-white/40 mx-auto mb-3" />
           <div className="text-[11px] uppercase tracking-[0.25em] text-white/40 mb-2">Pair code</div>
-          <div className="font-mono text-xl mb-3">{pairCode}</div>
+          <div className="font-mono text-xl mb-3">{currentPairCode}</div>
           <h1 className="font-display text-2xl font-extrabold tracking-tight">{err}</h1>
-        </div>
-      </div>
-    );
-  }
-
-  if (showSplash) {
-    return (
-      <div className="min-h-screen bg-black flex items-center justify-center">
-        <div className="text-center">
-          <div className="mb-6">
-            <div className="text-6xl font-extrabold text-white">RP</div>
-            <div className="text-sm text-white/60 uppercase tracking-widest mt-1">Signage</div>
-          </div>
-          <div className="text-white/50">Loading content…</div>
+          <button
+            onClick={() => setShowPairing(true)}
+            className="mt-6 px-4 py-2 bg-white/10 rounded-lg text-sm hover:bg-white/20 transition"
+          >
+            Re-pair Device
+          </button>
         </div>
       </div>
     );
   }
 
   const shouldCompactLayout = fillBlankSpaces && hiddenZoneIds.length > 0;
-  const zoneEntries = visibleZoneDefs.map((zone) => ({ zone, items: payload.zones?.[zone.id] || [] }));
+  const zoneEntries = visibleZoneDefs.map((zone) => ({ zone, items: payload?.zones?.[zone.id] || [] }));
   const hasContent = zoneEntries.some(({ items }) => items.length > 0);
   const queuePreview = Array.isArray(providerData?.queue_preview)
     ? providerData.queue_preview
@@ -1680,14 +1800,6 @@ export default function SignagePlayer() {
 
   return (
     <div ref={wrapRef} className="min-h-screen bg-black text-white flex flex-col" data-testid="signage-player">
-      {voiceError ? (
-        <div className="px-4 py-2 border-b border-white/10 bg-red-500/10 text-[11px] text-red-200 font-mono uppercase tracking-wider">
-          {voiceError}
-        </div>
-      ) : null}
-
-      {voiceTranscript ? null : null}
-
       <div className="flex-1 relative min-h-0 bg-black overflow-hidden">
         <div className={`absolute ${effectiveOrientation === "portrait" ? "" : "inset-0"}`} style={contentStyle}>
           {overlay ? (
@@ -1760,8 +1872,14 @@ export default function SignagePlayer() {
             <div className="w-full h-full flex items-center justify-center">
               <div className="text-center max-w-md p-8">
                 <div className="text-[10px] uppercase tracking-[0.25em] text-white/40 mb-3">No content scheduled</div>
-                <h1 className="font-display text-3xl font-extrabold tracking-tighter mb-3">{payload.device_name}</h1>
+                <h1 className="font-display text-3xl font-extrabold tracking-tighter mb-3">{payload?.device_name || "Digital Signage"}</h1>
                 <p className="text-sm text-white/60">Ask your client account to upload media, build a playlist, and schedule it for this device.</p>
+                <button
+                  onClick={() => setShowPairing(true)}
+                  className="mt-6 px-4 py-2 bg-white/10 rounded-lg text-sm hover:bg-white/20 transition"
+                >
+                  Change Device
+                </button>
               </div>
             </div>
           ) : (renderAsAbsolute && !shouldCompactLayout ? (
@@ -1811,26 +1929,15 @@ export default function SignagePlayer() {
                       style={{ left: `${left}%`, top: `${top}%`, width: `${width}%`, height: `${height}%`, zIndex: zoneZIndex }}
                     >
                       {queueZone && items.length === 0 ? (
-                        <QueueBoard deviceName={payload.device_name} queuePreview={queuePreview} notices={notices} zone={zone} canvasWidth={canvasWidth} canvasHeight={canvasHeight} viewportScale={viewportScale} />
+                        <QueueBoard deviceName={payload?.device_name} queuePreview={queuePreview} notices={notices} zone={zone} canvasWidth={canvasWidth} canvasHeight={canvasHeight} viewportScale={viewportScale} />
                       ) : autoWidgetZone && items.length === 0 ? (
-                        <AutoWidgetZone
-                          zone={zone}
-                          queuePreview={queuePreview}
-                          payload={payload}
-                          providerData={providerData}
-                          weatherData={weatherData}
-                          canvasWidth={canvasWidth}
-                          canvasHeight={canvasHeight}
-                          viewportScale={viewportScale}
-                          mediaMode={zoneMediaModes?.[zone.id] || getDefaultZoneMediaMode(zone)}
-                          fillBlankSpaces={fillBlankSpaces}
-                        />
+                        <AutoWidgetZone zone={zone} queuePreview={queuePreview} payload={payload} providerData={providerData} weatherData={weatherData} canvasWidth={canvasWidth} canvasHeight={canvasHeight} viewportScale={viewportScale} />
                       ) : isTickerZone ? (
                         <TickerSlot items={items} label={zone.name} zone={zone} canvasWidth={canvasWidth} canvasHeight={canvasHeight} viewportScale={viewportScale} />
                       ) : logoZone && items.length === 0 && clientLogoUrl ? (
                         <div className="w-full h-full flex items-center justify-center bg-black p-4">
                           <div className="w-full h-full rounded-[1.5rem] border border-white/10 bg-white/5 flex items-center justify-center overflow-hidden">
-                            <img src={clientLogoUrl} alt={`${payload.device_name || "client"} logo`} className="max-h-[75%] max-w-[75%] object-contain" />
+                            <img src={clientLogoUrl} alt={`${payload?.device_name || "client"} logo`} className="max-h-[75%] max-w-[75%] object-contain" />
                           </div>
                         </div>
                       ) : (
@@ -1850,51 +1957,21 @@ export default function SignagePlayer() {
                   );
                 })}
               </div>
-              {inspectZones && Object.keys(zoneInspections || {}).length > 0 ? (
-                <div className="absolute inset-0 pointer-events-none z-50">
-                  {zoneEntries.map(({ zone }) => {
-                    const info = zoneInspections?.[zone.id];
-                    if (!info) return null;
-                    return (
-                      <div
-                        key={`inspect-${zone.id}`}
-                        className="absolute pointer-events-none text-xs text-white/90 bg-black/60 px-2 py-1 rounded"
-                        style={{ left: `${info.left}px`, top: `${info.top}px`, transform: "translate(-4px,-4px)" }}
-                      >
-                        <div className="font-semibold">{zone.id}{zone.name ? ` · ${String(zone.name).slice(0,12)}` : ""}</div>
-                        <div className="text-[11px]">cfg: {Math.round(Number(zone.width_px||0))}x{Math.round(Number(zone.height_px||0))}</div>
-                        <div className="text-[11px]">act: {info.width}x{info.height}px</div>
-                      </div>
-                    );
-                  })}
-                </div>
-              ) : null}
             </>
           ) : (
             <div className="grid gap-0 w-full h-full min-h-0" style={gridStyle}>
               {zoneEntries.map(({ zone, items }) => (
                 <div key={zone.id} className="bg-black overflow-hidden relative min-h-[160px]">
                   {isQueueZone(zone) && items.length === 0 ? (
-                    <QueueBoard deviceName={payload.device_name} queuePreview={queuePreview} notices={notices} zone={zone} canvasWidth={canvasWidth} canvasHeight={canvasHeight} viewportScale={viewportScale} />
+                    <QueueBoard deviceName={payload?.device_name} queuePreview={queuePreview} notices={notices} zone={zone} canvasWidth={canvasWidth} canvasHeight={canvasHeight} viewportScale={viewportScale} />
                   ) : isAutoWidgetZone(zone) && items.length === 0 ? (
-                    <AutoWidgetZone
-                      zone={zone}
-                      queuePreview={queuePreview}
-                      payload={payload}
-                      providerData={providerData}
-                      weatherData={weatherData}
-                      canvasWidth={canvasWidth}
-                      canvasHeight={canvasHeight}
-                      viewportScale={viewportScale}
-                      mediaMode={zoneMediaModes?.[zone.id] || getDefaultZoneMediaMode(zone)}
-                      fillBlankSpaces={fillBlankSpaces}
-                    />
+                    <AutoWidgetZone zone={zone} queuePreview={queuePreview} payload={payload} providerData={providerData} weatherData={weatherData} canvasWidth={canvasWidth} canvasHeight={canvasHeight} viewportScale={viewportScale} />
                   ) : /ticker/i.test(`${zone.id} ${zone.name}`) ? (
                     <TickerSlot items={items} label={zone.name} zone={zone} canvasWidth={canvasWidth} canvasHeight={canvasHeight} viewportScale={viewportScale} />
                   ) : isLogoZone(zone) && items.length === 0 && clientLogoUrl ? (
                     <div className="w-full h-full flex items-center justify-center bg-black p-4">
                       <div className="w-full h-full rounded-[1.5rem] border border-white/10 bg-white/5 flex items-center justify-center overflow-hidden">
-                        <img src={clientLogoUrl} alt={`${payload.device_name || "client"} logo`} className="max-h-[75%] max-w-[75%] object-contain" />
+                        <img src={clientLogoUrl} alt={`${payload?.device_name || "client"} logo`} className="max-h-[75%] max-w-[75%] object-contain" />
                       </div>
                     </div>
                   ) : (
@@ -1916,199 +1993,206 @@ export default function SignagePlayer() {
           ))}
 
           <div className="absolute top-4 right-4 z-50 pointer-events-none">
-        <div className="pointer-events-auto relative">
-          <button
-            type="button"
-            onClick={toggleMenu}
-            className="inline-flex items-center gap-2 rounded-full border border-white/15 bg-black/70 px-3 py-2 text-xs font-semibold uppercase tracking-[0.2em] text-white shadow-[0_14px_40px_-24px_rgba(0,0,0,0.8)] backdrop-blur-md"
-            aria-expanded={menuOpen}
-            aria-label="Open player menu"
-          >
-            <Menu className="h-4 w-4" />
-            Menu
-          </button>
+            <div className="pointer-events-auto relative">
+              <button
+                type="button"
+                onClick={toggleMenu}
+                className="inline-flex items-center gap-2 rounded-full border border-white/15 bg-black/70 px-3 py-2 text-xs font-semibold uppercase tracking-[0.2em] text-white shadow-[0_14px_40px_-24px_rgba(0,0,0,0.8)] backdrop-blur-md"
+                aria-expanded={menuOpen}
+                aria-label="Open player menu"
+              >
+                <Menu className="h-4 w-4" />
+                Menu
+              </button>
 
-          {menuOpen ? (
-  <div className="absolute right-0 mt-3 w-[min(92vw,400px)] max-h-[85vh] overflow-y-auto rounded-[1.5rem] border border-white/10 bg-[linear-gradient(180deg,rgba(15,23,42,0.98),rgba(2,6,23,0.98))] text-white shadow-[0_28px_90px_-30px_rgba(0,0,0,0.9)] backdrop-blur-xl">
-    <div className="sticky top-0 bg-[linear-gradient(180deg,rgba(15,23,42,0.98),rgba(2,6,23,0.98))] backdrop-blur-xl z-10">
-      <div className="flex items-center justify-between border-b border-white/10 px-4 py-3">
-        <div>
-          <div className="text-[10px] uppercase tracking-[0.35em] text-white/45">Player menu</div>
-          <div className="text-sm font-semibold text-white">Controls and zones</div>
-        </div>
-        <button type="button" onClick={() => setMenuOpen(false)} className="rounded-full border border-white/10 p-2 text-white/70 hover:text-white">
-          <X className="h-4 w-4" />
-        </button>
-      </div>
-    </div>
-
-    <div className="border-b border-white/10 p-4">
-      <div className="text-[10px] uppercase tracking-[0.35em] text-white/45 mb-3">Controls</div>
-      <div className="grid grid-cols-2 gap-2">
-        <button
-          type="button"
-          onClick={goFullscreen}
-          className="inline-flex items-center justify-center gap-2 rounded-2xl border border-white/10 bg-white/5 px-3 py-2.5 text-sm font-medium text-white hover:bg-white/10"
-        >
-          <Maximize className="h-4 w-4" /> Fullscreen
-        </button>
-        <button
-          type="button"
-          onClick={poll}
-          className="inline-flex items-center justify-center gap-2 rounded-2xl border border-white/10 bg-white/5 px-3 py-2.5 text-sm font-medium text-white hover:bg-white/10"
-        >
-          <RefreshCw className="h-4 w-4" /> Reload
-        </button>
-        <button
-          type="button"
-          onClick={resetZoneVisibility}
-          className="inline-flex items-center justify-center gap-2 rounded-2xl border border-white/10 bg-white/5 px-3 py-2.5 text-sm font-medium text-white hover:bg-white/10 col-span-2"
-        >
-          <RotateCcw className="h-4 w-4" /> Restore all zones
-        </button>
-      </div>
-
-      <div className="mt-3">
-        <div className="mb-2 text-[10px] uppercase tracking-[0.35em] text-white/45">Orientation</div>
-        <div className="grid grid-cols-3 gap-2">
-          {[
-            { value: "auto", label: "Auto" },
-            { value: "landscape", label: "Landscape" },
-            { value: "portrait", label: "Portrait" },
-          ].map((option) => (
-            <button
-              key={option.value}
-              type="button"
-              onClick={() => setPlayerOrientation(option.value)}
-              className={`rounded-xl border px-2 py-2 text-[10px] font-semibold uppercase tracking-[0.18em] ${orientationMode === option.value ? "border-cyan-400/40 bg-cyan-500/20 text-cyan-100" : "border-white/10 bg-white/5 text-white/70 hover:bg-white/10"}`}
-            >
-              {option.label}
-            </button>
-          ))}
-        </div>
-      </div>
-
-      <label className="mt-3 flex items-center justify-between gap-3 rounded-2xl border border-white/10 bg-white/5 px-3 py-2.5">
-        <span>
-          <span className="block text-sm font-medium text-white">Fill blank space</span>
-          <span className="block text-[11px] text-white/45">Compact the layout when zones are removed</span>
-        </span>
-        <button
-          type="button"
-          onClick={() => setFillBlankSpaces((current) => !current)}
-          className={`inline-flex items-center gap-2 rounded-full px-3 py-1.5 text-xs font-semibold uppercase tracking-[0.18em] ${fillBlankSpaces ? "bg-emerald-500/20 text-emerald-200" : "bg-white/10 text-white/55"}`}
-        >
-          {fillBlankSpaces ? <Eye className="h-3.5 w-3.5" /> : <EyeOff className="h-3.5 w-3.5" />}
-          {fillBlankSpaces ? "On" : "Off"}
-        </button>
-      </label>
-
-      <label className="mt-3 flex items-center justify-between gap-3 rounded-2xl border border-white/10 bg-white/5 px-3 py-2.5">
-        <span>
-          <span className="block text-sm font-medium text-white">Custom placement</span>
-          <span className="block text-[11px] text-white/45">Choose a preset area for each zone</span>
-        </span>
-        <button
-          type="button"
-          onClick={() => setCustomPlacementEnabled((current) => !current)}
-          className={`inline-flex items-center gap-2 rounded-full px-3 py-1.5 text-xs font-semibold uppercase tracking-[0.18em] ${customPlacementEnabled ? "bg-cyan-500/20 text-cyan-200" : "bg-white/10 text-white/55"}`}
-        >
-          {customPlacementEnabled ? <Eye className="h-3.5 w-3.5" /> : <EyeOff className="h-3.5 w-3.5" />}
-          {customPlacementEnabled ? "On" : "Off"}
-        </button>
-      </label>
-    </div>
-
-    <div className="p-4">
-      <div className="flex items-center justify-between mb-3 sticky top-0 bg-[linear-gradient(180deg,rgba(15,23,42,0.98),rgba(2,6,23,0.98))] py-2 -mt-2">
-        <div>
-          <div className="text-[10px] uppercase tracking-[0.35em] text-white/45">Zone settings</div>
-          <div className="text-sm font-semibold text-white">Hide, restore, or place zones</div>
-        </div>
-        <div className="text-[10px] uppercase tracking-[0.3em] text-white/35">{visibleZoneDefs.length}/{zoneDefs.length}</div>
-      </div>
-
-      <div className="space-y-2 max-h-[50vh] overflow-y-auto pr-1">
-        {zoneDefs.map((zone) => {
-          const hidden = hiddenZoneIds.includes(zone.id);
-          const placement = zonePlacements?.[zone.id] || "auto";
-          const mediaMode = zoneMediaModes?.[zone.id] || getDefaultZoneMediaMode(zone);
-          return (
-            <div key={zone.id} className="rounded-2xl border border-white/10 bg-white/5 p-3">
-              <div className="flex items-start justify-between gap-3">
-                <div className="min-w-0 flex-1">
-                  <div className="truncate text-sm font-medium text-white">{zone.name || zone.id}</div>
-                  <div className="truncate text-[11px] uppercase tracking-[0.25em] text-white/40">{zone.role || "zone"} · {Math.round(Number(zone.width_px || 0))}x{Math.round(Number(zone.height_px || 0))}</div>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => toggleZoneVisibility(zone.id)}
-                  className={`inline-flex shrink-0 items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-semibold uppercase tracking-[0.18em] ${hidden ? "bg-white/10 text-white/70" : "bg-rose-500/15 text-rose-200"}`}
-                >
-                  {hidden ? <Eye className="h-3.5 w-3.5" /> : <EyeOff className="h-3.5 w-3.5" />}
-                  {hidden ? "Show" : "Hide"}
-                </button>
-              </div>
-
-              {customPlacementEnabled ? (
-                <div className="mt-3">
-                  <div className="mb-2 text-[10px] uppercase tracking-[0.3em] text-white/40">Placement</div>
-                  <div className="grid grid-cols-3 gap-2">
-                    {ZONE_PLACEMENT_PRESETS.map((preset) => (
-                      <button
-                        key={preset.id}
-                        type="button"
-                        onClick={() => setZonePlacement(zone.id, preset.id)}
-                        className={`rounded-xl border px-2 py-2 text-[10px] font-semibold uppercase tracking-[0.18em] ${placement === preset.id ? "border-cyan-400/40 bg-cyan-500/20 text-cyan-100" : "border-white/10 bg-white/5 text-white/70 hover:bg-white/10"}`}
-                      >
-                        {preset.label}
+              {menuOpen ? (
+                <div className="absolute right-0 mt-3 w-[min(92vw,400px)] max-h-[85vh] overflow-y-auto rounded-[1.5rem] border border-white/10 bg-[linear-gradient(180deg,rgba(15,23,42,0.98),rgba(2,6,23,0.98))] text-white shadow-[0_28px_90px_-30px_rgba(0,0,0,0.9)] backdrop-blur-xl">
+                  <div className="sticky top-0 bg-[linear-gradient(180deg,rgba(15,23,42,0.98),rgba(2,6,23,0.98))] backdrop-blur-xl z-10">
+                    <div className="flex items-center justify-between border-b border-white/10 px-4 py-3">
+                      <div>
+                        <div className="text-[10px] uppercase tracking-[0.35em] text-white/45">Player menu</div>
+                        <div className="text-sm font-semibold text-white">Controls and zones</div>
+                      </div>
+                      <button type="button" onClick={() => setMenuOpen(false)} className="rounded-full border border-white/10 p-2 text-white/70 hover:text-white">
+                        <X className="h-4 w-4" />
                       </button>
-                    ))}
+                    </div>
                   </div>
-                  <button
-                    type="button"
-                    onClick={() => setZonePlacement(zone.id, "auto")}
-                    className="mt-2 w-full rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-[10px] font-semibold uppercase tracking-[0.18em] text-white/65 hover:bg-white/10"
-                  >
-                    Reset to auto
-                  </button>
+
+                  <div className="border-b border-white/10 p-4">
+                    <div className="text-[10px] uppercase tracking-[0.35em] text-white/45 mb-3">Controls</div>
+                    <div className="grid grid-cols-2 gap-2">
+                      <button
+                        type="button"
+                        onClick={goFullscreen}
+                        className="inline-flex items-center justify-center gap-2 rounded-2xl border border-white/10 bg-white/5 px-3 py-2.5 text-sm font-medium text-white hover:bg-white/10"
+                      >
+                        <Maximize className="h-4 w-4" /> Fullscreen
+                      </button>
+                      <button
+                        type="button"
+                        onClick={poll}
+                        className="inline-flex items-center justify-center gap-2 rounded-2xl border border-white/10 bg-white/5 px-3 py-2.5 text-sm font-medium text-white hover:bg-white/10"
+                      >
+                        <RefreshCw className="h-4 w-4" /> Reload
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setShowPairing(true)}
+                        className="inline-flex items-center justify-center gap-2 rounded-2xl border border-white/10 bg-white/5 px-3 py-2.5 text-sm font-medium text-white hover:bg-white/10 col-span-2"
+                      >
+                        <Smartphone className="h-4 w-4" /> Change Device
+                      </button>
+                      <button
+                        type="button"
+                        onClick={resetZoneVisibility}
+                        className="inline-flex items-center justify-center gap-2 rounded-2xl border border-white/10 bg-white/5 px-3 py-2.5 text-sm font-medium text-white hover:bg-white/10 col-span-2"
+                      >
+                        <RotateCcw className="h-4 w-4" /> Restore all zones
+                      </button>
+                    </div>
+
+                    <div className="mt-3">
+                      <div className="mb-2 text-[10px] uppercase tracking-[0.35em] text-white/45">Orientation</div>
+                      <div className="grid grid-cols-3 gap-2">
+                        {[
+                          { value: "auto", label: "Auto" },
+                          { value: "landscape", label: "Landscape" },
+                          { value: "portrait", label: "Portrait" },
+                        ].map((option) => (
+                          <button
+                            key={option.value}
+                            type="button"
+                            onClick={() => setPlayerOrientation(option.value)}
+                            className={`rounded-xl border px-2 py-2 text-[10px] font-semibold uppercase tracking-[0.18em] ${orientationMode === option.value ? "border-cyan-400/40 bg-cyan-500/20 text-cyan-100" : "border-white/10 bg-white/5 text-white/70 hover:bg-white/10"}`}
+                          >
+                            {option.label}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    <label className="mt-3 flex items-center justify-between gap-3 rounded-2xl border border-white/10 bg-white/5 px-3 py-2.5">
+                      <span>
+                        <span className="block text-sm font-medium text-white">Fill blank space</span>
+                        <span className="block text-[11px] text-white/45">Compact the layout when zones are removed</span>
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => setFillBlankSpaces((current) => !current)}
+                        className={`inline-flex items-center gap-2 rounded-full px-3 py-1.5 text-xs font-semibold uppercase tracking-[0.18em] ${fillBlankSpaces ? "bg-emerald-500/20 text-emerald-200" : "bg-white/10 text-white/55"}`}
+                      >
+                        {fillBlankSpaces ? <Eye className="h-3.5 w-3.5" /> : <EyeOff className="h-3.5 w-3.5" />}
+                        {fillBlankSpaces ? "On" : "Off"}
+                      </button>
+                    </label>
+
+                    <label className="mt-3 flex items-center justify-between gap-3 rounded-2xl border border-white/10 bg-white/5 px-3 py-2.5">
+                      <span>
+                        <span className="block text-sm font-medium text-white">Custom placement</span>
+                        <span className="block text-[11px] text-white/45">Choose a preset area for each zone</span>
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => setCustomPlacementEnabled((current) => !current)}
+                        className={`inline-flex items-center gap-2 rounded-full px-3 py-1.5 text-xs font-semibold uppercase tracking-[0.18em] ${customPlacementEnabled ? "bg-cyan-500/20 text-cyan-200" : "bg-white/10 text-white/55"}`}
+                      >
+                        {customPlacementEnabled ? <Eye className="h-3.5 w-3.5" /> : <EyeOff className="h-3.5 w-3.5" />}
+                        {customPlacementEnabled ? "On" : "Off"}
+                      </button>
+                    </label>
+                  </div>
+
+                  <div className="p-4">
+                    <div className="flex items-center justify-between mb-3 sticky top-0 bg-[linear-gradient(180deg,rgba(15,23,42,0.98),rgba(2,6,23,0.98))] py-2 -mt-2">
+                      <div>
+                        <div className="text-[10px] uppercase tracking-[0.35em] text-white/45">Zone settings</div>
+                        <div className="text-sm font-semibold text-white">Hide, restore, or place zones</div>
+                      </div>
+                      <div className="text-[10px] uppercase tracking-[0.3em] text-white/35">{visibleZoneDefs.length}/{zoneDefs.length}</div>
+                    </div>
+
+                    <div className="space-y-2 max-h-[50vh] overflow-y-auto pr-1">
+                      {zoneDefs.map((zone) => {
+                        const hidden = hiddenZoneIds.includes(zone.id);
+                        const placement = zonePlacements?.[zone.id] || "auto";
+                        const mediaMode = zoneMediaModes?.[zone.id] || getDefaultZoneMediaMode(zone);
+                        return (
+                          <div key={zone.id} className="rounded-2xl border border-white/10 bg-white/5 p-3">
+                            <div className="flex items-start justify-between gap-3">
+                              <div className="min-w-0 flex-1">
+                                <div className="truncate text-sm font-medium text-white">{zone.name || zone.id}</div>
+                                <div className="truncate text-[11px] uppercase tracking-[0.25em] text-white/40">{zone.role || "zone"} · {Math.round(Number(zone.width_px || 0))}x{Math.round(Number(zone.height_px || 0))}</div>
+                              </div>
+                              <button
+                                type="button"
+                                onClick={() => toggleZoneVisibility(zone.id)}
+                                className={`inline-flex shrink-0 items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-semibold uppercase tracking-[0.18em] ${hidden ? "bg-white/10 text-white/70" : "bg-rose-500/15 text-rose-200"}`}
+                              >
+                                {hidden ? <Eye className="h-3.5 w-3.5" /> : <EyeOff className="h-3.5 w-3.5" />}
+                                {hidden ? "Show" : "Hide"}
+                              </button>
+                            </div>
+
+                            {customPlacementEnabled ? (
+                              <div className="mt-3">
+                                <div className="mb-2 text-[10px] uppercase tracking-[0.3em] text-white/40">Placement</div>
+                                <div className="grid grid-cols-3 gap-2">
+                                  {ZONE_PLACEMENT_PRESETS.map((preset) => (
+                                    <button
+                                      key={preset.id}
+                                      type="button"
+                                      onClick={() => setZonePlacement(zone.id, preset.id)}
+                                      className={`rounded-xl border px-2 py-2 text-[10px] font-semibold uppercase tracking-[0.18em] ${placement === preset.id ? "border-cyan-400/40 bg-cyan-500/20 text-cyan-100" : "border-white/10 bg-white/5 text-white/70 hover:bg-white/10"}`}
+                                    >
+                                      {preset.label}
+                                    </button>
+                                  ))}
+                                </div>
+                                <button
+                                  type="button"
+                                  onClick={() => setZonePlacement(zone.id, "auto")}
+                                  className="mt-2 w-full rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-[10px] font-semibold uppercase tracking-[0.18em] text-white/65 hover:bg-white/10"
+                                >
+                                  Reset to auto
+                                </button>
+                              </div>
+                            ) : null}
+
+                            <div className="mt-3">
+                              <div className="mb-2 text-[10px] uppercase tracking-[0.3em] text-white/40">Media fit</div>
+                              <div className="grid grid-cols-3 gap-2">
+                                <button
+                                  type="button"
+                                  onClick={() => setZoneMediaMode(zone.id, "fill")}
+                                  className={`rounded-xl border px-2 py-2 text-[10px] font-semibold uppercase tracking-[0.18em] ${mediaMode === "fill" ? "border-cyan-400/40 bg-cyan-500/20 text-cyan-100" : "border-white/10 bg-white/5 text-white/70 hover:bg-white/10"}`}
+                                >
+                                  Fill
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => setZoneMediaMode(zone.id, "fit")}
+                                  className={`rounded-xl border px-2 py-2 text-[10px] font-semibold uppercase tracking-[0.18em] ${mediaMode === "fit" ? "border-cyan-400/40 bg-cyan-500/20 text-cyan-100" : "border-white/10 bg-white/5 text-white/70 hover:bg-white/10"}`}
+                                >
+                                  Fit
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => setZoneMediaMode(zone.id, "stretch")}
+                                  className={`rounded-xl border px-2 py-2 text-[10px] font-semibold uppercase tracking-[0.18em] ${mediaMode === "stretch" ? "border-cyan-400/40 bg-cyan-500/20 text-cyan-100" : "border-white/10 bg-white/5 text-white/70 hover:bg-white/10"}`}
+                                >
+                                  Stretch
+                                </button>
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
                 </div>
               ) : null}
-
-              <div className="mt-3">
-                <div className="mb-2 text-[10px] uppercase tracking-[0.3em] text-white/40">Media fit</div>
-                <div className="grid grid-cols-3 gap-2">
-                  <button
-                    type="button"
-                    onClick={() => setZoneMediaMode(zone.id, "fill")}
-                    className={`rounded-xl border px-2 py-2 text-[10px] font-semibold uppercase tracking-[0.18em] ${mediaMode === "fill" ? "border-cyan-400/40 bg-cyan-500/20 text-cyan-100" : "border-white/10 bg-white/5 text-white/70 hover:bg-white/10"}`}
-                  >
-                    Fill
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setZoneMediaMode(zone.id, "fit")}
-                    className={`rounded-xl border px-2 py-2 text-[10px] font-semibold uppercase tracking-[0.18em] ${mediaMode === "fit" ? "border-cyan-400/40 bg-cyan-500/20 text-cyan-100" : "border-white/10 bg-white/5 text-white/70 hover:bg-white/10"}`}
-                  >
-                    Fit
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setZoneMediaMode(zone.id, "stretch")}
-                    className={`rounded-xl border px-2 py-2 text-[10px] font-semibold uppercase tracking-[0.18em] ${mediaMode === "stretch" ? "border-cyan-400/40 bg-cyan-500/20 text-cyan-100" : "border-white/10 bg-white/5 text-white/70 hover:bg-white/10"}`}
-                  >
-                    Stretch
-                  </button>
-                </div>
-              </div>
             </div>
-          );
-        })}
-      </div>
-    </div>
-  </div>
-) : null}
-        </div>
           </div>
         </div>
       </div>
@@ -2120,4 +2204,3 @@ export default function SignagePlayer() {
     </div>
   );
 }
-

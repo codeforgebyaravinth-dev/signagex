@@ -29,6 +29,26 @@
                 document.head.appendChild(emergentScript);
             }
         </script>
+        <script>
+            // When running inside the Capacitor Android app, redirect the root
+            // URL to the SignagePlayer entry so the APK behaves like a dedicated
+            // player app. This only triggers for native/platform builds.
+            try {
+                var isNative = false;
+                if (window.Capacitor && typeof window.Capacitor.getPlatform === 'function') {
+                    isNative = window.Capacitor.getPlatform() !== 'web';
+                } else if (/Android|iPhone|iPad|iPod/.test(navigator.userAgent)) {
+                    // fallback: detect mobile UA (will also redirect mobile browser)
+                    isNative = true;
+                }
+                if (isNative && window.location.pathname === '/') {
+                    window.location.replace('/play');
+                }
+            } catch (e) {
+                // don't break the app if detection fails
+                console.warn('player-redirect failed', e);
+            }
+        </script>
     </head>
     <body>
         <noscript>You need to enable JavaScript to run this app.</noscript>

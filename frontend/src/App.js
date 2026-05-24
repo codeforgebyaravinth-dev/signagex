@@ -24,7 +24,20 @@ import ClientPlaylists from "./pages/client/ClientPlaylists";
 import ClientSchedules from "./pages/client/ClientSchedules";
 import ClientPayments from "./pages/client/ClientPayments";
 import PublicBooking from "./pages/PublicBooking";
-import SignagePlayer from "./pages/SignagePlayer";
+// Use the new SignagePlayer implementation in its own folder (includes pairing UI)
+import SignagePlayer from "./pages/SignagePlayer/SignagePlayer";
+
+function isNativePlayerShell() {
+  if (typeof window === "undefined") return false;
+  try {
+    if (window.Capacitor && typeof window.Capacitor.getPlatform === "function") {
+      return window.Capacitor.getPlatform() !== "web";
+    }
+  } catch {
+    // fall through to user agent detection
+  }
+  return /Android|iPhone|iPad|iPod/i.test(navigator.userAgent || "");
+}
 
 function ProtectedRoute({ role, children }) {
   const { user, loading } = useAuth();
@@ -45,6 +58,9 @@ function ProtectedRoute({ role, children }) {
 
 function Root() {
   const { user, loading } = useAuth();
+  if (isNativePlayerShell()) {
+    return <Navigate to="/play" replace />;
+  }
   if (loading || user === null) return null;
   if (user === false) return <Navigate to="/login" replace />;
   const home = user.role === "admin" ? "/admin" : user.role === "dealer" ? "/dealer" : "/client";
@@ -52,6 +68,16 @@ function Root() {
 }
 
 export default function App() {
+  if (isNativePlayerShell()) {
+    return (
+      <AuthProvider>
+        <BrowserRouter>
+          <SignagePlayer />
+        </BrowserRouter>
+      </AuthProvider>
+    );
+  }
+
   return (
     <AuthProvider>
       <BrowserRouter>
@@ -60,6 +86,7 @@ export default function App() {
           <Route path="/login" element={<Login />} />
           <Route path="/book/:clientId" element={<PublicBooking />} />
           <Route path="/play/:pairCode" element={<SignagePlayer />} />
+          <Route path="/play" element={<SignagePlayer />} />
 
           <Route element={<ProtectedRoute role="admin"><Layout /></ProtectedRoute>}>
             <Route path="/admin" element={<AdminDashboard />} />
