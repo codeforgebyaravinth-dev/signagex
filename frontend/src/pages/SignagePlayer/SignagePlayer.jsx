@@ -26,10 +26,6 @@ function getMediaFit(item, mediaMode = "fill") {
   return "object-cover";
 }
 
-function getDefaultZoneMediaMode(zone) {
-  return /^(header|weather)$/i.test(zone?.role || "") ? "fill" : "fit";
-}
-
 function normalizeRotation(value) {
   const num = Number(value);
   if (!Number.isFinite(num)) return 0;
@@ -37,55 +33,12 @@ function normalizeRotation(value) {
   return [0, 90, 180, 270].includes(normalized) ? normalized : 0;
 }
 
-function getYoutubeId(url) {
-  const regex = /(?:youtube\.com\/(?:watch\?v=|shorts\/|embed\/)|youtu\.be\/)([\w-]+)/;
-  const match = url?.match(regex);
-  return match ? match[1] : null;
-}
-
-function escapeRegExp(string) {
-  return string.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-function wordBoundaryIncludes(haystack, needle) {
-  if (!needle) return false;
-  try {
-    const re = new RegExp(`\\b${escapeRegExp(needle)}\\b`, "i");
-    return re.test(haystack);
-  } catch (e) {
-    return haystack.includes(needle);
-  }
-}
-
-function normalizeRoomToken(s) {
-  if (!s) return "";
-  return String(s).toLowerCase().replace(/[^a-z0-9]/g, "");
-}
-
-function levenshtein(a, b) {
-  if (!a || !b) return Math.max(a?.length || 0, b?.length || 0);
-  const m = a.length, n = b.length;
-  const dp = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0));
-  for (let i = 0; i <= m; i++) dp[i][0] = i;
-  for (let j = 0; j <= n; j++) dp[0][j] = j;
-  for (let i = 1; i <= m; i++) {
-    for (let j = 1; j <= n; j++) {
-      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
-      dp[i][j] = Math.min(dp[i - 1][j] + 1, dp[i][j - 1] + 1, dp[i - 1][j - 1] + cost);
-    }
-  }
-  return dp[m][n];
-}
-
-function similarityScore(a, b) {
-  if (!a || !b) return 0;
-  const la = a.length, lb = b.length;
-  const dist = levenshtein(a, b);
-  return Math.max(0, 1 - dist / Math.max(la, lb));
-}
-
 function isImageItem(item) {
   return item?.kind === "image" || (item?.content_type || "").startsWith("image/") || /\.(png|jpe?g|webp|gif|bmp|svg)$/i.test(item?.url || item?.name || "");
+}
+
+function getDefaultZoneMediaMode(zone) {
+  return /^(header|weather)$/i.test(zone?.role || "") ? "fill" : "fit";
 }
 
 function getPlacementRect(placement) {
@@ -152,6 +105,24 @@ function loadYouTubeIframeApi() {
   });
 
   return youtubeApiPromise;
+}
+
+function getYoutubeId(url) {
+  if (!url) return "";
+  try {
+    const s = String(url);
+    // common patterns: v=VIDEO, youtu.be/VIDEO, /embed/VIDEO
+    const m = s.match(/(?:v=|\/embed\/|youtu\.be\/|\/v\/|watch\?v=)([A-Za-z0-9_-]{11})/);
+    if (m && m[1]) return m[1];
+    // fallback: last 11-char token
+    const parts = s.split(/[\/?#&=\s]+/).filter(Boolean);
+    for (let p of parts.reverse()) {
+      if (/^[A-Za-z0-9_-]{11}$/.test(p)) return p;
+    }
+    return "";
+  } catch (e) {
+    return "";
+  }
 }
 
 function getWeatherEmoji(weather = {}, conditionText = "") {
@@ -293,7 +264,9 @@ function MediaSlot({ items, label, queuePreview, weatherData, zone, canvasWidth,
         },
         events: {
           onReady: (event) => {
-            event.target.mute();
+            try {
+              if (isMuted) event.target.mute(); else event.target.unMute();
+            } catch (e) {}
             event.target.playVideo();
           },
           onStateChange: (event) => {
@@ -312,7 +285,7 @@ function MediaSlot({ items, label, queuePreview, weatherData, zone, canvasWidth,
         youtubePlayerRef.current = null;
       }
     };
-  }, [idx, items, handleMediaEnd]);
+  }, [idx, items, handleMediaEnd, isMuted]);
 
   if (!items || items.length === 0) {
     return (
@@ -467,7 +440,7 @@ function MediaSlot({ items, label, queuePreview, weatherData, zone, canvasWidth,
         <video
           src={resolveSrc(cur)}
           autoPlay
-          muted
+          muted={isMuted}
           playsInline
           className={`w-full h-full ${getMediaFit(cur, mediaMode)} object-center bg-black`}
           onEnded={handleMediaEnd}
@@ -480,7 +453,7 @@ function MediaSlot({ items, label, queuePreview, weatherData, zone, canvasWidth,
       <video
         src={resolveSrc(cur)}
         autoPlay
-        muted
+        muted={isMuted}
         playsInline
         controls
         className={`w-full h-full ${getMediaFit(cur, mediaMode)} object-center bg-black`}
@@ -960,8 +933,8 @@ function ModernSplashScreen({ onComplete }) {
 }
 
 // Pairing Screen Component
-function PairingScreen({ onPair, error: externalError }) {
-  const [pairCode, setPairCode] = useState("");
+function PairingScreen({ onPair, error: externalError, initialCode = "" }) {
+  const [pairCode, setPairCode] = useState(initialCode || "");
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState("");
   const [isConnecting, setIsConnecting] = useState(false);
@@ -983,6 +956,11 @@ function PairingScreen({ onPair, error: externalError }) {
       onPair(pairCode.trim().toUpperCase());
     }, 1500);
   };
+
+  useEffect(() => {
+    if (initialCode && initialCode !== pairCode) setPairCode(initialCode);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialCode]);
   
   return (
     <div className="fixed inset-0 z-[100] bg-gradient-to-br from-gray-900 via-purple-900 to-gray-900 flex items-center justify-center overflow-hidden">
@@ -1013,63 +991,75 @@ function PairingScreen({ onPair, error: externalError }) {
             </p>
           </div>
           
-          {/* Form */}
-          <form onSubmit={handleSubmit} className="space-y-6">
-            <div>
-              <label className="block text-white/70 text-sm font-medium mb-2">
-                Pairing Code
-              </label>
-              <input
-                type="text"
-                value={pairCode}
-                onChange={(e) => {
-                  setPairCode(e.target.value.toUpperCase());
-                  setError("");
-                }}
-                placeholder="e.g., ABC123"
-                className="w-full bg-white/10 border border-white/20 rounded-xl px-4 py-3 text-white text-center text-2xl font-mono tracking-wider focus:outline-none focus:border-cyan-400/50 focus:ring-2 focus:ring-cyan-400/20 transition-all"
-                autoFocus
-                maxLength={10}
-              />
-              <p className="text-white/30 text-xs mt-2 text-center">
-                Find this code in your client portal under "Devices"
-              </p>
+          {/* Form or generated-code display */}
+          {initialCode ? (
+            <div className="space-y-6">
+              <div className="text-center">
+                <div className="text-6xl font-mono tracking-widest text-white font-bold">{String(initialCode).slice(0,6)}</div>
+                <p className="text-white/40 mt-3">Show this code in the client portal to pair the device.</p>
+                <div className="mt-6">
+                  <div className="inline-flex items-center gap-2 bg-white/5 border border-white/10 rounded-full px-4 py-2">
+                    <div className="w-3 h-3 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                    <span className="text-white/50 text-sm">Waiting for client confirmation</span>
+                  </div>
+                </div>
+              </div>
             </div>
-            
-            {(error || externalError) && (
-              <div className="bg-red-500/20 border border-red-500/30 rounded-xl p-3 flex items-center gap-2">
-                <AlertCircle className="w-4 h-4 text-red-400" />
-                <p className="text-red-400 text-sm">{error || externalError}</p>
+          ) : (
+            <form onSubmit={handleSubmit} className="space-y-6">
+              <div>
+                <label className="block text-white/70 text-sm font-medium mb-2">
+                  Pairing Code
+                </label>
+                <input
+                  type="text"
+                  value={pairCode}
+                  onChange={(e) => {
+                    setPairCode(e.target.value.toUpperCase());
+                    setError("");
+                  }}
+                  placeholder="e.g., 123456"
+                  className="w-full bg-white/10 border border-white/20 rounded-xl px-4 py-3 text-white text-center text-2xl font-mono tracking-wider focus:outline-none focus:border-cyan-400/50 focus:ring-2 focus:ring-cyan-400/20 transition-all"
+                  autoFocus
+                  maxLength={10}
+                />
+                <p className="text-white/30 text-xs mt-2 text-center">Find this code in your client portal under "Devices"</p>
               </div>
-            )}
-            
-            {isConnecting && (
-              <div className="bg-cyan-500/20 border border-cyan-500/30 rounded-xl p-3 flex items-center gap-2">
-                <div className="w-4 h-4 border-2 border-cyan-400 border-t-transparent rounded-full animate-spin" />
-                <p className="text-cyan-400 text-sm">Connecting to server...</p>
-              </div>
-            )}
-            
-            <button
-              type="submit"
-              disabled={isLoading}
-              className={`w-full bg-gradient-to-r from-purple-500 to-pink-500 hover:from-purple-600 hover:to-pink-600 text-white font-semibold py-3 px-4 rounded-xl transition-all duration-200 flex items-center justify-center gap-2 ${
-                isLoading ? "opacity-70 cursor-not-allowed" : ""
-              }`}
-            >
-              {isLoading ? (
-                <>
-                  <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                  Connecting...
-                </>
-              ) : (
-                <>
-                  Connect Now
-                  <ArrowRight className="w-4 h-4" />
-                </>
+
+              {(error || externalError) && (
+                <div className="bg-red-500/20 border border-red-500/30 rounded-xl p-3 flex items-center gap-2">
+                  <AlertCircle className="w-4 h-4 text-red-400" />
+                  <p className="text-red-400 text-sm">{error || externalError}</p>
+                </div>
               )}
-            </button>
-          </form>
+
+              {isConnecting && (
+                <div className="bg-cyan-500/20 border border-cyan-500/30 rounded-xl p-3 flex items-center gap-2">
+                  <div className="w-4 h-4 border-2 border-cyan-400 border-t-transparent rounded-full animate-spin" />
+                  <p className="text-cyan-400 text-sm">Connecting to server...</p>
+                </div>
+              )}
+
+              <button
+                type="submit"
+                disabled={isLoading}
+                className={`w-full bg-gradient-to-r from-purple-500 to-pink-500 hover:from-purple-600 hover:to-pink-600 text-white font-semibold py-3 px-4 rounded-xl transition-all duration-200 flex items-center justify-center gap-2 ${
+                  isLoading ? "opacity-70 cursor-not-allowed" : ""
+                }`}>
+                {isLoading ? (
+                  <>
+                    <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                    Connecting...
+                  </>
+                ) : (
+                  <>
+                    Connect Now
+                    <ArrowRight className="w-4 h-4" />
+                  </>
+                )}
+              </button>
+            </form>
+          )}
           
           {/* Help text */}
           <div className="mt-6 text-center">
@@ -1097,6 +1087,56 @@ export default function SignagePlayer() {
   const [showPairing, setShowPairing] = useState(!urlPairCode);
   const [currentPairCode, setCurrentPairCode] = useState(urlPairCode || null);
   const [pairingError, setPairingError] = useState("");
+  const [generatedPairCode, setGeneratedPairCode] = useState(null);
+  const [isRequestingPair, setIsRequestingPair] = useState(false);
+
+  const getOrCreateFingerprint = () => {
+    try {
+      const key = 'device_fingerprint';
+      let fp = window.localStorage.getItem(key);
+      if (fp && String(fp).trim()) return fp;
+      fp = `web-${Date.now()}-${Math.floor(Math.random()*0x7fffffff)}`;
+      window.localStorage.setItem(key, fp);
+      return fp;
+    } catch (e) {
+      return `web-${Date.now()}-${Math.floor(Math.random()*0x7fffffff)}`;
+    }
+  };
+
+  const requestPairCodeAndWait = async () => {
+    if (!showPairing) return;
+    setIsRequestingPair(true);
+    try {
+      const fp = getOrCreateFingerprint();
+      const resp = await axios.post(`${BASE}/api/public/pair/request`, { device_fingerprint: fp, device_name: 'Web Signage Player' });
+      const code = resp?.data?.pair_code;
+      if (!code) throw new Error('No pair code from server');
+      setGeneratedPairCode(code);
+      // poll status
+      while (showPairing && !currentPairCode) {
+        await new Promise((r) => setTimeout(r, 3000));
+        try {
+          const st = await axios.get(`${BASE}/api/public/pair/status/${code}`);
+          if (st?.data?.used) {
+            // bound by client
+            setIsRequestingPair(false);
+            setGeneratedPairCode(null);
+            setCurrentPairCode(code);
+            setShowPairing(false);
+            navigate(`/play/${code}`, { replace: true });
+            return;
+          }
+        } catch (e) {
+          // ignore transient
+        }
+      }
+    } catch (e) {
+      setPairingError(e.response?.data?.detail || e.message || 'Pair request failed');
+      setIsRequestingPair(false);
+      setGeneratedPairCode(null);
+      setShowPairing(true);
+    }
+  };
   
   const [payload, setPayload] = useState(null);
   const [providerData, setProviderData] = useState(null);
@@ -1190,10 +1230,16 @@ export default function SignagePlayer() {
     return () => window.removeEventListener("resize", updateViewport);
   }, []);
 
+  useEffect(() => {
+    if (showPairing && !currentPairCode) requestPairCodeAndWait();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showPairing, currentPairCode]);
+
   const poll = useCallback(async () => {
     if (!currentPairCode) return;
     try {
-      const { data } = await axios.get(`${BASE}/api/public/player/${currentPairCode}`);
+      const fp = getOrCreateFingerprint();
+      const { data } = await axios.get(`${BASE}/api/public/player/${currentPairCode}`, { headers: { 'X-Device-Fingerprint': fp } });
       setPayload(data);
       try { console.debug("player-payload", data); } catch (e) {}
       setErr("");
@@ -1746,7 +1792,7 @@ export default function SignagePlayer() {
   
   // Show pairing screen if no pair code
   if (showPairing) {
-    return <PairingScreen onPair={handlePair} error={pairingError} />;
+    return <PairingScreen onPair={handlePair} error={pairingError} initialCode={generatedPairCode} />;
   }
 
   // Error state

@@ -340,6 +340,16 @@ class DeviceCreate(BaseModel):
     brightness: Optional[int] = 100
 
 
+class PairRequestIn(BaseModel):
+    device_fingerprint: str
+    device_name: Optional[str] = None
+
+
+class PairCompleteIn(BaseModel):
+    pair_code: str
+    device_id: str
+
+
 GST_RE = re.compile(r"^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][0-9A-Z]Z[0-9A-Z]$")
 PHONE_EXT_RE = re.compile(r"(?:\s*(?:ext\.?|x)\s*(\d{1,6}))$", re.IGNORECASE)
 
@@ -937,6 +947,64 @@ async def create_device(body: DeviceCreate, user: dict = Depends(require_role("c
         "orientation": body.orientation or "auto", "brightness": int(body.brightness or 100),
            "created_at": now_iso()}
     await db.devices.insert_one(doc); return clean(doc)
+
+
+# Public: device requests a short-lived pairing code that must be entered in the client panel
+@public_api.post("/pair/request")
+async def pair_request(body: PairRequestIn):
+    code = gen_pair_code()
+    expires_at = (datetime.now(timezone.utc) + timedelta(minutes=15)).isoformat()
+    doc = {
+        "code": code,
+        "device_fingerprint": body.device_fingerprint,
+        "device_name": body.device_name or "",
+        "created_at": now_iso(),
+        "expires_at": expires_at,
+        "used": False,
+    }
+    await db.pairings.insert_one(doc)
+    return {"pair_code": code, "expires_in_seconds": 15 * 60}
+
+
+@public_api.get("/pair/status/{pair_code}")
+async def pair_status(pair_code: str):
+    pairing = await db.pairings.find_one({"code": pair_code})
+    if not pairing:
+        raise HTTPException(status_code=404, detail="Pair code not found")
+    # return pairing status (used==true means client completed binding)
+    return {
+        "pair_code": pairing["code"],
+        "used": bool(pairing.get("used", False)),
+        "paired_device_id": pairing.get("paired_device_id", ""),
+        "expires_at": pairing.get("expires_at"),
+    }
+
+
+# Client: complete pairing by supplying the code and selecting a device to bind
+@api.post("/client/pair/complete")
+async def client_pair_complete(body: PairCompleteIn, user: dict = Depends(require_role("client"))):
+    pairing = await db.pairings.find_one({"code": body.pair_code, "used": False})
+    if not pairing:
+        raise HTTPException(status_code=404, detail="Pair code not found or already used")
+    # expiry check
+    try:
+        exp_dt = datetime.fromisoformat(str(pairing.get("expires_at"))) if pairing.get("expires_at") else None
+        if exp_dt and exp_dt < datetime.now(timezone.utc):
+            raise HTTPException(status_code=400, detail="Pair code expired")
+    except HTTPException:
+        raise
+    except Exception:
+        pass
+
+    device = await db.devices.find_one({"id": body.device_id, "client_id": user["id"]})
+    if not device:
+        raise HTTPException(status_code=404, detail="Device not found")
+
+    await db.devices.update_one({"id": body.device_id}, {"$set": {"pair_code": pairing["code"],
+                                                                  "fingerprint": pairing["device_fingerprint"],
+                                                                  "status": "paired", "paired_at": now_iso()}})
+    await db.pairings.update_one({"_id": pairing["_id"]}, {"$set": {"used": True, "paired_device_id": body.device_id}})
+    return {"ok": True, "device_id": body.device_id, "pair_code": pairing["code"]}
 
 @api.put("/client/devices/{did}")
 async def update_device(did: str, body: DeviceUpdate, user: dict = Depends(require_role("client"))):
@@ -2270,10 +2338,21 @@ async def _assign_next_available_time(cid: str, day: str, requested_time: Option
     }
 
 @public_api.get("/player/{pair_code}")
-async def player_payload(pair_code: str):
+async def player_payload(pair_code: str, request: Request):
     """Returns current playlist items for a device based on schedules + current time."""
     device = await db.devices.find_one({"pair_code": pair_code}, {"_id": 0})
-    if not device: raise HTTPException(status_code=404, detail="Device not found. Check pair code.")
+    if not device:
+        raise HTTPException(status_code=404, detail="Device not found. Check pair code.")
+
+    # Enforce that the polling player presents the device fingerprint that originally requested pairing.
+    # Caller must send header 'X-Device-Fingerprint' or query param 'device_fingerprint'.
+    provided_fp = request.headers.get("X-Device-Fingerprint") or request.query_params.get("device_fingerprint")
+    saved_fp = device.get("fingerprint")
+    if not saved_fp:
+        # Device hasn't been bound to a fingerprint yet — pairing required for exclusivity
+        raise HTTPException(status_code=403, detail="Device not paired with a fingerprint. Pairing required.")
+    if not provided_fp or provided_fp != saved_fp:
+        raise HTTPException(status_code=403, detail="Device not authorized. Fingerprint mismatch.")
     # enforce subscription: do not return playlist if client's subscription is inactive
     client = await db.clients.find_one({"id": device.get("client_id")}, {"_id": 0})
     weather = _resolve_weather_snapshot(client.get("address", "")) if client else None
@@ -2675,6 +2754,10 @@ async def on_startup():
         await db.appointments.create_index("id", unique=True)
         await db.media.create_index("id", unique=True)
         await db.playlists.create_index("id", unique=True)
+        try:
+            await db.pairings.create_index("code", unique=True)
+        except Exception:
+            pass
         await db.schedules.create_index("id", unique=True)
         await db.payments.create_index("id", unique=True)
         await db.payments.create_index("payer_id")

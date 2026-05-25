@@ -107,8 +107,17 @@ export default function ClientDevices() {
                   <DropdownMenu>
                     <DropdownMenuTrigger asChild><Button variant="ghost" size="icon"><MoreVertical className="w-4 h-4" /></Button></DropdownMenuTrigger>
                     <DropdownMenuContent align="end" className="rounded-sm">
-                      <DropdownMenuItem onClick={() => openEdit(d)} data-testid={`edit-device-${d.id}`}><Pencil className="w-3.5 h-3.5 mr-2" /> Edit</DropdownMenuItem>
-                      <DropdownMenuItem onClick={() => remove(d.id)} className="text-red-600" data-testid={`delete-device-${d.id}`}><Trash2 className="w-3.5 h-3.5 mr-2" /> Remove</DropdownMenuItem>
+                        <DropdownMenuItem onClick={() => openEdit(d)} data-testid={`edit-device-${d.id}`}><Pencil className="w-3.5 h-3.5 mr-2" /> Edit</DropdownMenuItem>
+                        <DropdownMenuItem onClick={async () => {
+                          const code = window.prompt('Enter device-generated pair code to complete pairing:');
+                          if (!code) return;
+                          try {
+                            await api.post('/client/pair/complete', { pair_code: code.trim(), device_id: d.id });
+                            toast.success('Device paired successfully');
+                            load();
+                          } catch (e) { toast.error(formatErr(e.response?.data?.detail)); }
+                        }} data-testid={`complete-pair-${d.id}`}><Copy className="w-3.5 h-3.5 mr-2" /> Complete Pairing</DropdownMenuItem>
+                        <DropdownMenuItem onClick={() => remove(d.id)} className="text-red-600" data-testid={`delete-device-${d.id}`}><Trash2 className="w-3.5 h-3.5 mr-2" /> Remove</DropdownMenuItem>
                     </DropdownMenuContent>
                   </DropdownMenu>
                 </TableCell>

@@ -2,7 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
 
-import 'package:flutter/foundation.dart' show kIsWeb;
+import 'package:flutter/foundation.dart' show kDebugMode, kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:cached_network_image/cached_network_image.dart';
@@ -52,10 +52,23 @@ class SignagePlayer extends StatefulWidget {
 }
 
 class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserver {
+  static const MethodChannel _kioskChannel = MethodChannel('rpsignage/kiosk');
+  static const Map<String, Color> _themeColors = {
+    'white': Colors.white,
+    'cyan': Colors.cyanAccent,
+    'yellow': Colors.amberAccent,
+    'green': Colors.lightGreenAccent,
+    'orange': Colors.orangeAccent,
+    'red': Colors.redAccent,
+    'blue': Colors.lightBlueAccent,
+    'pink': Colors.pinkAccent,
+  };
+
   bool showSplash = true;
   bool showPairing = false;
   String? currentPairCode;
   String pairingError = '';
+  String? generatedPairCode;
   Map<String, dynamic>? payload;
   Map<String, dynamic>? providerData;
   Map<String, dynamic>? liveWeather;
@@ -67,11 +80,22 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
   Map<String, String> zonePlacements = {};
   Map<String, String> zoneMediaModes = {};
   String orientationOverride = 'auto';
+  double? brightnessOverridePercent;
+  double weatherClockScale = 1.0;
+  String weatherClockTextColorKey = 'white';
+  double tickerSpeed = 50.0;
+  String tickerTextColorKey = 'white';
+  String tickerBackgroundColorKey = 'black';
   bool menuOpen = false;
+  bool kioskModeEnabled = true;
+  bool kioskProvisionWarningShown = false;
   Timer? pollTimer;
   Timer? providerTimer;
   Timer? weatherTimer;
-  String apiBase = 'https://rpsignage.com';
+  String apiBase = const String.fromEnvironment(
+    'BACKEND_URL',
+    defaultValue: 'https://rpsignage.com',
+  );
   Size viewportSize = Size.zero;
 
   @override
@@ -80,6 +104,7 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
     WidgetsBinding.instance.addObserver(this);
     _updateViewportSize();
     _loadPreferences();
+    _applyAndroidKioskMode();
   }
 
   @override
@@ -92,16 +117,10 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
   }
 
   void _updateViewportSize() {
-    // 1. Keep the mounted check for setState safety
     if (!mounted) return;
-
-    // 2. Access the view via the PlatformDispatcher instead of View.of(context)
-    // This avoids the "deactivated widget" error because it doesn't use the context
     final view = WidgetsBinding.instance.platformDispatcher.implicitView;
-
     if (view != null) {
       final size = view.physicalSize / view.devicePixelRatio;
-
       setState(() {
         viewportSize = size;
       });
@@ -113,6 +132,12 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
     setState(fn);
   }
 
+  void _logDebug(String message) {
+    if (kDebugMode) {
+      debugPrint('[SignagePlayer] $message');
+    }
+  }
+
   @override
   void didChangeMetrics() {
     _updateViewportSize();
@@ -121,9 +146,40 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
+      _applyAndroidKioskMode();
       if (currentPairCode != null && !showPairing && !showSplash) {
         _poll();
       }
+    }
+  }
+
+  Future<void> _applyAndroidKioskMode() async {
+    if (!mounted) return;
+    if (kIsWeb) return;
+
+    try {
+      final response = await _kioskChannel.invokeMethod('setKioskMode', {
+        'enabled': kioskModeEnabled,
+      });
+
+      if (!mounted || response is! Map) return;
+
+      final strictReady = response['strictReady'] == true;
+      if (kioskModeEnabled && !strictReady && !kioskProvisionWarningShown) {
+        kioskProvisionWarningShown = true;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Strict kiosk requires Device Owner provisioning via adb dpm.'),
+            duration: Duration(seconds: 4),
+          ),
+        );
+      }
+
+      if (!kioskModeEnabled) {
+        kioskProvisionWarningShown = false;
+      }
+    } catch (_) {
+      // Best-effort call; some Android builds/devices may not support lock task.
     }
   }
 
@@ -146,9 +202,79 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
       if (mounted) {
         _safeSetState(() {
           showSplash = false;
+        });
+      }
+      // No saved pair code: automatically request a pairing code (device-generated)
+      unawaited(_requestPairCodeAndWait());
+    }
+  }
+
+  Future<String> _getOrCreateFingerprint() async {
+    final prefs = await SharedPreferences.getInstance();
+    final key = 'device_fingerprint';
+    var fp = prefs.getString(key);
+    if (fp != null && fp.isNotEmpty) return fp;
+    final newFp = 'dev-${DateTime.now().millisecondsSinceEpoch}-${Random().nextInt(1 << 31)}';
+    await prefs.setString(key, newFp);
+    return newFp;
+  }
+
+  Future<void> _requestPairCodeAndWait() async {
+    try {
+      final fp = await _getOrCreateFingerprint();
+      final body = json.encode({"device_fingerprint": fp, "device_name": "RP Signage Player"});
+      final resp = await http
+          .post(_apiUri('/api/public/pair/request'), headers: {'Content-Type': 'application/json'}, body: body)
+          .timeout(const Duration(seconds: 10));
+      if (resp.statusCode == 200) {
+        final data = json.decode(resp.body);
+        final code = data['pair_code']?.toString();
+        if (code == null || code.isEmpty) throw Exception('No pair code');
+        generatedPairCode = code;
+        _logDebug('received pair code: $code');
+        _safeSetState(() {
+          showPairing = true;
+          pairingError = '';
+        });
+
+        // Poll pairing status until client binds the code
+        for (;;) {
+          await Future.delayed(const Duration(seconds: 4));
+          try {
+            final statusResp = await http
+                .get(_apiUri('/api/public/pair/status/$code'))
+                .timeout(const Duration(seconds: 8));
+            if (statusResp.statusCode == 200) {
+              final s = json.decode(statusResp.body) as Map<String, dynamic>;
+                _logDebug('pair status: ${s.toString()}');
+              if (s['used'] == true && (s['paired_device_id'] ?? '').toString().isNotEmpty) {
+                // Paired by the client panel — persist pair code and begin normal polling
+                final prefs = await SharedPreferences.getInstance();
+                await prefs.setString('pairCode', code);
+                _safeSetState(() {
+                  currentPairCode = code;
+                  showPairing = false;
+                  generatedPairCode = null;
+                });
+                _poll();
+                return;
+              }
+            }
+          } catch (e) {
+            // ignore transient errors
+          }
+        }
+      } else {
+        _safeSetState(() {
+          pairingError = 'Could not request pairing code';
           showPairing = true;
         });
       }
+    } catch (e) {
+      _safeSetState(() {
+        pairingError = 'Pair request failed: ${e.toString()}';
+        showPairing = true;
+      });
     }
   }
 
@@ -165,33 +291,54 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
     _poll();
   }
 
+  String _normalizedApiBase() {
+    final trimmed = apiBase.trim();
+    final fallback = trimmed.isEmpty ? 'https://rpsignage.com' : trimmed;
+    final withoutSlash = fallback.replaceAll(RegExp(r'/$'), '');
+    return withoutSlash.replaceAll(RegExp(r'/api$'), '');
+  }
+
+  Uri _apiUri(String path) {
+    return Uri.parse('${_normalizedApiBase()}$path');
+  }
+
   Future<void> _poll() async {
     if (currentPairCode == null) return;
 
+    _logDebug('poll start pairCode=$currentPairCode apiBase=${_normalizedApiBase()}');
+
     try {
-      final response = await http.get(
-        Uri.parse('$apiBase/api/public/player/$currentPairCode'),
-      );
+        final fp = await _getOrCreateFingerprint();
+        final response = await http
+          .get(_apiUri('/api/public/player/$currentPairCode'), headers: {'X-Device-Fingerprint': fp})
+          .timeout(const Duration(seconds: 12));
+
+      _logDebug('poll response status=${response.statusCode} bytes=${response.bodyBytes.length}');
 
       if (response.statusCode == 200) {
         final data = json.decode(response.body);
+        final zones = data is Map<String, dynamic> ? data['zones'] : null;
+        final template = data is Map<String, dynamic> ? data['template'] : null;
+        _logDebug('poll success device=${data is Map<String, dynamic> ? data['device_name'] : null} zoneKeys=${zones is Map ? zones.keys.join(',') : 'n/a'} template=${template is Map ? 'present' : 'missing'}');
         _safeSetState(() {
           payload = data;
           errorMessage = "";
           pairingError = "";
         });
 
-        // Load preferences for this pair code
         await _loadZonePreferences();
 
-        // Fetch provider data
-        if (data['client_id'] != null) {
-          _fetchProviderData(data['client_id'].toString());
+        final clientId = data is Map<String, dynamic>
+            ? data['client_id']?.toString()
+            : null;
+        if (clientId != null && clientId.isNotEmpty) {
+          _logDebug('poll -> fetching provider data for clientId=$clientId');
+          unawaited(_fetchProviderData(clientId));
         }
 
-        // Check for weather zones
         _checkWeatherZones();
       } else if (response.statusCode == 404) {
+        _logDebug('poll 404: pair code not found on ${_normalizedApiBase()}');
         _safeSetState(() {
           pairingError = "Invalid pairing code. Please check and try again.";
           showPairing = true;
@@ -200,13 +347,14 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
         final prefs = await SharedPreferences.getInstance();
         await prefs.remove('pairCode');
       } else {
+        _logDebug('poll unexpected status ${response.statusCode}: ${response.body}');
         _safeSetState(() => errorMessage = "Could not load content");
       }
     } catch (e) {
+      _logDebug('poll exception: $e');
       _safeSetState(() => errorMessage = "Connection error: ${e.toString()}");
     }
 
-    // Poll every 60 seconds
     pollTimer?.cancel();
     pollTimer = Timer.periodic(const Duration(seconds: 60), (_) {
       if (currentPairCode != null && !showPairing && !showSplash) {
@@ -216,31 +364,31 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
   }
 
   Future<void> _fetchProviderData(String clientId) async {
-    try {
-      final response = await http.get(
-        Uri.parse('$apiBase/api/public/providers/$clientId'),
-      );
-      if (response.statusCode == 200) {
-        _safeSetState(() => providerData = json.decode(response.body));
-      }
-    } catch (e) {
-      // Handle error silently
-    }
+    _logDebug('provider fetch start clientId=$clientId apiBase=${_normalizedApiBase()}');
 
-    // Refresh provider data every 20 seconds
+    try {
+      final response = await http
+          .get(_apiUri('/api/public/providers/$clientId'))
+          .timeout(const Duration(seconds: 12));
+      if (response.statusCode == 200) {
+        _logDebug('provider fetch success bytes=${response.bodyBytes.length}');
+        _safeSetState(() => providerData = json.decode(response.body));
+      } else {
+        _logDebug('provider fetch status=${response.statusCode}');
+      }
+    } catch (e) {}
+
     providerTimer?.cancel();
     providerTimer = Timer.periodic(const Duration(seconds: 20), (_) async {
       if (currentPairCode != null && !showPairing && !showSplash) {
         try {
-          final response = await http.get(
-            Uri.parse('$apiBase/api/public/providers/$clientId'),
-          );
+          final response = await http
+              .get(_apiUri('/api/public/providers/$clientId'))
+              .timeout(const Duration(seconds: 12));
           if (response.statusCode == 200 && mounted) {
             setState(() => providerData = json.decode(response.body));
           }
-        } catch (e) {
-          // Handle error silently
-        }
+        } catch (e) {}
       }
     });
   }
@@ -341,13 +489,35 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
           if (data['zoneMediaModes'] is Map) {
             zoneMediaModes = Map<String, String>.from(data['zoneMediaModes']);
           }
+          if (data['weatherClockScale'] is num) {
+            weatherClockScale =
+                (data['weatherClockScale'] as num).toDouble().clamp(0.7, 1.5);
+          }
+          if (data['weatherClockTextColorKey'] is String) {
+            final key = data['weatherClockTextColorKey'] as String;
+            if (_themeColors.containsKey(key)) {
+              weatherClockTextColorKey = key;
+            }
+          }
+          if (data['tickerSpeed'] is num) {
+            tickerSpeed = (data['tickerSpeed'] as num).toDouble().clamp(20.0, 140.0);
+          }
+          if (data['tickerTextColorKey'] is String) {
+            final key = data['tickerTextColorKey'] as String;
+            if (_themeColors.containsKey(key)) {
+              tickerTextColorKey = key;
+            }
+          }
+          if (data['tickerBackgroundColorKey'] is String) {
+            final key = data['tickerBackgroundColorKey'] as String;
+            if (key == 'black' || key == 'navy' || key == 'transparent') {
+              tickerBackgroundColorKey = key;
+            }
+          }
         });
-      } catch (e) {
-        // Handle JSON parse error
-      }
+      } catch (e) {}
     }
 
-    // Load orientation preference
     final orientationKey = 'signage-player-orientation:$currentPairCode';
     final savedOrientation = prefs.getString(orientationKey);
     if (savedOrientation != null &&
@@ -367,6 +537,11 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
       'customPlacementEnabled': customPlacementEnabled,
       'zonePlacements': zonePlacements,
       'zoneMediaModes': zoneMediaModes,
+      'weatherClockScale': weatherClockScale,
+      'weatherClockTextColorKey': weatherClockTextColorKey,
+      'tickerSpeed': tickerSpeed,
+      'tickerTextColorKey': tickerTextColorKey,
+      'tickerBackgroundColorKey': tickerBackgroundColorKey,
     }));
 
     final orientationKey = 'signage-player-orientation:$currentPairCode';
@@ -380,7 +555,6 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
     if (layout['zones'] != null && layout['zones'] is List) {
       zoneDefs = List<Map<String, dynamic>>.from(layout['zones']);
     } else {
-      // Legacy support
       if (layout['main'] != null) {
         zoneDefs.add({'id': 'main', 'name': layout['main'].toString()});
       }
@@ -476,8 +650,210 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
     _saveZonePreferences();
   }
 
+  void _setBrightnessOverride(double value) {
+    setState(() {
+      brightnessOverridePercent = value.clamp(10.0, 100.0);
+    });
+  }
+
+  void _setAutoBrightnessFromPayload() {
+    setState(() {
+      brightnessOverridePercent = null;
+    });
+  }
+
+  Color _tickerBackgroundColorFromKey(String key) {
+    switch (key) {
+      case 'navy':
+        return const Color(0xFF0B1220);
+      case 'transparent':
+        return Colors.transparent;
+      default:
+        return Colors.black;
+    }
+  }
+
+  void _setWeatherClockScale(double value) {
+    setState(() {
+      weatherClockScale = value.clamp(0.7, 1.5);
+    });
+    _saveZonePreferences();
+  }
+
+  void _setWeatherClockTextColor(String key) {
+    if (!_themeColors.containsKey(key)) return;
+    setState(() {
+      weatherClockTextColorKey = key;
+    });
+    _saveZonePreferences();
+  }
+
+  void _setTickerSpeed(double value) {
+    setState(() {
+      tickerSpeed = value.clamp(20.0, 140.0);
+    });
+    _saveZonePreferences();
+  }
+
+  void _setTickerTextColor(String key) {
+    if (!_themeColors.containsKey(key)) return;
+    setState(() {
+      tickerTextColorKey = key;
+    });
+    _saveZonePreferences();
+  }
+
+  void _setTickerBackgroundColor(String key) {
+    if (!(key == 'black' || key == 'navy' || key == 'transparent')) return;
+    setState(() {
+      tickerBackgroundColorKey = key;
+    });
+    _saveZonePreferences();
+  }
+
+  String _kioskExitKey() {
+    final fromPayload = payload?['kiosk_exit_key']?.toString().trim() ?? '';
+    if (fromPayload.isNotEmpty) return fromPayload;
+    final fromPairCode = currentPairCode?.trim() ?? '';
+    return fromPairCode;
+  }
+
+  Future<bool> _requestKioskAuthorization(String actionLabel, {bool alwaysPrompt = false}) async {
+    if (!kioskModeEnabled && !alwaysPrompt) return true;
+
+    final expectedKey = _kioskExitKey();
+    if (expectedKey.isEmpty) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Exit key not configured. Re-pair device first.')),
+        );
+      }
+      return false;
+    }
+
+    final controller = TextEditingController();
+    bool granted = false;
+
+    await showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) {
+        return AlertDialog(
+          backgroundColor: const Color(0xFF0F172A),
+          title: const Text(
+            'Kiosk Locked',
+            style: TextStyle(color: Colors.white, fontWeight: FontWeight.w700),
+          ),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                'Enter device key to $actionLabel.',
+                style: TextStyle(color: Colors.white.withOpacity(0.85)),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: controller,
+                autofocus: true,
+                style: const TextStyle(color: Colors.white),
+                decoration: InputDecoration(
+                  labelText: 'Device key',
+                  labelStyle: TextStyle(color: Colors.white.withOpacity(0.65)),
+                  enabledBorder: OutlineInputBorder(
+                    borderSide: BorderSide(color: Colors.white.withOpacity(0.25)),
+                  ),
+                  focusedBorder: const OutlineInputBorder(
+                    borderSide: BorderSide(color: Colors.cyanAccent),
+                  ),
+                ),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(),
+              child: const Text('Cancel'),
+            ),
+            ElevatedButton(
+              onPressed: () {
+                granted = controller.text.trim() == expectedKey;
+                Navigator.of(ctx).pop();
+              },
+              child: const Text('Unlock'),
+            ),
+          ],
+        );
+      },
+    );
+
+    if (!granted && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Invalid key. Access denied.')),
+      );
+    }
+
+    return granted;
+  }
+
+  Future<void> _attemptChangeDevice() async {
+    final allowed = await _requestKioskAuthorization('change device');
+    if (!allowed || !mounted) return;
+
+    setState(() {
+      showPairing = true;
+      menuOpen = false;
+    });
+  }
+
+  Future<void> _attemptQuitApp() async {
+    final allowed = await _requestKioskAuthorization('quit app');
+    if (!allowed) return;
+    kioskModeEnabled = false;
+    await _applyAndroidKioskMode();
+    await SystemNavigator.pop();
+  }
+
+  Future<void> _toggleKioskMode() async {
+    final allowed = await _requestKioskAuthorization(
+      kioskModeEnabled ? 'disable kiosk mode' : 'enable kiosk mode',
+      alwaysPrompt: true,
+    );
+    if (!allowed || !mounted) return;
+
+    setState(() {
+      kioskModeEnabled = !kioskModeEnabled;
+    });
+    await _applyAndroidKioskMode();
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(kioskModeEnabled ? 'Kiosk mode enabled' : 'Kiosk mode disabled'),
+        duration: const Duration(seconds: 1),
+      ),
+    );
+  }
+
+  Future<bool> _onWillPop() async {
+    if (menuOpen) {
+      setState(() {
+        menuOpen = false;
+      });
+      return false;
+    }
+
+    if (!kioskModeEnabled) return true;
+    final allowed = await _requestKioskAuthorization('exit app');
+    if (allowed) {
+      await SystemNavigator.pop();
+    }
+    return false;
+  }
+
   @override
   Widget build(BuildContext context) {
+    _logDebug('build showSplash=$showSplash showPairing=$showPairing pairCode=$currentPairCode payload=${payload == null ? 'null' : 'ready'} error=${errorMessage.isNotEmpty ? errorMessage : 'none'}');
+
     if (showSplash) {
       return const ModernSplashScreen();
     }
@@ -486,6 +862,8 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
       return PairingScreen(
         onPair: _pairDevice,
         error: pairingError,
+        initialCode: generatedPairCode,
+        onRequestCode: _requestPairCodeAndWait,
       );
     }
 
@@ -494,6 +872,7 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
     }
 
     if (payload == null) {
+      _logDebug('build -> loading screen because payload is still null');
       return const Scaffold(
         backgroundColor: Colors.black,
         body: Center(child: CircularProgressIndicator()),
@@ -551,7 +930,9 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
     final layout = payload?['template']?['layout'] ?? {};
     final canvasWidth = (layout['canvas_width'] ?? 1920).toDouble();
     final canvasHeight = (layout['canvas_height'] ?? 1080).toDouble();
-    final brightness = (payload?['brightness'] ?? 100).toDouble() / 100;
+    final payloadBrightness = (payload?['brightness'] ?? 100).toDouble().clamp(10.0, 100.0);
+    final effectiveBrightnessPercent = brightnessOverridePercent ?? payloadBrightness;
+    final brightness = effectiveBrightnessPercent / 100;
 
     final zoneDefs = _getZoneDefinitions();
     final visibleZones = zoneDefs
@@ -563,17 +944,13 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
       return items.isNotEmpty;
     });
 
-    // Calculate rotation
+    _logDebug('player screen zones=${zoneDefs.length} visible=${visibleZones.length} hasContent=$hasContent hidden=${hiddenZoneIds.length} payloadZones=${(payload?['zones'] is Map) ? (payload?['zones'] as Map).length : 0}');
+
     final explicitRotation = _normalizeRotation(
         payload?['rotation'] ?? payload?['rotation_degrees'] ?? payload?['rotation_angle'] ?? payload?['rotate'] ?? 0
     );
 
-    final isPortrait = viewportSize.height > viewportSize.width;
-    final baseRotation = orientationOverride == 'portrait'
-        ? 90
-        : orientationOverride == 'landscape'
-      ? 0
-      : 0;
+    final baseRotation = 0;
 
     final rotationDeg = _normalizeRotation(baseRotation + explicitRotation);
     final isQuarterTurn = rotationDeg == 90 || rotationDeg == 270;
@@ -590,29 +967,34 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
           : _buildEmptyScreen(),
     );
 
-    return Scaffold(
-      backgroundColor: Colors.black,
-      body: Stack(
-        fit: StackFit.expand,
-        children: [
-          Container(
-            color: Colors.black,
-          ),
-          ClipRect(
-            child: SizedBox(
-              width: surfaceWidth,
-              height: surfaceHeight,
-              child: _buildRotatedSurface(rotationDeg, surfaceWidth, surfaceHeight, content),
+    return WillPopScope(
+      onWillPop: _onWillPop,
+      child: Scaffold(
+        backgroundColor: Colors.black,
+        body: Stack(
+          fit: StackFit.expand,
+          children: [
+            Container(
+              color: Colors.black,
             ),
-          ),
-
-          // Menu button
-          Positioned(
-            top: 16,
-            right: 16,
-            child: _buildMenuButton(zoneDefs),
-          ),
-        ],
+            ClipRect(
+              child: SizedBox(
+                width: surfaceWidth,
+                height: surfaceHeight,
+                child: _buildRotatedSurface(rotationDeg, surfaceWidth, surfaceHeight, content),
+              ),
+            ),
+            Positioned(
+              top: 16,
+              right: 16,
+              child: _buildMenuButton(zoneDefs),
+            ),
+            if (menuOpen)
+              Positioned.fill(
+                child: _buildMenuOverlay(zoneDefs, payloadBrightness, effectiveBrightnessPercent),
+              ),
+          ],
+        ),
       ),
     );
   }
@@ -622,25 +1004,6 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
     final normalized = ((num.round() / 90).round() * 90) % 360;
     if (normalized < 0) return normalized + 360;
     return [0, 90, 180, 270].contains(normalized) ? normalized : 0;
-  }
-
-  Matrix4 _getRotationMatrix(int rotation, double surfaceWidth, double surfaceHeight) {
-    switch (rotation) {
-      case 90:
-        return Matrix4.identity()
-          ..rotateZ(pi / 2)
-          ..translate(0.0, -surfaceHeight);
-      case 180:
-        return Matrix4.identity()
-          ..rotateZ(pi)
-          ..translate(-surfaceWidth, -surfaceHeight);
-      case 270:
-        return Matrix4.identity()
-          ..rotateZ(3 * pi / 2)
-          ..translate(-surfaceWidth, 0.0);
-      default:
-        return Matrix4.identity();
-    }
   }
 
   Widget _buildRotatedSurface(int rotation, double surfaceWidth, double surfaceHeight, Widget child) {
@@ -710,9 +1073,7 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
           ),
           const SizedBox(height: 24),
           ElevatedButton(
-            onPressed: () => setState(() {
-              showPairing = true;
-            }),
+            onPressed: _attemptChangeDevice,
             style: ElevatedButton.styleFrom(
               backgroundColor: Colors.white24,
               foregroundColor: Colors.white,
@@ -738,16 +1099,24 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
 
     final hasCustomPlacements = customPlacementEnabled && zonePlacements.isNotEmpty;
     final renderAsAbsolute = hasAbsoluteLayout || hasCustomPlacements;
-    final shouldCompact = fillBlankSpaces && hiddenZoneIds.isNotEmpty;
+    final shouldCompact = fillBlankSpaces && hiddenZoneIds.isNotEmpty && !hasCustomPlacements;
+
+    _logDebug('build content absolute=$renderAsAbsolute compact=$shouldCompact canvas=${canvasWidth.toStringAsFixed(0)}x${canvasHeight.toStringAsFixed(0)} viewport=${viewportWidth.toStringAsFixed(0)}x${viewportHeight.toStringAsFixed(0)} zoneCount=${visibleZones.length}');
 
     if (renderAsAbsolute && !shouldCompact) {
       return SizedBox.expand(
-        child: _buildAbsoluteLayout(visibleZones, canvasWidth, canvasHeight),
+        child: _buildAbsoluteLayout(
+          visibleZones,
+          canvasWidth,
+          canvasHeight,
+          viewportWidth,
+          viewportHeight,
+        ),
       );
     }
 
     return SizedBox.expand(
-      child: _buildGridLayout(visibleZones, canvasWidth, canvasHeight),
+      child: _buildFlexLayout(visibleZones, canvasWidth, canvasHeight),
     );
   }
 
@@ -755,11 +1124,13 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
       List<Map<String, dynamic>> zones,
       double canvasWidth,
       double canvasHeight,
+      double viewportWidth,
+      double viewportHeight,
       ) {
-    final viewportWidth = viewportSize.width > 0 ? viewportSize.width : canvasWidth;
-    final viewportHeight = viewportSize.height > 0 ? viewportSize.height : canvasHeight;
-    final scaleX = viewportWidth / canvasWidth;
-    final scaleY = viewportHeight / canvasHeight;
+    final effectiveViewportWidth = viewportWidth > 0 ? viewportWidth : canvasWidth;
+    final effectiveViewportHeight = viewportHeight > 0 ? viewportHeight : canvasHeight;
+    final scaleX = effectiveViewportWidth / canvasWidth;
+    final scaleY = effectiveViewportHeight / canvasHeight;
 
     return Stack(
       fit: StackFit.expand,
@@ -777,17 +1148,23 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
           top: rect['top']! * scaleY,
           width: rect['width']! * scaleX,
           height: rect['height']! * scaleY,
-          child: _buildZone(zone, items, canvasWidth, canvasHeight),
+          child: ClipRect(
+            child: _buildZone(zone, items, canvasWidth, canvasHeight),
+          ),
         );
       }).toList(),
     );
   }
 
-  Widget _buildGridLayout(
+  Widget _buildFlexLayout(
       List<Map<String, dynamic>> zones,
       double canvasWidth,
       double canvasHeight,
       ) {
+    if (zones.isEmpty) {
+      return const SizedBox();
+    }
+
     if (zones.length == 1) {
       final zone = zones.first;
       final items = List<Map<String, dynamic>>.from(
@@ -796,14 +1173,29 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
       return _buildZone(zone, items, canvasWidth, canvasHeight);
     }
 
+    // Use Column with Expanded to prevent overflow
     return Column(
       mainAxisSize: MainAxisSize.max,
-      children: zones.map((zone) {
+      children: zones.asMap().entries.map((entry) {
+        final zone = entry.value;
         final items = List<Map<String, dynamic>>.from(
           payload?['zones']?[zone['id']] ?? [],
         );
         return Expanded(
-          child: _buildZone(zone, items, canvasWidth, canvasHeight),
+          child: LayoutBuilder(
+            builder: (context, constraints) {
+              // Ensure the zone gets proper constraints
+              return Container(
+                constraints: BoxConstraints(
+                  minHeight: 0,
+                  maxHeight: constraints.maxHeight,
+                ),
+                child: ClipRect(
+                  child: _buildZone(zone, items, canvasWidth, canvasHeight),
+                ),
+              );
+            },
+          ),
         );
       }).toList(),
     );
@@ -871,26 +1263,35 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
     final zoneId = zone['id']?.toString() ?? '';
     final zoneName = zone['name']?.toString() ?? '';
     final zoneRole = zone['role']?.toString() ?? '';
+    final queuePreview = _getQueuePreview();
+    final notices = _getNotices();
 
-    // Check zone type
+    _logDebug('zone render id=$zoneId name=$zoneName role=$zoneRole items=${items.length} queuePreview=${queuePreview.length} notices=${notices.length}');
+
     if (_isQueueZone(zoneId, zoneName, zoneRole)) {
+      _logDebug('zone branch=$zoneId -> queue board');
       return QueueBoard(
         deviceName: payload?['device_name']?.toString(),
-        queuePreview: providerData?['queue_preview'] ?? [],
-        notices: providerData?['notices'] ?? [],
+        queuePreview: queuePreview,
+        notices: notices,
       );
     }
 
     if (_isTickerZone(zoneId, zoneName)) {
+      _logDebug('zone branch=$zoneId -> ticker');
       return TickerSlot(
         items: items,
         label: zoneName,
+        tickerSpeed: tickerSpeed,
+        textColor: _themeColors[tickerTextColorKey] ?? Colors.white,
+        backgroundColor: _tickerBackgroundColorFromKey(tickerBackgroundColorKey),
       );
     }
 
     if (_isLogoZone(zoneId, zoneName, zoneRole) && items.isEmpty) {
       final logoUrl = _getClientLogoUrl();
       if (logoUrl != null) {
+        _logDebug('zone branch=$zoneId -> logo url=$logoUrl');
         return Container(
           color: Colors.black,
           child: Center(
@@ -918,43 +1319,92 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
     }
 
     if (_isAutoWidgetZone(zoneRole) && items.isEmpty) {
+      _logDebug('zone branch=$zoneId -> auto widget');
       return AutoWidgetZone(
         zone: zone,
-        queuePreview: providerData?['queue_preview'] ?? [],
+        queuePreview: queuePreview,
         payload: payload,
         providerData: providerData,
         weatherData: liveWeather ?? payload?['weather'] ?? providerData?['weather'],
         canvasWidth: canvasWidth,
         canvasHeight: canvasHeight,
+        weatherScaleFactor: weatherClockScale,
+        weatherClockTextColor: _themeColors[weatherClockTextColorKey] ?? Colors.white,
       );
     }
 
-    // Default media slot
+    _logDebug('zone branch=$zoneId -> media slot mode=${zoneMediaModes[zoneId] ?? _getDefaultZoneMediaMode(zone)}');
     return MediaSlot(
       items: items,
       label: zoneName,
       mediaMode: zoneMediaModes[zoneId] ?? _getDefaultZoneMediaMode(zone),
+      queuePreview: queuePreview,
+      todayBookingsPreview: (providerData?['today_bookings_preview'] as List<dynamic>?) ??
+          (payload?['today_bookings_preview'] as List<dynamic>?) ??
+          const [],
+      liveQueue: (providerData?['live_queue'] as List<dynamic>?) ??
+          (payload?['live_queue'] as List<dynamic>?) ??
+          const [],
+      notices: notices,
+      weatherClockScale: weatherClockScale,
+      weatherClockTextColor: _themeColors[weatherClockTextColorKey] ?? Colors.white,
     );
   }
 
   bool _isQueueZone(String id, String name, String role) {
-    return id.contains('queue') || id.contains('token') ||
-        name.contains('queue') || name.contains('token') ||
-        role == 'queue';
+    final idLower = id.toLowerCase();
+    final nameLower = name.toLowerCase();
+    final roleLower = role.toLowerCase();
+    return idLower.contains('queue') || idLower.contains('token') ||
+        nameLower.contains('queue') || nameLower.contains('token') ||
+        roleLower == 'queue';
   }
 
   bool _isTickerZone(String id, String name) {
-    return id.contains('ticker') || name.contains('ticker');
+    final idLower = id.toLowerCase();
+    final nameLower = name.toLowerCase();
+    return idLower.contains('ticker') || nameLower.contains('ticker');
   }
 
   bool _isLogoZone(String id, String name, String role) {
-    return id.contains('logo') || id.contains('brand') ||
-        name.contains('logo') || name.contains('brand') ||
-        role == 'logo';
+    final idLower = id.toLowerCase();
+    final nameLower = name.toLowerCase();
+    final roleLower = role.toLowerCase();
+    return idLower.contains('logo') || idLower.contains('brand') ||
+        nameLower.contains('logo') || nameLower.contains('brand') ||
+        roleLower == 'logo';
   }
 
   bool _isAutoWidgetZone(String role) {
     return ['header', 'weather', 'bookings'].contains(role.toLowerCase());
+  }
+
+  List<dynamic> _getQueuePreview() {
+    final providerPreview = providerData?['queue_preview'];
+    if (providerPreview is List && providerPreview.isNotEmpty) {
+      return providerPreview;
+    }
+
+    final payloadPreview = payload?['queue_preview'];
+    if (payloadPreview is List && payloadPreview.isNotEmpty) {
+      return payloadPreview;
+    }
+
+    return const [];
+  }
+
+  List<dynamic> _getNotices() {
+    final providerNotices = providerData?['notices'];
+    if (providerNotices is List && providerNotices.isNotEmpty) {
+      return providerNotices;
+    }
+
+    final payloadNotices = payload?['notices'];
+    if (payloadNotices is List && payloadNotices.isNotEmpty) {
+      return payloadNotices;
+    }
+
+    return const [];
   }
 
   String? _getClientLogoUrl() {
@@ -969,59 +1419,56 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
   }
 
   Widget _buildMenuButton(List<Map<String, dynamic>> zones) {
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      crossAxisAlignment: CrossAxisAlignment.end,
-      children: [
-        // Menu toggle button
-        GestureDetector(
-          onTap: _toggleMenu,
-          child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-            decoration: BoxDecoration(
-              color: Colors.black87,
-              borderRadius: BorderRadius.circular(20),
-              border: Border.all(color: Colors.white24),
-              boxShadow: [
-                BoxShadow(
-                  color: Colors.black.withOpacity(0.8),
-                  blurRadius: 40,
-                  offset: const Offset(0, 14),
-                ),
-              ],
-            ),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Icon(
-                  menuOpen ? Icons.close : Icons.menu,
-                  size: 16,
-                  color: Colors.white,
-                ),
-                const SizedBox(width: 8),
-                const Text(
-                  'MENU',
-                  style: TextStyle(
-                    color: Colors.white,
-                    fontSize: 12,
-                    fontWeight: FontWeight.w600,
-                    letterSpacing: 2,
-                  ),
-                ),
-              ],
-            ),
+    return TextButton.icon(
+      autofocus: !menuOpen,
+      onPressed: _toggleMenu,
+      icon: Icon(menuOpen ? Icons.close : Icons.menu, size: 16),
+      label: const Text(
+        'MENU',
+        style: TextStyle(
+          fontSize: 12,
+          fontWeight: FontWeight.w600,
+          letterSpacing: 2,
+        ),
+      ),
+      style: ButtonStyle(
+        padding: WidgetStateProperty.all(
+          const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        ),
+        foregroundColor: WidgetStateProperty.all(Colors.white),
+        backgroundColor: WidgetStateProperty.resolveWith((states) {
+          if (states.contains(WidgetState.focused)) {
+            return const Color(0xFF0EA5E9);
+          }
+          return Colors.black87;
+        }),
+        shape: WidgetStateProperty.all(
+          RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(20),
+            side: const BorderSide(color: Colors.white24),
           ),
         ),
+        overlayColor: WidgetStateProperty.all(Colors.white10),
+      ),
+    );
+  }
 
-        // Menu panel
-        if (menuOpen)
-          Container(
-            width: 350,
-            margin: const EdgeInsets.only(top: 12),
-            constraints: const BoxConstraints(maxHeight: 500),
+  Widget _buildMenuOverlay(
+    List<Map<String, dynamic>> zones,
+    double payloadBrightness,
+    double effectiveBrightnessPercent,
+  ) {
+    return FocusTraversalGroup(
+      child: Container(
+        color: Colors.black.withOpacity(0.78),
+        child: SafeArea(
+          child: Center(
+            child: Container(
+            width: double.infinity,
+            height: double.infinity,
             decoration: BoxDecoration(
               color: const Color(0xFA0F172A),
-              borderRadius: BorderRadius.circular(24),
+              borderRadius: BorderRadius.circular(0),
               border: Border.all(color: Colors.white10),
               boxShadow: [
                 BoxShadow(
@@ -1031,13 +1478,12 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
                 ),
               ],
             ),
-            child: ClipRRect(
-              borderRadius: BorderRadius.circular(24),
-              child: SingleChildScrollView(
-                child: Column(
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(0),
+                child: SingleChildScrollView(
+                  child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    // Header
                     Container(
                       padding: const EdgeInsets.all(16),
                       decoration: BoxDecoration(
@@ -1046,31 +1492,40 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
                           bottom: BorderSide(color: Colors.white.withOpacity(0.1)),
                         ),
                       ),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
+                      child: Row(
                         children: [
-                          const Text(
-                            'PLAYER MENU',
-                            style: TextStyle(
-                              fontSize: 10,
-                              letterSpacing: 3,
-                              color: Colors.white38,
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                const Text(
+                                  'PLAYER MENU',
+                                  style: TextStyle(
+                                    fontSize: 10,
+                                    letterSpacing: 3,
+                                    color: Colors.white38,
+                                  ),
+                                ),
+                                const SizedBox(height: 4),
+                                const Text(
+                                  'Controls, brightness, and zones',
+                                  style: TextStyle(
+                                    fontSize: 14,
+                                    fontWeight: FontWeight.w600,
+                                    color: Colors.white,
+                                  ),
+                                ),
+                              ],
                             ),
                           ),
-                          const SizedBox(height: 4),
-                          const Text(
-                            'Controls and zones',
-                            style: TextStyle(
-                              fontSize: 14,
-                              fontWeight: FontWeight.w600,
-                              color: Colors.white,
-                            ),
+                          _buildMenuButtonItem(
+                            icon: Icons.close,
+                            label: 'Close',
+                            onTap: _toggleMenu,
                           ),
                         ],
                       ),
                     ),
-
-                    // Controls section
                     Padding(
                       padding: const EdgeInsets.all(16),
                       child: Column(
@@ -1085,8 +1540,6 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
                             ),
                           ),
                           const SizedBox(height: 12),
-
-                          // Buttons grid
                           Wrap(
                             spacing: 8,
                             runSpacing: 8,
@@ -1104,24 +1557,257 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
                               _buildMenuButtonItem(
                                 icon: Icons.smartphone,
                                 label: 'Change Device',
-                                onTap: () {
-                                  setState(() {
-                                    showPairing = true;
-                                    menuOpen = false;
-                                  });
-                                },
+                                onTap: _attemptChangeDevice,
+                              ),
+                              _buildMenuButtonItem(
+                                icon: Icons.exit_to_app,
+                                label: 'Quit App',
+                                onTap: _attemptQuitApp,
                               ),
                               _buildMenuButtonItem(
                                 icon: Icons.restore,
                                 label: 'Restore All Zones',
                                 onTap: _resetZones,
                               ),
+                              _buildMenuButtonItem(
+                                icon: kioskModeEnabled ? Icons.lock : Icons.lock_open,
+                                label: kioskModeEnabled ? 'Kiosk: ON' : 'Kiosk: OFF',
+                                onTap: _toggleKioskMode,
+                              ),
                             ],
                           ),
-
                           const SizedBox(height: 16),
-
-                          // Orientation
+                          const Text(
+                            'BRIGHTNESS',
+                            style: TextStyle(
+                              fontSize: 10,
+                              letterSpacing: 3,
+                              color: Colors.white38,
+                            ),
+                          ),
+                          const SizedBox(height: 8),
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                            decoration: BoxDecoration(
+                              color: Colors.white.withOpacity(0.05),
+                              borderRadius: BorderRadius.circular(12),
+                              border: Border.all(color: Colors.white10),
+                            ),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Row(
+                                  children: [
+                                    Text(
+                                      'Output ${effectiveBrightnessPercent.round()}%',
+                                      style: const TextStyle(
+                                        color: Colors.white,
+                                        fontWeight: FontWeight.w600,
+                                      ),
+                                    ),
+                                    const Spacer(),
+                                    Text(
+                                      brightnessOverridePercent == null
+                                          ? 'Source: Payload ${payloadBrightness.round()}%'
+                                          : 'Source: Manual',
+                                      style: TextStyle(
+                                        color: Colors.white.withOpacity(0.6),
+                                        fontSize: 11,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                                Slider(
+                                  value: effectiveBrightnessPercent,
+                                  min: 10,
+                                  max: 100,
+                                  divisions: 18,
+                                  label: '${effectiveBrightnessPercent.round()}%',
+                                  onChanged: _setBrightnessOverride,
+                                ),
+                                Wrap(
+                                  spacing: 8,
+                                  runSpacing: 8,
+                                  children: [
+                                    _buildMenuButtonItem(
+                                      icon: Icons.brightness_low,
+                                      label: '40%',
+                                      onTap: () => _setBrightnessOverride(40),
+                                    ),
+                                    _buildMenuButtonItem(
+                                      icon: Icons.brightness_medium,
+                                      label: '70%',
+                                      onTap: () => _setBrightnessOverride(70),
+                                    ),
+                                    _buildMenuButtonItem(
+                                      icon: Icons.brightness_high,
+                                      label: '100%',
+                                      onTap: () => _setBrightnessOverride(100),
+                                    ),
+                                    _buildMenuButtonItem(
+                                      icon: Icons.auto_mode,
+                                      label: 'Use Payload',
+                                      onTap: _setAutoBrightnessFromPayload,
+                                    ),
+                                  ],
+                                ),
+                              ],
+                            ),
+                          ),
+                          const SizedBox(height: 16),
+                          const Text(
+                            'WIDGET STYLE',
+                            style: TextStyle(
+                              fontSize: 10,
+                              letterSpacing: 3,
+                              color: Colors.white38,
+                            ),
+                          ),
+                          const SizedBox(height: 8),
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                            decoration: BoxDecoration(
+                              color: Colors.white.withOpacity(0.05),
+                              borderRadius: BorderRadius.circular(12),
+                              border: Border.all(color: Colors.white10),
+                            ),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  'Weather/Clock size ${(weatherClockScale * 100).round()}%',
+                                  style: const TextStyle(
+                                    color: Colors.white,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
+                                Slider(
+                                  value: weatherClockScale,
+                                  min: 0.7,
+                                  max: 1.5,
+                                  divisions: 8,
+                                  label: '${(weatherClockScale * 100).round()}%',
+                                  onChanged: _setWeatherClockScale,
+                                ),
+                                const SizedBox(height: 6),
+                                Text(
+                                  'Text color',
+                                  style: TextStyle(
+                                    color: Colors.white.withOpacity(0.7),
+                                    fontSize: 11,
+                                  ),
+                                ),
+                                const SizedBox(height: 8),
+                                Wrap(
+                                  spacing: 8,
+                                  runSpacing: 8,
+                                  children: _themeColors.entries.map((entry) {
+                                    final selected = weatherClockTextColorKey == entry.key;
+                                    return _buildColorChoice(
+                                      selected: selected,
+                                      color: entry.value,
+                                      label: entry.key.toUpperCase(),
+                                      onTap: () => _setWeatherClockTextColor(entry.key),
+                                    );
+                                  }).toList(),
+                                ),
+                              ],
+                            ),
+                          ),
+                          const SizedBox(height: 16),
+                          const Text(
+                            'RSS / TICKER',
+                            style: TextStyle(
+                              fontSize: 10,
+                              letterSpacing: 3,
+                              color: Colors.white38,
+                            ),
+                          ),
+                          const SizedBox(height: 8),
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                            decoration: BoxDecoration(
+                              color: Colors.white.withOpacity(0.05),
+                              borderRadius: BorderRadius.circular(12),
+                              border: Border.all(color: Colors.white10),
+                            ),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  'Ticker speed ${tickerSpeed.round()}',
+                                  style: const TextStyle(
+                                    color: Colors.white,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
+                                Slider(
+                                  value: tickerSpeed,
+                                  min: 20,
+                                  max: 140,
+                                  divisions: 12,
+                                  label: '${tickerSpeed.round()}',
+                                  onChanged: _setTickerSpeed,
+                                ),
+                                const SizedBox(height: 6),
+                                Text(
+                                  'Ticker text color',
+                                  style: TextStyle(
+                                    color: Colors.white.withOpacity(0.7),
+                                    fontSize: 11,
+                                  ),
+                                ),
+                                const SizedBox(height: 8),
+                                Wrap(
+                                  spacing: 8,
+                                  runSpacing: 8,
+                                  children: _themeColors.entries.map((entry) {
+                                    final selected = tickerTextColorKey == entry.key;
+                                    return _buildColorChoice(
+                                      selected: selected,
+                                      color: entry.value,
+                                      label: entry.key.toUpperCase(),
+                                      onTap: () => _setTickerTextColor(entry.key),
+                                    );
+                                  }).toList(),
+                                ),
+                                const SizedBox(height: 8),
+                                Text(
+                                  'Ticker background',
+                                  style: TextStyle(
+                                    color: Colors.white.withOpacity(0.7),
+                                    fontSize: 11,
+                                  ),
+                                ),
+                                const SizedBox(height: 8),
+                                Wrap(
+                                  spacing: 8,
+                                  runSpacing: 8,
+                                  children: [
+                                    _buildColorChoice(
+                                      selected: tickerBackgroundColorKey == 'black',
+                                      color: Colors.black,
+                                      label: 'BLACK',
+                                      onTap: () => _setTickerBackgroundColor('black'),
+                                    ),
+                                    _buildColorChoice(
+                                      selected: tickerBackgroundColorKey == 'navy',
+                                      color: const Color(0xFF0B1220),
+                                      label: 'NAVY',
+                                      onTap: () => _setTickerBackgroundColor('navy'),
+                                    ),
+                                    _buildColorChoice(
+                                      selected: tickerBackgroundColorKey == 'transparent',
+                                      color: Colors.white10,
+                                      label: 'TRANSPARENT',
+                                      onTap: () => _setTickerBackgroundColor('transparent'),
+                                    ),
+                                  ],
+                                ),
+                              ],
+                            ),
+                          ),
+                          const SizedBox(height: 16),
                           const Text(
                             'ORIENTATION',
                             style: TextStyle(
@@ -1170,7 +1856,6 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
                               );
                             }).toList(),
                           ),
-
                           const SizedBox(height: 12),
                           Wrap(
                             spacing: 8,
@@ -1191,13 +1876,10 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
                         ],
                       ),
                     ),
-
                     Container(
                       height: 1,
                       color: Colors.white.withOpacity(0.1),
                     ),
-
-                    // Zone settings
                     Padding(
                       padding: const EdgeInsets.all(16),
                       child: Column(
@@ -1225,8 +1907,6 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
                             ],
                           ),
                           const SizedBox(height: 12),
-
-                          // Zone list
                           ...zones.map((zone) {
                             final zoneId = zone['id']?.toString() ?? '';
                             final zoneName = zone['name']?.toString() ?? '';
@@ -1383,12 +2063,14 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
                         ],
                       ),
                     ),
-                  ],
+                    ],
+                  ),
                 ),
               ),
             ),
           ),
-      ],
+        ),
+      ),
     );
   }
 
@@ -1397,36 +2079,96 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
     required String label,
     required VoidCallback onTap,
   }) {
-    return GestureDetector(
-      onTap: onTap,
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-        decoration: BoxDecoration(
-          color: Colors.white.withOpacity(0.05),
-          borderRadius: BorderRadius.circular(16),
-          border: Border.all(color: Colors.white10),
+    return TextButton.icon(
+      onPressed: onTap,
+      icon: Icon(icon, size: 16),
+      label: Text(
+        label,
+        style: const TextStyle(
+          fontSize: 13,
+          fontWeight: FontWeight.w500,
         ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(icon, size: 16, color: Colors.white70),
-            const SizedBox(width: 8),
-            Text(
-              label,
-              style: const TextStyle(
-                fontSize: 13,
-                fontWeight: FontWeight.w500,
-                color: Colors.white,
-              ),
+      ),
+      style: ButtonStyle(
+        padding: WidgetStateProperty.all(
+          const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        ),
+        foregroundColor: WidgetStateProperty.resolveWith((states) {
+          return states.contains(WidgetState.focused)
+              ? Colors.black
+              : Colors.white;
+        }),
+        backgroundColor: WidgetStateProperty.resolveWith((states) {
+          if (states.contains(WidgetState.focused)) {
+            return Colors.cyanAccent;
+          }
+          return Colors.white.withOpacity(0.05);
+        }),
+        shape: WidgetStateProperty.all(
+          RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(16),
+            side: const BorderSide(color: Colors.white10),
+          ),
+        ),
+        overlayColor: WidgetStateProperty.all(Colors.white10),
+      ),
+    );
+  }
+
+  Widget _buildColorChoice({
+    required bool selected,
+    required Color color,
+    required String label,
+    required VoidCallback onTap,
+  }) {
+    return TextButton(
+      onPressed: onTap,
+      style: ButtonStyle(
+        padding: WidgetStateProperty.all(
+          const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+        ),
+        backgroundColor: WidgetStateProperty.all(
+          selected ? Colors.white12 : Colors.white.withOpacity(0.03),
+        ),
+        shape: WidgetStateProperty.all(
+          RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(12),
+            side: BorderSide(
+              color: selected ? Colors.cyanAccent : Colors.white24,
+              width: selected ? 1.5 : 1,
             ),
-          ],
+          ),
         ),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(
+            width: 14,
+            height: 14,
+            decoration: BoxDecoration(
+              color: color,
+              shape: BoxShape.circle,
+              border: Border.all(color: Colors.white30),
+            ),
+          ),
+          const SizedBox(width: 8),
+          Text(
+            label,
+            style: TextStyle(
+              color: selected ? Colors.cyanAccent : Colors.white,
+              fontSize: 11,
+              fontWeight: FontWeight.w600,
+              letterSpacing: 1,
+            ),
+          ),
+        ],
       ),
     );
   }
 }
 
-// Splash Screen
+// Splash Screen (same as before, no changes needed)
 class ModernSplashScreen extends StatefulWidget {
   const ModernSplashScreen({super.key});
 
@@ -1506,7 +2248,6 @@ class _ModernSplashScreenState extends State<ModernSplashScreen>
         ),
         child: Stack(
           children: [
-            // Animated background orbs
             Positioned(
               top: -150,
               right: -150,
@@ -1558,13 +2299,10 @@ class _ModernSplashScreenState extends State<ModernSplashScreen>
                 },
               ),
             ),
-
-            // Content
             Center(
               child: Column(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
-                  // Animated logo
                   AnimatedBuilder(
                     listenable: _pulseAnimation,
                     builder: (context, child) {
@@ -1595,10 +2333,7 @@ class _ModernSplashScreenState extends State<ModernSplashScreen>
                       ],
                     ),
                   ),
-
                   const SizedBox(height: 40),
-
-                  // Progress bar
                   Container(
                     width: 250,
                     height: 2,
@@ -1620,10 +2355,7 @@ class _ModernSplashScreenState extends State<ModernSplashScreen>
                       },
                     ),
                   ),
-
                   const SizedBox(height: 16),
-
-                  // Loading text
                   Text(
                     'Loading$dots',
                     style: TextStyle(
@@ -1632,10 +2364,7 @@ class _ModernSplashScreenState extends State<ModernSplashScreen>
                       letterSpacing: 3,
                     ),
                   ),
-
                   const SizedBox(height: 40),
-
-                  // Feature tags
                   Wrap(
                     spacing: 12,
                     runSpacing: 12,
@@ -1682,15 +2411,19 @@ class _ModernSplashScreenState extends State<ModernSplashScreen>
   }
 }
 
-// Pairing Screen
+// Pairing Screen (same as before)
 class PairingScreen extends StatefulWidget {
   final Function(String) onPair;
   final String error;
+  final String? initialCode;
+  final VoidCallback? onRequestCode;
 
   const PairingScreen({
     super.key,
     required this.onPair,
     required this.error,
+    this.initialCode,
+    this.onRequestCode,
   });
 
   @override
@@ -1698,32 +2431,14 @@ class PairingScreen extends StatefulWidget {
 }
 
 class _PairingScreenState extends State<PairingScreen> {
-  final TextEditingController _codeController = TextEditingController();
   bool isLoading = false;
   bool isConnecting = false;
 
-  void _handleSubmit() {
-    final code = _codeController.text.trim().toUpperCase();
-    if (code.isEmpty) {
-      return;
-    }
-
-    setState(() {
-      isLoading = true;
-      isConnecting = true;
-    });
-
-    Future.delayed(const Duration(seconds: 1), () {
-      if (mounted) {
-        widget.onPair(code);
-      }
-    });
-  }
-
   @override
-  void dispose() {
-    _codeController.dispose();
-    super.dispose();
+  void initState() {
+    super.initState();
+    isLoading = true;
+    isConnecting = true;
   }
 
   @override
@@ -1743,7 +2458,6 @@ class _PairingScreenState extends State<PairingScreen> {
         ),
         child: Stack(
           children: [
-            // Background pattern
             Positioned.fill(
               child: Opacity(
                 opacity: 0.05,
@@ -1752,8 +2466,6 @@ class _PairingScreenState extends State<PairingScreen> {
                 ),
               ),
             ),
-
-            // Floating orbs
             Positioned(
               top: 80,
               left: 40,
@@ -1778,15 +2490,12 @@ class _PairingScreenState extends State<PairingScreen> {
                 ),
               ),
             ),
-
-            // Content
             Center(
               child: SingleChildScrollView(
                 padding: const EdgeInsets.all(24),
                 child: Column(
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
-                    // Logo
                     const Text(
                       'RP',
                       style: TextStyle(
@@ -1817,10 +2526,7 @@ class _PairingScreenState extends State<PairingScreen> {
                         ),
                       ),
                     ),
-
                     const SizedBox(height: 32),
-
-                    // Card
                     Container(
                       width: 400,
                       padding: const EdgeInsets.all(32),
@@ -1839,72 +2545,72 @@ class _PairingScreenState extends State<PairingScreen> {
                       child: Column(
                         children: [
                           const Text(
-                            'Pair Your Device',
-                            style: TextStyle(
-                              fontSize: 24,
-                              fontWeight: FontWeight.bold,
-                              color: Colors.white,
-                            ),
-                          ),
-                          const SizedBox(height: 8),
-                          Text(
-                            'Enter the pairing code from your client\ndashboard to start displaying content',
-                            textAlign: TextAlign.center,
-                            style: TextStyle(
-                              fontSize: 14,
-                              color: Colors.white.withOpacity(0.6),
-                            ),
-                          ),
-
-                          const SizedBox(height: 32),
-
-                          // Input field
-                          TextField(
-                            controller: _codeController,
-                            textCapitalization: TextCapitalization.characters,
-                            textAlign: TextAlign.center,
-                            maxLength: 10,
-                            style: const TextStyle(
-                              color: Colors.white,
-                              fontSize: 28,
-                              fontFamily: 'monospace',
-                              letterSpacing: 4,
-                            ),
-                            decoration: InputDecoration(
-                              counterText: '',
-                              hintText: 'e.g., ABC123',
-                              hintStyle: TextStyle(
-                                color: Colors.white.withOpacity(0.3),
-                                fontSize: 28,
-                                fontFamily: 'monospace',
-                                letterSpacing: 4,
-                              ),
-                              filled: true,
-                              fillColor: Colors.white.withOpacity(0.1),
-                              border: OutlineInputBorder(
-                                borderRadius: BorderRadius.circular(16),
-                                borderSide: BorderSide.none,
-                              ),
-                              focusedBorder: OutlineInputBorder(
-                                borderRadius: BorderRadius.circular(16),
-                                borderSide: BorderSide(
-                                  color: Colors.cyan.withOpacity(0.5),
-                                  width: 2,
-                                ),
-                              ),
-                            ),
-                            onSubmitted: (_) => _handleSubmit(),
-                          ),
-
-                          const SizedBox(height: 8),
-                          Text(
-                            'Find this code in your client portal under "Devices"',
+                            'PAIRING',
                             style: TextStyle(
                               fontSize: 12,
-                              color: Colors.white.withOpacity(0.3),
+                              letterSpacing: 6,
+                              color: Colors.white54,
+                              fontWeight: FontWeight.w700,
                             ),
                           ),
-
+                          const SizedBox(height: 32),
+                          Text(
+                            'Device pairing code',
+                            style: TextStyle(
+                              fontSize: 12,
+                              color: Colors.white.withOpacity(0.5),
+                            ),
+                          ),
+                          const SizedBox(height: 12),
+                          Text(
+                            (widget.initialCode != null && widget.initialCode!.isNotEmpty)
+                                ? widget.initialCode!.substring(0, min(6, widget.initialCode!.length))
+                                : '••••••',
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 56,
+                              fontFamily: 'monospace',
+                              letterSpacing: 8,
+                              fontWeight: FontWeight.w900,
+                            ),
+                          ),
+                          const SizedBox(height: 12),
+                          Text(
+                            widget.initialCode != null && widget.initialCode!.isNotEmpty
+                                ? 'Show this code in the client portal to pair the device'
+                                : 'Requesting a new code...',
+                            textAlign: TextAlign.center,
+                            style: TextStyle(
+                              fontSize: 12,
+                              color: Colors.white.withOpacity(0.35),
+                            ),
+                          ),
+                          const SizedBox(height: 12),
+                          Container(
+                            padding: const EdgeInsets.all(12),
+                            decoration: BoxDecoration(
+                              color: Colors.white.withOpacity(0.03),
+                              borderRadius: BorderRadius.circular(12),
+                              border: Border.all(color: Colors.white10),
+                            ),
+                            child: Column(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                  const SizedBox(
+                                    width: 18,
+                                    height: 18,
+                                    child: CircularProgressIndicator(strokeWidth: 2, color: Colors.cyanAccent),
+                                  ),
+                                  const SizedBox(height: 10),
+                                  Text(
+                                    widget.initialCode != null && widget.initialCode!.isNotEmpty
+                                        ? 'Waiting for client confirmation'
+                                        : 'Requesting code from server...',
+                                    style: const TextStyle(color: Colors.white54),
+                                  ),
+                              ],
+                            ),
+                          ),
                           if (widget.error.isNotEmpty) ...[
                             const SizedBox(height: 16),
                             Container(
@@ -1935,83 +2641,10 @@ class _PairingScreenState extends State<PairingScreen> {
                               ),
                             ),
                           ],
-
-                          if (isConnecting) ...[
-                            const SizedBox(height: 16),
-                            Container(
-                              padding: const EdgeInsets.all(12),
-                              decoration: BoxDecoration(
-                                color: Colors.cyan.withOpacity(0.2),
-                                borderRadius: BorderRadius.circular(12),
-                                border: Border.all(color: Colors.cyan.withOpacity(0.3)),
-                              ),
-                              child: const Row(
-                                children: [
-                                  SizedBox(
-                                    width: 20,
-                                    height: 20,
-                                    child: CircularProgressIndicator(
-                                      strokeWidth: 2,
-                                      color: Colors.cyanAccent,
-                                    ),
-                                  ),
-                                  SizedBox(width: 8),
-                                  Text(
-                                    'Connecting to server...',
-                                    style: TextStyle(
-                                      color: Colors.cyanAccent,
-                                      fontSize: 14,
-                                    ),
-                                  ),
-                                ],
-                              ),
-                            ),
-                          ],
-
                           const SizedBox(height: 24),
-
-                          // Submit button
-                          SizedBox(
-                            width: double.infinity,
-                            child: ElevatedButton(
-                              onPressed: isLoading ? null : _handleSubmit,
-                              style: ElevatedButton.styleFrom(
-                                padding: const EdgeInsets.symmetric(vertical: 16),
-                                backgroundColor: const Color(0xFF7C3AED),
-                                foregroundColor: Colors.white,
-                                shape: RoundedRectangleBorder(
-                                  borderRadius: BorderRadius.circular(16),
-                                ),
-                              ),
-                              child: isLoading
-                                  ? const SizedBox(
-                                width: 20,
-                                height: 20,
-                                child: CircularProgressIndicator(
-                                  strokeWidth: 2,
-                                  color: Colors.white,
-                                ),
-                              )
-                                  : const Row(
-                                mainAxisAlignment: MainAxisAlignment.center,
-                                children: [
-                                  Text(
-                                    'CONNECT NOW',
-                                    style: TextStyle(
-                                      fontWeight: FontWeight.w600,
-                                      letterSpacing: 2,
-                                    ),
-                                  ),
-                                  SizedBox(width: 8),
-                                  Icon(Icons.arrow_forward, size: 18),
-                                ],
-                              ),
-                            ),
-                          ),
                         ],
                       ),
                     ),
-
                     const SizedBox(height: 24),
                     Text(
                       'Secure connection · End-to-end encrypted',
@@ -2051,18 +2684,46 @@ class GridPatternPainter extends CustomPainter {
   bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
 }
 
-// Media Slot Widget
+// Media Slot Widget (scrollable version to prevent overflow)
 class MediaSlot extends StatefulWidget {
   final List<Map<String, dynamic>> items;
   final String label;
   final String mediaMode;
+  final List<dynamic> queuePreview;
+  final List<dynamic> todayBookingsPreview;
+  final List<dynamic> liveQueue;
+  final List<dynamic> notices;
+  final double weatherClockScale;
+  final Color weatherClockTextColor;
 
   const MediaSlot({
     super.key,
     required this.items,
     required this.label,
     this.mediaMode = 'fill',
+    this.queuePreview = const [],
+    this.todayBookingsPreview = const [],
+    this.liveQueue = const [],
+    this.notices = const [],
+    this.weatherClockScale = 1.0,
+    this.weatherClockTextColor = Colors.white,
   });
+
+  static _MediaSlotState? _activeAudioState;
+
+  static void _claimAudioFocus(_MediaSlotState state) {
+    final current = _activeAudioState;
+    if (current != null && !identical(current, state)) {
+      current._pausePlaybackForFocusLoss();
+    }
+    _activeAudioState = state;
+  }
+
+  static void _releaseAudioFocus(_MediaSlotState state) {
+    if (identical(_activeAudioState, state)) {
+      _activeAudioState = null;
+    }
+  }
 
   @override
   State<MediaSlot> createState() => _MediaSlotState();
@@ -2071,12 +2732,18 @@ class MediaSlot extends StatefulWidget {
 class _MediaSlotState extends State<MediaSlot> {
   int currentIndex = 0;
   Timer? timer;
+  Timer? controlsHideTimer;
   bool showFrame = true;
   bool isMuted = true;
   bool showPlaybackControls = false;
   String? videoError;
   YoutubePlayerController? youtubeController;
   VideoPlayerController? videoController;
+
+  void _pausePlaybackForFocusLoss() {
+    youtubeController?.pause();
+    videoController?.pause();
+  }
 
   @override
   void initState() {
@@ -2101,10 +2768,27 @@ class _MediaSlotState extends State<MediaSlot> {
 
     final item = widget.items[currentIndex];
     final duration = (item['duration'] ?? 10).toInt();
+    final itemType = _resolveItemType(item);
 
-    if (item['type'] != 'video' && item['type'] != 'youtube') {
+    if (itemType != 'video' && itemType != 'youtube') {
       timer = Timer(Duration(seconds: duration), _nextItem);
     }
+  }
+
+  String _resolveItemType(Map<String, dynamic> item) {
+    final rawType = (item['type'] ?? item['kind'] ?? 'media').toString().toLowerCase();
+    final itemUrl = _resolveUrl(item);
+
+    if (rawType == 'media') {
+      if (_getYoutubeId(item['url']?.toString() ?? '') != null) {
+        return 'youtube';
+      }
+      if (_isVideoUrl(itemUrl) || _isVideoContentType(item)) {
+        return 'video';
+      }
+    }
+
+    return rawType;
   }
 
   void _applyMuteState() {
@@ -2128,18 +2812,38 @@ class _MediaSlotState extends State<MediaSlot> {
     _applyMuteState();
   }
 
-  void _togglePlaybackControls() {
+  void _showPlaybackControlsTemporarily() {
+    controlsHideTimer?.cancel();
     setState(() {
-      showPlaybackControls = !showPlaybackControls;
+      showPlaybackControls = true;
     });
+    controlsHideTimer = Timer(const Duration(seconds: 4), () {
+      if (!mounted) return;
+      setState(() {
+        showPlaybackControls = false;
+      });
+    });
+  }
+
+  void _togglePlaybackOverlayVisibility() {
+    if (showPlaybackControls) {
+      controlsHideTimer?.cancel();
+      setState(() {
+        showPlaybackControls = false;
+      });
+      return;
+    }
+    _showPlaybackControlsTemporarily();
   }
 
   void _nextItem() {
     if (!mounted) return;
+    controlsHideTimer?.cancel();
     setState(() {
       currentIndex = (currentIndex + 1) % widget.items.length;
       showFrame = false;
       videoError = null;
+      showPlaybackControls = false;
     });
     Future.delayed(const Duration(milliseconds: 30), () {
       if (mounted) {
@@ -2151,7 +2855,9 @@ class _MediaSlotState extends State<MediaSlot> {
 
   @override
   void dispose() {
+    MediaSlot._releaseAudioFocus(this);
     timer?.cancel();
+    controlsHideTimer?.cancel();
     youtubeController?.dispose();
     videoController?.dispose();
     super.dispose();
@@ -2188,15 +2894,7 @@ class _MediaSlotState extends State<MediaSlot> {
     }
 
     final item = widget.items[currentIndex];
-    final rawType = (item['type'] ?? item['kind'] ?? 'media').toString().toLowerCase();
-    final itemUrl = _resolveUrl(item);
-    final itemType = rawType == 'media'
-      ? (_getYoutubeId(item['url']?.toString() ?? '') != null
-        ? 'youtube'
-        : _isVideoUrl(itemUrl) || _isVideoContentType(item)
-          ? 'video'
-          : rawType)
-      : rawType;
+    final itemType = _resolveItemType(item);
 
     Widget content;
 
@@ -2233,7 +2931,21 @@ class _MediaSlotState extends State<MediaSlot> {
       child: AnimatedScale(
         scale: showFrame ? 1.0 : 1.01,
         duration: const Duration(milliseconds: 500),
-        child: content,
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            return ClipRect(
+              child: FittedBox(
+                fit: BoxFit.contain,
+                alignment: Alignment.topLeft,
+                child: SizedBox(
+                  width: constraints.maxWidth,
+                  height: constraints.maxHeight,
+                  child: content,
+                ),
+              ),
+            );
+          },
+        ),
       ),
     );
   }
@@ -2241,48 +2953,112 @@ class _MediaSlotState extends State<MediaSlot> {
   Widget _buildVideoLikeZone(Widget child) {
     return GestureDetector(
       behavior: HitTestBehavior.opaque,
-      onTap: _togglePlaybackControls,
+      onTap: _togglePlaybackOverlayVisibility,
       child: Stack(
         fit: StackFit.expand,
         children: [
           child,
-          if (showPlaybackControls)
-            Positioned(
-              top: 12,
-              right: 12,
-              child: _buildMuteButton(),
-            ),
+          if (showPlaybackControls) _buildPlaybackOverlay(),
         ],
       ),
     );
   }
 
-  Widget _buildMuteButton() {
-    return GestureDetector(
-      onTap: _toggleMute,
+  Widget _buildPlaybackOverlay() {
+    final hasVideo = videoController != null && videoController!.value.isInitialized;
+    final hasYoutube = youtubeController != null;
+
+    if (!hasVideo && !hasYoutube) {
+      return const SizedBox.shrink();
+    }
+
+    return Positioned(
+      left: 0,
+      right: 0,
+      bottom: 0,
       child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-        decoration: BoxDecoration(
-          color: Colors.black.withOpacity(0.6),
-          borderRadius: BorderRadius.circular(20),
-          border: Border.all(color: Colors.white24),
-        ),
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
+        color: Colors.black.withOpacity(0.45),
         child: Row(
-          mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(
-              isMuted ? Icons.volume_off : Icons.volume_up,
-              color: Colors.white,
-              size: 16,
-            ),
-            const SizedBox(width: 6),
-            Text(
-              isMuted ? 'MUTED' : 'SOUND ON',
-              style: const TextStyle(
+            IconButton(
+              onPressed: () {
+                if (hasVideo) {
+                  if (videoController!.value.isPlaying) {
+                    videoController!.pause();
+                  } else {
+                    videoController!.play();
+                  }
+                } else if (hasYoutube) {
+                  if (youtubeController!.value.isPlaying) {
+                    youtubeController!.pause();
+                  } else {
+                    youtubeController!.play();
+                  }
+                }
+                setState(() {});
+                _showPlaybackControlsTemporarily();
+              },
+              icon: Icon(
+                (hasVideo && videoController!.value.isPlaying) ||
+                        (hasYoutube && youtubeController!.value.isPlaying)
+                    ? Icons.pause_circle_filled
+                    : Icons.play_circle_fill,
                 color: Colors.white,
-                fontSize: 11,
-                fontWeight: FontWeight.w700,
-                letterSpacing: 1.2,
+                size: 32,
+              ),
+            ),
+            if (hasVideo)
+              Expanded(
+                child: VideoProgressIndicator(
+                  videoController!,
+                  allowScrubbing: true,
+                  padding: const EdgeInsets.symmetric(horizontal: 8),
+                  colors: const VideoProgressColors(
+                    playedColor: Colors.cyanAccent,
+                    bufferedColor: Colors.white24,
+                    backgroundColor: Colors.white12,
+                  ),
+                ),
+              )
+            else
+              const Spacer(),
+            IconButton(
+              onPressed: () async {
+                if (hasVideo) {
+                  await videoController!.seekTo(Duration.zero);
+                  await videoController!.play();
+                } else if (hasYoutube) {
+                  youtubeController!.seekTo(const Duration(seconds: 0));
+                  youtubeController!.play();
+                }
+                setState(() {});
+                _showPlaybackControlsTemporarily();
+              },
+              icon: const Icon(
+                Icons.replay,
+                color: Colors.white,
+                size: 28,
+              ),
+            ),
+            TextButton.icon(
+              onPressed: () {
+                _toggleMute();
+                _showPlaybackControlsTemporarily();
+              },
+              icon: Icon(
+                isMuted ? Icons.volume_off : Icons.volume_up,
+                color: Colors.white,
+                size: 18,
+              ),
+              label: Text(
+                isMuted ? 'UNMUTE' : 'MUTE',
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontWeight: FontWeight.w700,
+                  fontSize: 11,
+                  letterSpacing: 0.8,
+                ),
               ),
             ),
           ],
@@ -2292,6 +3068,9 @@ class _MediaSlotState extends State<MediaSlot> {
   }
 
   Widget _buildClock(Map<String, dynamic> item) {
+    final scaleFactor = widget.weatherClockScale.clamp(0.7, 1.5);
+    final textColor = widget.weatherClockTextColor;
+
     return StreamBuilder(
       stream: Stream.periodic(const Duration(seconds: 1)),
       builder: (context, snapshot) {
@@ -2300,13 +3079,17 @@ class _MediaSlotState extends State<MediaSlot> {
         final date = '${_getWeekday(now.weekday)}, ${_getMonth(now.month)} ${now.day}';
 
         return Container(
-          decoration: const BoxDecoration(
+          width: double.infinity,
+          height: double.infinity,
+          decoration: BoxDecoration(
             gradient: RadialGradient(
               center: Alignment.topCenter,
-              colors: [Color(0x24FFFFFF), Colors.transparent],
+              colors: [const Color(0x24FFFFFF), Colors.transparent],
             ),
           ),
           child: Container(
+            width: double.infinity,
+            height: double.infinity,
             decoration: const BoxDecoration(
               gradient: LinearGradient(
                 begin: Alignment.topCenter,
@@ -2314,7 +3097,7 @@ class _MediaSlotState extends State<MediaSlot> {
                 colors: [Color(0xFF1F2937), Color(0xFF0B1120)],
               ),
             ),
-            padding: const EdgeInsets.all(20),
+            padding: EdgeInsets.all(20 * scaleFactor),
             child: Column(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -2325,17 +3108,19 @@ class _MediaSlotState extends State<MediaSlot> {
                     Text(
                       (item['title'] ?? 'Today').toString().toUpperCase(),
                       style: TextStyle(
-                        fontSize: 10,
+                        fontSize: 10 * scaleFactor,
                         letterSpacing: 4.5,
-                        color: Colors.white.withOpacity(0.45),
+                        color: textColor.withOpacity(0.45),
                       ),
                     ),
-                    const SizedBox(height: 8),
+                    SizedBox(height: 8 * scaleFactor),
                     Text(
                       item['location']?.toString() ?? 'Local time',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
                       style: TextStyle(
-                        fontSize: 14,
-                        color: Colors.white.withOpacity(0.7),
+                        fontSize: 14 * scaleFactor,
+                        color: textColor.withOpacity(0.7),
                       ),
                     ),
                   ],
@@ -2343,30 +3128,47 @@ class _MediaSlotState extends State<MediaSlot> {
                 Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(
-                      time,
-                      style: const TextStyle(
-                        fontSize: 72,
-                        fontWeight: FontWeight.w900,
-                        color: Colors.white,
-                        letterSpacing: -2,
+                    SizedBox(
+                      width: double.infinity,
+                      child: FittedBox(
+                        fit: BoxFit.scaleDown,
+                        alignment: Alignment.centerLeft,
+                        child: Text(
+                          time,
+                          style: TextStyle(
+                            fontSize: 72 * scaleFactor,
+                            fontWeight: FontWeight.w900,
+                            color: textColor,
+                            letterSpacing: -2,
+                          ),
+                        ),
                       ),
                     ),
-                    const SizedBox(height: 8),
-                    Text(
-                      date,
-                      style: TextStyle(
-                        fontSize: 18,
-                        color: Colors.white.withOpacity(0.8),
+                    SizedBox(height: 8 * scaleFactor),
+                    SizedBox(
+                      width: double.infinity,
+                      child: FittedBox(
+                        fit: BoxFit.scaleDown,
+                        alignment: Alignment.centerLeft,
+                        child: Text(
+                          date,
+                          style: TextStyle(
+                            fontSize: 18 * scaleFactor,
+                            color: textColor.withOpacity(0.8),
+                          ),
+                        ),
                       ),
                     ),
-                    const SizedBox(height: 16),
+                    SizedBox(height: 16 * scaleFactor),
                     Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                      padding: EdgeInsets.symmetric(
+                        horizontal: 12 * scaleFactor,
+                        vertical: 6 * scaleFactor,
+                      ),
                       decoration: BoxDecoration(
-                        color: Colors.white.withOpacity(0.05),
+                        color: textColor.withOpacity(0.05),
                         borderRadius: BorderRadius.circular(20),
-                        border: Border.all(color: Colors.white10),
+                        border: Border.all(color: textColor.withOpacity(0.2)),
                       ),
                       child: Row(
                         mainAxisSize: MainAxisSize.min,
@@ -2380,11 +3182,11 @@ class _MediaSlotState extends State<MediaSlot> {
                             ),
                           ),
                           const SizedBox(width: 8),
-                          const Text(
+                          Text(
                             'LIVE',
                             style: TextStyle(
-                              fontSize: 12,
-                              color: Colors.white60,
+                              fontSize: 12 * scaleFactor,
+                              color: textColor.withOpacity(0.6),
                               letterSpacing: 3,
                             ),
                           ),
@@ -2402,19 +3204,26 @@ class _MediaSlotState extends State<MediaSlot> {
   }
 
   Widget _buildWeather(Map<String, dynamic> item) {
+    final scaleFactor = widget.weatherClockScale.clamp(0.7, 1.5);
+    final textColor = widget.weatherClockTextColor;
+
     final temp = item['temperature']?.toString() ?? '--';
     final condition = item['condition']?.toString() ?? 'Clear';
     final location = item['location']?.toString() ?? 'Current conditions';
 
     return Container(
+      width: double.infinity,
+      height: double.infinity,
       decoration: BoxDecoration(
         gradient: RadialGradient(
           center: Alignment.topCenter,
-          colors: [Color(0x2238BDF8), Colors.transparent],
+          colors: [const Color(0x2238BDF8), Colors.transparent],
           radius: 0.4,
         ),
       ),
       child: Container(
+        width: double.infinity,
+        height: double.infinity,
         decoration: const BoxDecoration(
           gradient: LinearGradient(
             begin: Alignment.topCenter,
@@ -2422,7 +3231,7 @@ class _MediaSlotState extends State<MediaSlot> {
             colors: [Color(0xFF0F172A), Color(0xFF111827)],
           ),
         ),
-        padding: const EdgeInsets.all(20),
+        padding: EdgeInsets.all(20 * scaleFactor),
         child: Column(
           mainAxisAlignment: MainAxisAlignment.spaceBetween,
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -2433,17 +3242,19 @@ class _MediaSlotState extends State<MediaSlot> {
                 Text(
                   'WEATHER ☀️',
                   style: TextStyle(
-                    fontSize: 10,
+                    fontSize: 10 * scaleFactor,
                     letterSpacing: 4.5,
-                    color: Colors.cyan.withOpacity(0.7),
+                    color: textColor.withOpacity(0.85),
                   ),
                 ),
-                const SizedBox(height: 8),
+                SizedBox(height: 8 * scaleFactor),
                 Text(
                   location,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
                   style: TextStyle(
-                    fontSize: 14,
-                    color: Colors.white.withOpacity(0.7),
+                    fontSize: 14 * scaleFactor,
+                    color: textColor.withOpacity(0.7),
                   ),
                 ),
               ],
@@ -2451,33 +3262,54 @@ class _MediaSlotState extends State<MediaSlot> {
             Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(
-                  '$temp°',
-                  style: const TextStyle(
-                    fontSize: 80,
-                    fontWeight: FontWeight.w900,
-                    color: Colors.white,
-                    letterSpacing: -2,
+                SizedBox(
+                  width: double.infinity,
+                  child: FittedBox(
+                    fit: BoxFit.scaleDown,
+                    alignment: Alignment.centerLeft,
+                    child: Text(
+                      '$temp°',
+                      style: TextStyle(
+                        fontSize: 80 * scaleFactor,
+                        fontWeight: FontWeight.w900,
+                        color: textColor,
+                        letterSpacing: -2,
+                      ),
+                    ),
                   ),
                 ),
-                const SizedBox(height: 12),
+                SizedBox(height: 12 * scaleFactor),
                 Text(
                   '☀️ $condition',
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
                   style: TextStyle(
-                    fontSize: 18,
+                    fontSize: 18 * scaleFactor,
                     fontWeight: FontWeight.w600,
-                    color: Colors.white.withOpacity(0.9),
+                    color: textColor.withOpacity(0.9),
                   ),
                 ),
-                const SizedBox(height: 12),
+                SizedBox(height: 12 * scaleFactor),
                 Wrap(
-                  spacing: 8,
-                  runSpacing: 8,
+                  spacing: 8 * scaleFactor,
+                  runSpacing: 8 * scaleFactor,
                   children: [
-                    _buildWeatherChip('H ${item['high'] ?? '--'}°'),
-                    _buildWeatherChip('L ${item['low'] ?? '--'}°'),
+                    _buildWeatherChip(
+                      'H ${item['high'] ?? '--'}°',
+                      textColor,
+                      scaleFactor,
+                    ),
+                    _buildWeatherChip(
+                      'L ${item['low'] ?? '--'}°',
+                      textColor,
+                      scaleFactor,
+                    ),
                     if (item['humidity'] != null)
-                      _buildWeatherChip('Humidity ${item['humidity']}%'),
+                      _buildWeatherChip(
+                        'Humidity ${item['humidity']}%',
+                        textColor,
+                        scaleFactor,
+                      ),
                   ],
                 ),
               ],
@@ -2488,18 +3320,22 @@ class _MediaSlotState extends State<MediaSlot> {
     );
   }
 
-  Widget _buildWeatherChip(String text) {
+  Widget _buildWeatherChip(String text, Color textColor, double scaleFactor) {
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      padding: EdgeInsets.symmetric(
+        horizontal: 12 * scaleFactor,
+        vertical: 6 * scaleFactor,
+      ),
       decoration: BoxDecoration(
-        color: Colors.white.withOpacity(0.05),
+        color: textColor.withOpacity(0.05),
         borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: Colors.white10),
+        border: Border.all(color: textColor.withOpacity(0.2)),
       ),
       child: Text(
         text,
-        style: const TextStyle(
-          color: Colors.white60,
+        style: TextStyle(
+          color: textColor.withOpacity(0.7),
+          fontSize: 12 * scaleFactor,
           letterSpacing: 2,
         ),
       ),
@@ -2507,18 +3343,21 @@ class _MediaSlotState extends State<MediaSlot> {
   }
 
   Widget _buildText(Map<String, dynamic> item) {
+    final textColor = widget.weatherClockTextColor;
     return Container(
+      width: double.infinity,
+      height: double.infinity,
       color: Colors.black,
       child: Center(
-        child: Padding(
+        child: SingleChildScrollView(
           padding: const EdgeInsets.all(24),
           child: Text(
             item['content']?.toString() ?? item['text']?.toString() ?? '',
             textAlign: TextAlign.center,
-            style: const TextStyle(
-              fontSize: 24,
+            style: TextStyle(
+              fontSize: 24 * widget.weatherClockScale.clamp(0.7, 1.5),
               fontWeight: FontWeight.bold,
-              color: Colors.white,
+              color: textColor,
             ),
           ),
         ),
@@ -2532,6 +3371,8 @@ class _MediaSlotState extends State<MediaSlot> {
 
     if (kIsWeb) {
       return Container(
+        width: double.infinity,
+        height: double.infinity,
         color: Colors.black,
         padding: const EdgeInsets.all(20),
         child: Center(
@@ -2568,14 +3409,15 @@ class _MediaSlotState extends State<MediaSlot> {
       youtubeController?.dispose();
       youtubeController = YoutubePlayerController(
         initialVideoId: videoId,
-        flags: const YoutubePlayerFlags(
+        flags: YoutubePlayerFlags(
           autoPlay: true,
-          mute: true,
-          hideControls: false,
-          controlsVisibleAtStart: true,
-          disableDragSeek: false,
+          mute: isMuted,
+          hideControls: true,
+          controlsVisibleAtStart: false,
+          disableDragSeek: true,
         ),
       );
+      MediaSlot._claimAudioFocus(this);
       _applyMuteState();
       youtubeController!.addListener(() {
         if (youtubeController!.value.playerState == PlayerState.ended) {
@@ -2586,7 +3428,7 @@ class _MediaSlotState extends State<MediaSlot> {
 
     return YoutubePlayer(
       controller: youtubeController!,
-      showVideoProgressIndicator: true,
+      showVideoProgressIndicator: false,
       onReady: () {
         youtubeController?.play();
       },
@@ -2603,6 +3445,7 @@ class _MediaSlotState extends State<MediaSlot> {
       videoController = VideoPlayerController.networkUrl(Uri.parse(url))
         ..initialize().then((_) {
           if (mounted) setState(() {});
+          MediaSlot._claimAudioFocus(this);
           videoController!.setLooping(false);
           videoController!.setVolume(isMuted ? 0.0 : 1.0);
           videoController!.play();
@@ -2631,99 +3474,50 @@ class _MediaSlotState extends State<MediaSlot> {
         child: videoError == null
             ? const CircularProgressIndicator()
             : Padding(
-                padding: const EdgeInsets.all(16),
-                child: Text(
-                  videoError!,
-                  textAlign: TextAlign.center,
-                  style: const TextStyle(color: Colors.white70, fontSize: 14),
-                ),
-              ),
+          padding: const EdgeInsets.all(16),
+          child: Text(
+            videoError!,
+            textAlign: TextAlign.center,
+            style: const TextStyle(color: Colors.white70, fontSize: 14),
+          ),
+        ),
       );
     }
 
-    return Stack(
-      fit: StackFit.expand,
-      children: [
-        Center(
-          child: AspectRatio(
-            aspectRatio: videoController!.value.aspectRatio == 0
-                ? 16 / 9
-                : videoController!.value.aspectRatio,
-            child: VideoPlayer(videoController!),
-          ),
-        ),
-        Positioned.fill(
-          child: IgnorePointer(
-            ignoring: false,
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.end,
-              children: [
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                  color: Colors.black.withOpacity(0.35),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Row(
-                        children: [
-                          IconButton(
-                            onPressed: () {
-                              if (videoController == null) return;
-                              if (videoController!.value.isPlaying) {
-                                videoController!.pause();
-                              } else {
-                                videoController!.play();
-                              }
-                              setState(() {});
-                            },
-                            icon: Icon(
-                              videoController!.value.isPlaying ? Icons.pause_circle_filled : Icons.play_circle_fill,
-                              color: Colors.white,
-                              size: 34,
-                            ),
-                          ),
-                          Expanded(
-                            child: VideoProgressIndicator(
-                              videoController!,
-                              allowScrubbing: true,
-                              padding: const EdgeInsets.symmetric(horizontal: 8),
-                              colors: VideoProgressColors(
-                                playedColor: Colors.cyanAccent,
-                                bufferedColor: Colors.white24,
-                                backgroundColor: Colors.white12,
-                              ),
-                            ),
-                          ),
-                          IconButton(
-                            onPressed: () async {
-                              if (videoController == null) return;
-                              await videoController!.seekTo(Duration.zero);
-                              await videoController!.play();
-                              setState(() {});
-                            },
-                            icon: const Icon(
-                              Icons.replay,
-                              color: Colors.white,
-                              size: 30,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ],
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
-      ],
+    return Center(
+      child: AspectRatio(
+        aspectRatio: videoController!.value.aspectRatio == 0
+            ? 16 / 9
+            : videoController!.value.aspectRatio,
+        child: VideoPlayer(videoController!),
+      ),
     );
   }
 
   Widget _buildBookings(Map<String, dynamic> item) {
-    final entries = item['entries'] as List<dynamic>? ?? [];
+    final itemType = (item['type'] ?? '').toString().toLowerCase();
+    var entries = (item['entries'] as List<dynamic>?) ??
+        (item['items'] as List<dynamic>?) ??
+        (item['bookings'] as List<dynamic>?) ??
+        const [];
+
+    if (entries.isEmpty) {
+      if (itemType == 'queue') {
+        entries = widget.queuePreview.isNotEmpty
+            ? widget.queuePreview
+            : widget.liveQueue;
+      } else {
+        entries = widget.todayBookingsPreview.isNotEmpty
+            ? widget.todayBookingsPreview
+            : (widget.queuePreview.isNotEmpty
+                ? widget.queuePreview
+                : widget.liveQueue);
+      }
+    }
 
     return Container(
+      width: double.infinity,
+      height: double.infinity,
       decoration: const BoxDecoration(
         gradient: LinearGradient(
           begin: Alignment.topCenter,
@@ -2889,9 +3683,12 @@ class _MediaSlotState extends State<MediaSlot> {
 
   Widget _buildNotices(Map<String, dynamic> item) {
     final notices = (item['items'] as List<dynamic>?) ??
-        (item['notices'] as List<dynamic>?) ?? [];
+      (item['notices'] as List<dynamic>?) ??
+      widget.notices;
 
     return Container(
+      width: double.infinity,
+      height: double.infinity,
       decoration: const BoxDecoration(
         gradient: LinearGradient(
           begin: Alignment.topCenter,
@@ -3096,75 +3893,97 @@ class _MediaSlotState extends State<MediaSlot> {
   }
 }
 
-// Ticker Slot Widget
+// Ticker Slot Widget (same as before)
 class TickerSlot extends StatelessWidget {
   final List<Map<String, dynamic>> items;
   final String label;
+  final double tickerSpeed;
+  final Color textColor;
+  final Color backgroundColor;
 
   const TickerSlot({
     super.key,
     required this.items,
     required this.label,
+    this.tickerSpeed = 50,
+    this.textColor = Colors.white,
+    this.backgroundColor = Colors.black,
   });
 
   @override
   Widget build(BuildContext context) {
-    if (items.isEmpty) {
-      return Container(
-        color: Colors.black,
-        child: Center(
-          child: Text(
-            label.toUpperCase(),
-            style: TextStyle(
-              color: Colors.white.withOpacity(0.3),
-              fontSize: 12,
-              fontFamily: 'monospace',
-              letterSpacing: 3,
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final scale = max(0.65, min(1.0, min(constraints.maxWidth / 420, constraints.maxHeight / 90)));
+
+        if (items.isEmpty) {
+          return Container(
+            color: backgroundColor,
+            child: Center(
+              child: Text(
+                label.toUpperCase(),
+                style: TextStyle(
+                  color: textColor.withOpacity(0.3),
+                  fontSize: 12 * scale,
+                  fontFamily: 'monospace',
+                  letterSpacing: 3,
+                ),
+              ),
+            ),
+          );
+        }
+
+        final tickerTexts = items.map((item) {
+          return item['text']?.toString() ??
+              item['title']?.toString() ??
+              item['message']?.toString() ?? '';
+        }).where((text) => text.isNotEmpty).toList();
+
+        if (tickerTexts.isEmpty) {
+          return Container(color: backgroundColor);
+        }
+
+        final tickerText = tickerTexts.join('  •  ');
+
+        return ClipRect(
+          child: FittedBox(
+            fit: BoxFit.contain,
+            alignment: Alignment.centerLeft,
+            child: SizedBox(
+              width: constraints.maxWidth,
+              height: constraints.maxHeight,
+              child: Container(
+                color: backgroundColor,
+                child: Center(
+                  child: Marquee(
+                    text: tickerText,
+                    style: TextStyle(
+                      color: textColor,
+                      fontWeight: FontWeight.w600,
+                      fontSize: 14 * scale,
+                    ),
+                    scrollAxis: Axis.horizontal,
+                    crossAxisAlignment: CrossAxisAlignment.center,
+                    blankSpace: 100 * scale,
+                    velocity: tickerSpeed * scale,
+                    pauseAfterRound: const Duration(seconds: 0),
+                    startPadding: 10 * scale,
+                    accelerationDuration: const Duration(seconds: 1),
+                    accelerationCurve: Curves.linear,
+                    decelerationDuration: const Duration(milliseconds: 500),
+                    decelerationCurve: Curves.easeOut,
+                  ),
+                ),
+              ),
             ),
           ),
-        ),
-      );
-    }
-
-    final tickerTexts = items.map((item) {
-      return item['text']?.toString() ??
-          item['title']?.toString() ??
-          item['message']?.toString() ?? '';
-    }).where((text) => text.isNotEmpty).toList();
-
-    if (tickerTexts.isEmpty) {
-      return Container(color: Colors.black);
-    }
-
-    final tickerText = tickerTexts.join('  •  ');
-
-    return Container(
-      color: Colors.black,
-      child: Center(
-        child: Marquee(
-          text: tickerText,
-          style: const TextStyle(
-            color: Colors.white,
-            fontWeight: FontWeight.w600,
-            fontSize: 14,
-          ),
-          scrollAxis: Axis.horizontal,
-          crossAxisAlignment: CrossAxisAlignment.center,
-          blankSpace: 100,
-          velocity: 50,
-          pauseAfterRound: const Duration(seconds: 0),
-          startPadding: 10,
-          accelerationDuration: const Duration(seconds: 1),
-          accelerationCurve: Curves.linear,
-          decelerationDuration: const Duration(milliseconds: 500),
-          decelerationCurve: Curves.easeOut,
-        ),
-      ),
+        );
+      },
     );
   }
 }
 
-// Queue Board Widget
+// Queue Board Widget (same as before)
 class QueueBoard extends StatelessWidget {
   final String? deviceName;
   final List<dynamic> queuePreview;
@@ -3179,252 +3998,318 @@ class QueueBoard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    if (queuePreview.isEmpty) {
-      return Container(
-        decoration: const BoxDecoration(
-          gradient: LinearGradient(
-            colors: [Colors.pink, Colors.deepOrange],
-          ),
-        ),
-        child: const Center(
-          child: Text(
-            'NO QUEUE',
-            style: TextStyle(
-              color: Colors.white,
-              fontSize: 24,
-              fontWeight: FontWeight.bold,
-            ),
-          ),
-        ),
-      );
-    }
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final scale = max(0.58, min(1.0, min(constraints.maxWidth / 480, constraints.maxHeight / 720)));
 
-    final currentToken = queuePreview.first as Map<String, dynamic>;
-    final nextTokens = queuePreview.length > 1
-        ? queuePreview.sublist(1, min(3, queuePreview.length))
-        : [];
-
-    return Container(
-      decoration: const BoxDecoration(
-        gradient: LinearGradient(
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-          colors: [
-            Color(0xFFEC4899),
-            Color(0xFFFB7185),
-            Color(0xFFF97316),
-          ],
-        ),
-      ),
-      child: Column(
-        children: [
-          // Status bar
-          Container(
-            padding: const EdgeInsets.symmetric(vertical: 16),
-            decoration: BoxDecoration(
-              color: Colors.white.withOpacity(0.15),
-              border: Border(
-                bottom: BorderSide(
-                  color: Colors.white.withOpacity(0.3),
-                  width: 2,
-                ),
+        if (queuePreview.isEmpty) {
+          return Container(
+            decoration: const BoxDecoration(
+              gradient: LinearGradient(
+                colors: [Colors.pink, Colors.deepOrange],
               ),
             ),
-            child: const Center(
+            child: Center(
               child: Text(
-                '🔴 LIVE QUEUE STATUS',
+                'NO QUEUE',
                 style: TextStyle(
                   color: Colors.white,
-                  fontWeight: FontWeight.w900,
-                  fontSize: 16,
-                  letterSpacing: 4,
+                  fontSize: 24 * scale,
+                  fontWeight: FontWeight.bold,
                 ),
               ),
             ),
-          ),
+          );
+        }
 
-          // Current token
-          Expanded(
-            child: Center(
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  const Text(
-                    '⚡ CURRENTLY SERVING',
+        final currentToken = queuePreview.first as Map<String, dynamic>;
+        final nextTokens = queuePreview.length > 1
+            ? queuePreview.sublist(1, min(3, queuePreview.length))
+            : [];
+        final currentTokenLabel = _readTokenLabel(currentToken);
+        final currentServiceLabel = _readServiceLabel(currentToken);
+        final currentPatientLabel = _readPatientLabel(currentToken);
+
+        return ClipRect(
+          child: FittedBox(
+            fit: BoxFit.contain,
+            alignment: Alignment.topLeft,
+            child: SizedBox(
+              width: constraints.maxWidth,
+              height: constraints.maxHeight,
+              child: Container(
+                decoration: const BoxDecoration(
+                  gradient: LinearGradient(
+                    begin: Alignment.topLeft,
+                    end: Alignment.bottomRight,
+                    colors: [Color(0xFFEC4899), Color(0xFFFB7185), Color(0xFFF97316)],
+                  ),
+                ),
+                child: Column(
+                  children: [
+              Container(
+                width: double.infinity,
+                padding: EdgeInsets.symmetric(vertical: 14 * scale),
+                decoration: BoxDecoration(
+                  color: Colors.white.withOpacity(0.15),
+                  border: Border(
+                    bottom: BorderSide(color: Colors.white.withOpacity(0.3), width: 2 * scale),
+                  ),
+                ),
+                child: Center(
+                  child: Text(
+                    '🔴 LIVE QUEUE STATUS',
                     style: TextStyle(
                       color: Colors.white,
-                      fontWeight: FontWeight.bold,
-                      fontSize: 14,
-                      letterSpacing: 3,
-                    ),
-                  ),
-                  const SizedBox(height: 16),
-                  Text(
-                    currentToken['token']?.toString() ?? '—',
-                    style: const TextStyle(
-                      fontSize: 120,
                       fontWeight: FontWeight.w900,
-                      color: Colors.white,
-                      shadows: [
-                        Shadow(
-                          color: Colors.black26,
-                          offset: Offset(4, 4),
-                          blurRadius: 0,
-                        ),
-                      ],
+                      fontSize: 16 * scale,
+                      letterSpacing: 4,
                     ),
-                  ),
-                  const SizedBox(height: 16),
-                  Text(
-                    currentToken['patient_name']?.toString() ??
-                        currentToken['service_name']?.toString() ??
-                        'GUEST',
-                    style: const TextStyle(
-                      fontSize: 28,
-                      fontWeight: FontWeight.w800,
-                      color: Colors.white,
-                    ),
-                  ),
-                  const SizedBox(height: 8),
-                  Text(
-                    currentToken['service_type']?.toString() ??
-                        currentToken['service_name']?.toString() ??
-                        '→ PLEASE PROCEED TO COUNTER ←',
-                    style: TextStyle(
-                      fontSize: 14,
-                      fontWeight: FontWeight.w600,
-                      color: Colors.white.withOpacity(0.8),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ),
-
-          // Next tokens
-          if (nextTokens.isNotEmpty)
-            Container(
-              padding: const EdgeInsets.all(16),
-              decoration: BoxDecoration(
-                color: Colors.black.withOpacity(0.3),
-                border: Border(
-                  top: BorderSide(
-                    color: Colors.white.withOpacity(0.3),
-                    width: 2,
                   ),
                 ),
               ),
-              child: Column(
-                children: [
-                  const Text(
-                    '⏩ NEXT IN QUEUE',
-                    style: TextStyle(
-                      color: Colors.white70,
-                      fontWeight: FontWeight.bold,
-                      fontSize: 12,
-                      letterSpacing: 3,
-                    ),
-                  ),
-                  const SizedBox(height: 12),
-                  Row(
-                    children: nextTokens.map((token) {
-                      final t = token as Map<String, dynamic>;
-                      return Expanded(
-                        child: Container(
-                          margin: const EdgeInsets.symmetric(horizontal: 8),
-                          padding: const EdgeInsets.all(12),
-                          decoration: BoxDecoration(
-                            color: Colors.white.withOpacity(0.15),
-                            border: Border.all(
-                              color: Colors.white.withOpacity(0.3),
-                              width: 2,
-                            ),
-                          ),
-                          child: Column(
-                            children: [
-                              Text(
-                                t['token']?.toString() ?? '—',
-                                style: const TextStyle(
-                                  fontSize: 32,
-                                  fontWeight: FontWeight.w900,
-                                  color: Colors.white,
-                                ),
-                              ),
-                              const SizedBox(height: 8),
-                              Text(
-                                t['patient_name']?.toString() ??
-                                    t['service_name']?.toString() ??
-                                    'GUEST',
-                                style: const TextStyle(
-                                  fontWeight: FontWeight.bold,
-                                  color: Colors.white,
-                                ),
-                                textAlign: TextAlign.center,
-                                overflow: TextOverflow.ellipsis,
-                              ),
-                              const SizedBox(height: 4),
-                              Text(
-                                t['service_type']?.toString() ??
-                                    t['service_name']?.toString() ??
-                                    'QUEUE',
-                                style: TextStyle(
-                                  fontSize: 12,
-                                  color: Colors.white.withOpacity(0.6),
-                                ),
-                                textAlign: TextAlign.center,
-                              ),
-                              if (t['wait_after_mins'] != null) ...[
-                                const SizedBox(height: 4),
-                                Text(
-                                  '${t['wait_after_mins']}m wait',
-                                  style: const TextStyle(
-                                    fontSize: 10,
-                                    fontWeight: FontWeight.w900,
-                                    color: Colors.white,
-                                  ),
-                                ),
-                              ],
+              Expanded(
+                child: Padding(
+                  padding: EdgeInsets.symmetric(horizontal: 16 * scale, vertical: 14 * scale),
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Text(
+                        '⚡ CURRENTLY SERVING',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(
+                          fontSize: 11 * scale,
+                          fontWeight: FontWeight.w800,
+                          color: Colors.white.withOpacity(0.92),
+                          letterSpacing: 2.2,
+                        ),
+                      ),
+                      SizedBox(height: 10 * scale),
+                      FittedBox(
+                        fit: BoxFit.scaleDown,
+                        child: Text(
+                          currentTokenLabel,
+                          style: TextStyle(
+                            fontSize: 132 * scale,
+                            fontWeight: FontWeight.w900,
+                            color: Colors.white,
+                            height: 0.92,
+                            shadows: const [
+                              Shadow(color: Colors.black26, offset: Offset(4, 4), blurRadius: 12),
                             ],
                           ),
                         ),
-                      );
-                    }).toList(),
-                  ),
-                ],
-              ),
-            ),
+                      ),
+                      SizedBox(height: 10 * scale),
+                      Text(
+                        currentPatientLabel,
+                        textAlign: TextAlign.center,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontSize: 24 * scale,
+                          fontWeight: FontWeight.w800,
+                          color: Colors.white,
+                        ),
+                      ),
+                      SizedBox(height: 8 * scale),
+                      Text(
+                        currentServiceLabel,
+                        textAlign: TextAlign.center,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontSize: 13 * scale,
+                          fontWeight: FontWeight.w600,
+                          color: Colors.white.withOpacity(0.85),
+                          letterSpacing: 0.6,
+                        ),
+                      ),
+                      if (nextTokens.isNotEmpty) ...[
+                        SizedBox(height: 14 * scale),
+                        Container(
+                          width: double.infinity,
+                          padding: EdgeInsets.all(10 * scale),
+                          decoration: BoxDecoration(
+                            color: Colors.black.withOpacity(0.22),
+                            borderRadius: BorderRadius.circular(12 * scale),
+                            border: Border.all(color: Colors.white.withOpacity(0.28)),
+                          ),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Center(
+                                child: Text(
+                                  '⏩ NEXT IN QUEUE',
+                                  style: TextStyle(
+                                    color: Colors.white.withOpacity(0.72),
+                                    fontSize: 9.5 * scale,
+                                    fontWeight: FontWeight.w800,
+                                    letterSpacing: 1.8,
+                                  ),
+                                ),
+                              ),
+                              SizedBox(height: 8 * scale),
+                              ...nextTokens.map((token) {
+                                final entry = token as Map<String, dynamic>;
+                                final nextTokenLabel = _readTokenLabel(entry);
+                                final nextPatientLabel = _readPatientLabel(entry);
+                                final nextServiceLabel = _readServiceLabel(entry);
+                                final waitLabel = _readWaitLabel(entry);
 
-          // Notice banner
-          if (notices.isNotEmpty && notices.first != null)
-            Container(
-              padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 16),
-              decoration: BoxDecoration(
-                color: Colors.black.withOpacity(0.4),
-                border: Border(
-                  top: BorderSide(
-                    color: Colors.white.withOpacity(0.3),
-                    width: 2,
+                                return Container(
+                                  width: double.infinity,
+                                  margin: EdgeInsets.only(bottom: 8 * scale),
+                                  padding: EdgeInsets.symmetric(horizontal: 10 * scale, vertical: 8 * scale),
+                                  decoration: BoxDecoration(
+                                    color: Colors.white.withOpacity(0.14),
+                                    borderRadius: BorderRadius.circular(10 * scale),
+                                    border: Border.all(color: Colors.white.withOpacity(0.24)),
+                                  ),
+                                  child: Row(
+                                    children: [
+                                      Container(
+                                        constraints: BoxConstraints(minWidth: 44 * scale),
+                                        child: Text(
+                                          nextTokenLabel,
+                                          textAlign: TextAlign.center,
+                                          style: TextStyle(
+                                            color: Colors.white,
+                                            fontSize: 28 * scale,
+                                            fontWeight: FontWeight.w900,
+                                          ),
+                                        ),
+                                      ),
+                                      Container(
+                                        margin: EdgeInsets.symmetric(horizontal: 10 * scale),
+                                        width: 1,
+                                        height: 34 * scale,
+                                        color: Colors.white.withOpacity(0.35),
+                                      ),
+                                      Expanded(
+                                        child: Column(
+                                          crossAxisAlignment: CrossAxisAlignment.start,
+                                          children: [
+                                            Text(
+                                              nextPatientLabel,
+                                              maxLines: 1,
+                                              overflow: TextOverflow.ellipsis,
+                                              style: TextStyle(
+                                                color: Colors.white,
+                                                fontSize: 13 * scale,
+                                                fontWeight: FontWeight.w700,
+                                              ),
+                                            ),
+                                            SizedBox(height: 2 * scale),
+                                            Text(
+                                              nextServiceLabel,
+                                              maxLines: 1,
+                                              overflow: TextOverflow.ellipsis,
+                                              style: TextStyle(
+                                                color: Colors.white.withOpacity(0.68),
+                                                fontSize: 10 * scale,
+                                                fontWeight: FontWeight.w600,
+                                              ),
+                                            ),
+                                          ],
+                                        ),
+                                      ),
+                                      if (waitLabel != null)
+                                        Container(
+                                          margin: EdgeInsets.only(left: 8 * scale),
+                                          padding: EdgeInsets.symmetric(horizontal: 6 * scale, vertical: 4 * scale),
+                                          decoration: BoxDecoration(
+                                            color: Colors.white.withOpacity(0.14),
+                                            borderRadius: BorderRadius.circular(6 * scale),
+                                          ),
+                                          child: Text(
+                                            waitLabel,
+                                            style: TextStyle(
+                                              color: Colors.white,
+                                              fontSize: 9 * scale,
+                                              fontWeight: FontWeight.w800,
+                                            ),
+                                          ),
+                                        ),
+                                    ],
+                                  ),
+                                );
+                              }).toList(),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ],
                   ),
                 ),
               ),
-              child: Center(
-                child: Text(
-                  '📢 ${notices.first['title'] ?? notices.first['body'] ?? 'QUEUE UPDATES AVAILABLE'}',
-                  style: const TextStyle(
-                    fontWeight: FontWeight.bold,
-                    color: Colors.white,
+              if (notices.isNotEmpty && notices.first != null)
+                Container(
+                  width: double.infinity,
+                  padding: EdgeInsets.symmetric(vertical: 12 * scale, horizontal: 16 * scale),
+                  decoration: BoxDecoration(
+                    color: Colors.black.withOpacity(0.3),
+                    border: Border(top: BorderSide(color: Colors.white.withOpacity(0.3), width: 2 * scale)),
                   ),
-                  textAlign: TextAlign.center,
+                  child: Text(
+                    '📢 ${notices.first['title'] ?? notices.first['body'] ?? 'QUEUE UPDATES AVAILABLE'}',
+                    textAlign: TextAlign.center,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontWeight: FontWeight.bold,
+                      color: Colors.white,
+                      fontSize: 12 * scale,
+                    ),
+                  ),
+                ),
+                  ],
                 ),
               ),
             ),
-        ],
-      ),
+          ),
+        );
+      },
     );
+  }
+
+  String _readTokenLabel(Map<String, dynamic> entry) {
+    final tokenValue = entry['token'] ??
+        entry['token_no'] ??
+        entry['token_number'] ??
+        entry['queue_token'] ??
+        entry['ticket_no'] ??
+        entry['ticket_number'];
+    final tokenText = tokenValue?.toString().trim() ?? '';
+    return tokenText.isNotEmpty ? tokenText : '—';
+  }
+
+  String _readServiceLabel(Map<String, dynamic> entry) {
+    final serviceValue = entry['service_name'] ??
+        entry['service_type'] ??
+        entry['name'];
+    final serviceText = serviceValue?.toString().trim() ?? '';
+    return serviceText.isNotEmpty ? serviceText : '→ PLEASE PROCEED TO COUNTER ←';
+  }
+
+  String _readPatientLabel(Map<String, dynamic> entry) {
+    final patientValue = entry['patient_name'] ??
+        entry['name'] ??
+        entry['service_name'];
+    final patientText = patientValue?.toString().trim() ?? '';
+    return patientText.isNotEmpty ? patientText : 'GUEST';
+  }
+
+  String? _readWaitLabel(Map<String, dynamic> entry) {
+    final waitValue = entry['wait_after_mins'];
+    if (waitValue == null) return null;
+    final waitText = waitValue.toString().trim();
+    if (waitText.isEmpty || waitText == '0') return null;
+    return '${waitText}m';
   }
 }
 
-// Auto Widget Zone
+// Auto Widget Zone (same as before)
 class AutoWidgetZone extends StatelessWidget {
   final Map<String, dynamic> zone;
   final List<dynamic> queuePreview;
@@ -3433,6 +4318,8 @@ class AutoWidgetZone extends StatelessWidget {
   final dynamic weatherData;
   final double canvasWidth;
   final double canvasHeight;
+  final double weatherScaleFactor;
+  final Color weatherClockTextColor;
 
   const AutoWidgetZone({
     super.key,
@@ -3443,91 +4330,127 @@ class AutoWidgetZone extends StatelessWidget {
     this.weatherData,
     required this.canvasWidth,
     required this.canvasHeight,
+    this.weatherScaleFactor = 1.0,
+    this.weatherClockTextColor = Colors.white,
   });
 
   @override
   Widget build(BuildContext context) {
     final role = (zone['role'] ?? '').toString().toLowerCase();
 
-    switch (role) {
-      case 'header':
-        return _buildHeader();
-      case 'weather':
-        return _buildWeather();
-      case 'bookings':
-        return _buildBookings();
-      default:
-        return const SizedBox();
-    }
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final scale = max(0.38, min(1.0, min(constraints.maxWidth / 520, constraints.maxHeight / 320)));
+        final child = switch (role) {
+          'header' => _buildHeader(scale * weatherScaleFactor.clamp(0.7, 1.5)),
+          'weather' => _buildWeather(scale * weatherScaleFactor.clamp(0.7, 1.5)),
+          'bookings' => _buildBookings(scale),
+          _ => const SizedBox(),
+        };
+
+        return ClipRect(
+          child: FittedBox(
+            fit: BoxFit.contain,
+            alignment: Alignment.topLeft,
+            child: SizedBox(
+              width: constraints.maxWidth,
+              height: constraints.maxHeight,
+              child: child,
+            ),
+          ),
+        );
+      },
+    );
   }
 
-  Widget _buildHeader() {
+  Widget _buildHeader(double scale) {
     final now = DateTime.now();
     final date = '${_getWeekday(now.weekday)}, ${_getMonth(now.month)} ${now.day}';
     final time = '${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}';
 
     return Container(
+      width: double.infinity,
+      height: double.infinity,
       decoration: const BoxDecoration(
         gradient: LinearGradient(
           colors: [Color(0xFF111827), Color(0xFF0F172A)],
         ),
       ),
-      padding: const EdgeInsets.all(16),
+      padding: EdgeInsets.symmetric(horizontal: 14 * scale, vertical: 10 * scale),
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
-          Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                'TODAY',
-                style: TextStyle(
-                  fontSize: 10,
-                  letterSpacing: 4.5,
-                  color: Colors.white.withOpacity(0.45),
+          Expanded(
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'TODAY',
+                  style: TextStyle(
+                    fontSize: 10 * scale,
+                    letterSpacing: 4.5,
+                    color: weatherClockTextColor.withOpacity(0.45),
+                  ),
                 ),
-              ),
-              const SizedBox(height: 4),
-              Text(
-                date,
-                style: const TextStyle(
-                  fontSize: 28,
-                  fontWeight: FontWeight.w900,
-                  color: Colors.white,
+                SizedBox(height: 4 * scale),
+                SizedBox(
+                  width: double.infinity,
+                  child: FittedBox(
+                    fit: BoxFit.scaleDown,
+                    alignment: Alignment.centerLeft,
+                    child: Text(
+                      date,
+                      style: TextStyle(
+                        fontSize: 28 * scale,
+                        fontWeight: FontWeight.w900,
+                        color: weatherClockTextColor,
+                      ),
+                    ),
+                  ),
                 ),
-              ),
-            ],
+              ],
+            ),
           ),
-          Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            crossAxisAlignment: CrossAxisAlignment.end,
-            children: [
-              Text(
-                'LOCAL TIME',
-                style: TextStyle(
-                  fontSize: 10,
-                  letterSpacing: 4.5,
-                  color: Colors.white.withOpacity(0.45),
+          SizedBox(width: 10 * scale),
+          Expanded(
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              crossAxisAlignment: CrossAxisAlignment.end,
+              children: [
+                Text(
+                  'LOCAL TIME',
+                  style: TextStyle(
+                    fontSize: 10 * scale,
+                    letterSpacing: 4.5,
+                    color: weatherClockTextColor.withOpacity(0.45),
+                  ),
                 ),
-              ),
-              const SizedBox(height: 4),
-              Text(
-                time,
-                style: const TextStyle(
-                  fontSize: 36,
-                  fontWeight: FontWeight.w900,
-                  color: Colors.white,
+                SizedBox(height: 4 * scale),
+                SizedBox(
+                  width: double.infinity,
+                  child: FittedBox(
+                    fit: BoxFit.scaleDown,
+                    alignment: Alignment.centerRight,
+                    child: Text(
+                      time,
+                      style: TextStyle(
+                        fontSize: 36 * scale,
+                        fontWeight: FontWeight.w900,
+                        color: weatherClockTextColor,
+                      ),
+                    ),
+                  ),
                 ),
-              ),
-            ],
+              ],
+            ),
           ),
         ],
       ),
     );
   }
 
-  Widget _buildWeather() {
+  Widget _buildWeather(double scale) {
     final weather = (weatherData as Map<String, dynamic>?) ?? {};
     final temp = weather['temperature']?.toString() ?? '--';
     final condition = weather['condition']?.toString() ?? 'Weather sync pending';
@@ -3535,14 +4458,18 @@ class AutoWidgetZone extends StatelessWidget {
     final low = weather['low']?.toString() ?? '--';
 
     return Container(
+      width: double.infinity,
+      height: double.infinity,
       decoration: BoxDecoration(
         gradient: RadialGradient(
           center: Alignment.topCenter,
-          colors: [Color(0x2238BDF8), Colors.transparent],
+          colors: [const Color(0x2238BDF8), Colors.transparent],
           radius: 0.4,
         ),
       ),
       child: Container(
+        width: double.infinity,
+        height: double.infinity,
         decoration: const BoxDecoration(
           gradient: LinearGradient(
             begin: Alignment.topCenter,
@@ -3550,7 +4477,7 @@ class AutoWidgetZone extends StatelessWidget {
             colors: [Color(0xFF0F172A), Color(0xFF111827)],
           ),
         ),
-        padding: const EdgeInsets.all(20),
+        padding: EdgeInsets.all(20 * scale),
         child: Column(
           mainAxisAlignment: MainAxisAlignment.spaceBetween,
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -3561,17 +4488,19 @@ class AutoWidgetZone extends StatelessWidget {
                 Text(
                   'WEATHER ☀️',
                   style: TextStyle(
-                    fontSize: 10,
+                    fontSize: 10 * scale,
                     letterSpacing: 4.5,
-                    color: Colors.cyan.withOpacity(0.7),
+                    color: weatherClockTextColor.withOpacity(0.85),
                   ),
                 ),
-                const SizedBox(height: 8),
+                SizedBox(height: 8 * scale),
                 Text(
                   weather['location']?.toString() ?? 'Current conditions',
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
                   style: TextStyle(
-                    fontSize: 14,
-                    color: Colors.white.withOpacity(0.7),
+                    fontSize: 14 * scale,
+                    color: weatherClockTextColor.withOpacity(0.7),
                   ),
                 ),
               ],
@@ -3579,31 +4508,37 @@ class AutoWidgetZone extends StatelessWidget {
             Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(
-                  '$temp°',
-                  style: const TextStyle(
-                    fontSize: 80,
-                    fontWeight: FontWeight.w900,
-                    color: Colors.white,
-                    letterSpacing: -2,
+                FittedBox(
+                  fit: BoxFit.scaleDown,
+                  alignment: Alignment.centerLeft,
+                  child: Text(
+                    '$temp°',
+                    style: TextStyle(
+                      fontSize: 80 * scale,
+                      fontWeight: FontWeight.w900,
+                      color: weatherClockTextColor,
+                      letterSpacing: -2,
+                    ),
                   ),
                 ),
-                const SizedBox(height: 12),
+                SizedBox(height: 12 * scale),
                 Text(
                   '☀️ $condition',
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
                   style: TextStyle(
-                    fontSize: 18,
+                    fontSize: 18 * scale,
                     fontWeight: FontWeight.w600,
-                    color: Colors.white.withOpacity(0.9),
+                    color: weatherClockTextColor.withOpacity(0.9),
                   ),
                 ),
-                const SizedBox(height: 12),
+                SizedBox(height: 12 * scale),
                 Wrap(
-                  spacing: 8,
-                  runSpacing: 8,
+                  spacing: 8 * scale,
+                  runSpacing: 8 * scale,
                   children: [
-                    _buildChip('H $high°'),
-                    _buildChip('L $low°'),
+                    _buildChip('H $high°', scale, weatherClockTextColor),
+                    _buildChip('L $low°', scale, weatherClockTextColor),
                   ],
                 ),
               ],
@@ -3614,18 +4549,21 @@ class AutoWidgetZone extends StatelessWidget {
     );
   }
 
-  Widget _buildBookings() {
-    final entries = queuePreview.map((item) {
+  Widget _buildBookings(double scale) {
+    final rawEntries = (payload?['today_bookings_preview'] as List<dynamic>?) ?? queuePreview;
+    final entries = rawEntries.map((item) {
       final i = item as Map<String, dynamic>;
       return {
-        'token': i['token'],
-        'name': i['patient_name'] ?? i['service_name'] ?? 'Booking',
+        'token': i['token'] ?? i['token_no'] ?? i['token_number'] ?? i['queue_token'] ?? i['ticket_no'] ?? i['ticket_number'],
+        'name': i['patient_name'] ?? i['service_name'] ?? i['name'] ?? 'Booking',
         'time': i['assigned_time'] ?? i['preferred_time'] ?? '${i['wait_after_mins'] ?? 0} min',
-        'service': i['service_type'] ?? i['service_name'] ?? 'Appointment',
+        'service': i['service_type'] ?? i['service_name'] ?? i['title'] ?? 'Appointment',
       };
     }).toList();
 
     return Container(
+      width: double.infinity,
+      height: double.infinity,
       decoration: const BoxDecoration(
         gradient: LinearGradient(
           begin: Alignment.topCenter,
@@ -3633,7 +4571,7 @@ class AutoWidgetZone extends StatelessWidget {
           colors: [Color(0xFFF8FAFC), Color(0xFFEEF2FF)],
         ),
       ),
-      padding: const EdgeInsets.all(20),
+      padding: EdgeInsets.all(20 * scale),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -3643,19 +4581,19 @@ class AutoWidgetZone extends StatelessWidget {
               Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  const Text(
+                  Text(
                     'QUEUE',
                     style: TextStyle(
-                      fontSize: 10,
+                      fontSize: 10 * scale,
                       letterSpacing: 4,
-                      color: Color(0xFF94A3B8),
+                      color: const Color(0xFF94A3B8),
                     ),
                   ),
-                  const SizedBox(height: 4),
+                  SizedBox(height: 4 * scale),
                   const Text(
                     "Today's bookings",
                     style: TextStyle(
-                      fontSize: 24,
+                    fontSize: 24,
                       fontWeight: FontWeight.w900,
                       color: Color(0xFF0F172A),
                     ),
@@ -3681,7 +4619,7 @@ class AutoWidgetZone extends StatelessWidget {
                 borderRadius: BorderRadius.circular(16),
                 color: const Color(0xFFF8FAFC),
               ),
-              padding: const EdgeInsets.all(16),
+              padding: EdgeInsets.all(16 * scale),
               child: const Center(
                 child: Text(
                   'No bookings yet.',
@@ -3694,8 +4632,8 @@ class AutoWidgetZone extends StatelessWidget {
               itemBuilder: (context, index) {
                 final entry = entries[index];
                 return Container(
-                  margin: const EdgeInsets.only(bottom: 12),
-                  padding: const EdgeInsets.all(16),
+                  margin: EdgeInsets.only(bottom: 12 * scale),
+                  padding: EdgeInsets.all(16 * scale),
                   decoration: BoxDecoration(
                     color: Colors.white,
                     borderRadius: BorderRadius.circular(16),
@@ -3711,8 +4649,8 @@ class AutoWidgetZone extends StatelessWidget {
                   child: Row(
                     children: [
                       Container(
-                        width: 56,
-                        height: 56,
+                        width: 56 * scale,
+                        height: 56 * scale,
                         decoration: BoxDecoration(
                           gradient: const LinearGradient(
                             colors: [Color(0xFF111827), Color(0xFF334155)],
@@ -3731,7 +4669,7 @@ class AutoWidgetZone extends StatelessWidget {
                           ),
                         ),
                       ),
-                      const SizedBox(width: 16),
+                      SizedBox(width: 16 * scale),
                       Expanded(
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
@@ -3746,14 +4684,18 @@ class AutoWidgetZone extends StatelessWidget {
                             ),
                             Text(
                               entry['name'].toString(),
-                              style: const TextStyle(
-                                fontSize: 18,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                fontSize: 18 * scale,
                                 fontWeight: FontWeight.w600,
                                 color: Color(0xFF0F172A),
                               ),
                             ),
                             Text(
                               entry['service'].toString(),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
                               style: const TextStyle(
                                 color: Color(0xFF64748B),
                               ),
@@ -3783,11 +4725,11 @@ class AutoWidgetZone extends StatelessWidget {
                               ),
                             ),
                           ),
-                          const SizedBox(height: 8),
+                          SizedBox(height: 8 * scale),
                           Text(
                             entry['time'].toString(),
-                            style: const TextStyle(
-                              fontSize: 24,
+                            style: TextStyle(
+                              fontSize: 24 * scale,
                               fontWeight: FontWeight.w900,
                               color: Color(0xFF0F172A),
                             ),
@@ -3805,19 +4747,19 @@ class AutoWidgetZone extends StatelessWidget {
     );
   }
 
-  Widget _buildChip(String text) {
+  Widget _buildChip(String text, double scale, Color textColor) {
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      padding: EdgeInsets.symmetric(horizontal: 12 * scale, vertical: 6 * scale),
       decoration: BoxDecoration(
-        color: Colors.white.withOpacity(0.05),
+        color: textColor.withOpacity(0.05),
         borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: Colors.white10),
+        border: Border.all(color: textColor.withOpacity(0.2)),
       ),
       child: Text(
         text,
-        style: const TextStyle(
-          fontSize: 12,
-          color: Colors.white60,
+        style: TextStyle(
+          fontSize: 12 * scale,
+          color: textColor.withOpacity(0.7),
           letterSpacing: 2,
         ),
       ),

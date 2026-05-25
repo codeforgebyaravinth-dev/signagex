@@ -101,7 +101,7 @@ function ZonePicker({ media, items, setItems }) {
 
   const addYoutube = () => {
     if (youtubeUrl.trim()) {
-      setItems([...items, { type: "youtube", url: youtubeUrl, duration: newDuration }]);
+      setItems([...items, { type: "youtube", url: youtubeUrl }]);
       setYoutubeUrl("");
       setNewDuration(10);
       setAddType("");
@@ -187,7 +187,6 @@ function ZonePicker({ media, items, setItems }) {
             <div className="space-y-1">
               <Input value={youtubeUrl} onChange={(e) => setYoutubeUrl(e.target.value)} placeholder="https://youtube.com/watch?v=..." className="rounded-sm text-xs h-8" />
               <div className="flex gap-1">
-                <Input type="number" min="1" max="600" value={newDuration} onChange={(e) => setNewDuration(parseInt(e.target.value || 10))} className="rounded-sm text-xs h-8 w-16" />
                 <Button type="button" onClick={addYoutube} className="rounded-sm bg-red-600 hover:bg-red-700 text-white text-xs h-8 flex-1" disabled={!youtubeUrl.trim()}>Add Video</Button>
               </div>
             </div>
@@ -231,8 +230,14 @@ function ZonePicker({ media, items, setItems }) {
                     {it.type === "notices" && (it.title || "Notices")}
                   </div>
                   <div className="flex items-center gap-1 mt-0.5">
-                    <Input type="number" min="1" value={it.duration} onChange={(e) => setDur(idx, parseInt(e.target.value || 1))} className="h-6 w-16 text-xs rounded-sm" />
-                    <span className="text-[10px] text-[#6B7280]">sec</span>
+                    {!(it.type === "youtube" || (it.type === "media" && m?.kind === "video")) ? (
+                      <>
+                        <Input type="number" min="1" value={it.duration} onChange={(e) => setDur(idx, parseInt(e.target.value || 1))} className="h-6 w-16 text-xs rounded-sm" />
+                        <span className="text-[10px] text-[#6B7280]">sec</span>
+                      </>
+                    ) : (
+                      <span className="text-[10px] text-[#6B7280]">Duration managed by media</span>
+                    )}
                   </div>
                   {it.type === "media" && (
                     <div className="mt-1">
