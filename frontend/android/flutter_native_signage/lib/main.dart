@@ -1,12 +1,13 @@
+// ignore_for_file: deprecated_member_use, use_build_context_synchronously, empty_catches, dead_code, dead_null_aware_expression
+
 import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
 
-import 'package:flutter/foundation.dart' show kDebugMode, kIsWeb;
+import 'package:flutter/foundation.dart' show compute, kDebugMode, kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:cached_network_image/cached_network_image.dart';
-import 'package:geocoding/geocoding.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:http/http.dart' as http;
 import 'package:marquee/marquee.dart';
@@ -24,6 +25,11 @@ void main() {
     DeviceOrientation.portraitDown,
   ]);
   runApp(const SignageApp());
+}
+
+Map<String, dynamic> _decodeJsonMap(String source) {
+  final decoded = jsonDecode(source);
+  return decoded as Map<String, dynamic>;
 }
 
 class SignageApp extends StatelessWidget {
@@ -87,14 +93,16 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
   String tickerTextColorKey = 'white';
   String tickerBackgroundColorKey = 'black';
   bool menuOpen = false;
+  bool menuButtonVisible = false;
   bool kioskModeEnabled = true;
   bool kioskProvisionWarningShown = false;
   Timer? pollTimer;
   Timer? providerTimer;
   Timer? weatherTimer;
+  Timer? menuButtonHideTimer;
   String apiBase = const String.fromEnvironment(
     'BACKEND_URL',
-    defaultValue: 'https://rpsignage.com',
+    defaultValue: 'http://10.18.51.60:8000',
   );
   Size viewportSize = Size.zero;
 
@@ -113,6 +121,7 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
     pollTimer?.cancel();
     providerTimer?.cancel();
     weatherTimer?.cancel();
+    menuButtonHideTimer?.cancel();
     super.dispose();
   }
 
@@ -227,7 +236,7 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
           .post(_apiUri('/api/public/pair/request'), headers: {'Content-Type': 'application/json'}, body: body)
           .timeout(const Duration(seconds: 10));
       if (resp.statusCode == 200) {
-        final data = json.decode(resp.body);
+        final data = await compute(_decodeJsonMap, resp.body);
         final code = data['pair_code']?.toString();
         if (code == null || code.isEmpty) throw Exception('No pair code');
         generatedPairCode = code;
@@ -245,7 +254,7 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
                 .get(_apiUri('/api/public/pair/status/$code'))
                 .timeout(const Duration(seconds: 8));
             if (statusResp.statusCode == 200) {
-              final s = json.decode(statusResp.body) as Map<String, dynamic>;
+              final s = await compute(_decodeJsonMap, statusResp.body);
                 _logDebug('pair status: ${s.toString()}');
               if (s['used'] == true && (s['paired_device_id'] ?? '').toString().isNotEmpty) {
                 // Paired by the client panel — persist pair code and begin normal polling
@@ -293,7 +302,7 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
 
   String _normalizedApiBase() {
     final trimmed = apiBase.trim();
-    final fallback = trimmed.isEmpty ? 'https://rpsignage.com' : trimmed;
+    final fallback = trimmed.isEmpty ? 'http://10.18.51.60:8000' : trimmed;
     final withoutSlash = fallback.replaceAll(RegExp(r'/$'), '');
     return withoutSlash.replaceAll(RegExp(r'/api$'), '');
   }
@@ -316,10 +325,10 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
       _logDebug('poll response status=${response.statusCode} bytes=${response.bodyBytes.length}');
 
       if (response.statusCode == 200) {
-        final data = json.decode(response.body);
-        final zones = data is Map<String, dynamic> ? data['zones'] : null;
-        final template = data is Map<String, dynamic> ? data['template'] : null;
-        _logDebug('poll success device=${data is Map<String, dynamic> ? data['device_name'] : null} zoneKeys=${zones is Map ? zones.keys.join(',') : 'n/a'} template=${template is Map ? 'present' : 'missing'}');
+        final data = await compute(_decodeJsonMap, response.body);
+        final zones = data['zones'];
+        final template = data['template'];
+        _logDebug('poll success device=${data['device_name']} zoneKeys=${zones is Map ? zones.keys.join(',') : 'n/a'} template=${template is Map ? 'present' : 'missing'}');
         _safeSetState(() {
           payload = data;
           errorMessage = "";
@@ -328,9 +337,7 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
 
         await _loadZonePreferences();
 
-        final clientId = data is Map<String, dynamic>
-            ? data['client_id']?.toString()
-            : null;
+        final clientId = data['client_id']?.toString();
         if (clientId != null && clientId.isNotEmpty) {
           _logDebug('poll -> fetching provider data for clientId=$clientId');
           unawaited(_fetchProviderData(clientId));
@@ -372,11 +379,14 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
           .timeout(const Duration(seconds: 12));
       if (response.statusCode == 200) {
         _logDebug('provider fetch success bytes=${response.bodyBytes.length}');
-        _safeSetState(() => providerData = json.decode(response.body));
+        final parsedProvider = await compute(_decodeJsonMap, response.body);
+        _safeSetState(() => providerData = parsedProvider);
       } else {
         _logDebug('provider fetch status=${response.statusCode}');
       }
-    } catch (e) {}
+    } catch (e) {
+      _logDebug('provider fetch failed: $e');
+    }
 
     providerTimer?.cancel();
     providerTimer = Timer.periodic(const Duration(seconds: 20), (_) async {
@@ -386,9 +396,12 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
               .get(_apiUri('/api/public/providers/$clientId'))
               .timeout(const Duration(seconds: 12));
           if (response.statusCode == 200 && mounted) {
-            setState(() => providerData = json.decode(response.body));
+            final parsedProvider = await compute(_decodeJsonMap, response.body);
+            setState(() => providerData = parsedProvider);
           }
-        } catch (e) {}
+        } catch (e) {
+          _logDebug('provider refresh failed: $e');
+        }
       }
     });
   }
@@ -442,7 +455,7 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
       ));
 
       if (response.statusCode == 200) {
-        final data = json.decode(response.body);
+        final data = await compute(_decodeJsonMap, response.body);
         final current = data['current'] ?? {};
         final daily = data['daily'] ?? {};
 
@@ -472,7 +485,7 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
 
     if (raw != null) {
       try {
-        final data = json.decode(raw);
+        final data = await compute(_decodeJsonMap, raw);
         _safeSetState(() {
           if (data['hiddenZoneIds'] is List) {
             hiddenZoneIds = List<String>.from(data['hiddenZoneIds']);
@@ -587,7 +600,39 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
   }
 
   void _toggleMenu() {
-    setState(() => menuOpen = !menuOpen);
+    final willOpen = !menuOpen;
+    menuButtonHideTimer?.cancel();
+    setState(() {
+      menuOpen = willOpen;
+      menuButtonVisible = true;
+    });
+
+    if (!willOpen) {
+      _showMenuButton();
+    }
+  }
+
+  void _showMenuButton() {
+    menuButtonHideTimer?.cancel();
+    if (!mounted) return;
+    setState(() => menuButtonVisible = true);
+
+    if (!menuOpen) {
+      menuButtonHideTimer = Timer(const Duration(seconds: 3), () {
+        if (!mounted || menuOpen) return;
+        setState(() => menuButtonVisible = false);
+      });
+    }
+  }
+
+  KeyEventResult _handlePlayerKeyEvent(FocusNode node, KeyEvent event) {
+    if (event is! KeyDownEvent) return KeyEventResult.ignored;
+
+    final isMenuKey = event.logicalKey == LogicalKeyboardKey.contextMenu;
+    if (!isMenuKey) return KeyEventResult.ignored;
+
+    _toggleMenu();
+    return KeyEventResult.handled;
   }
 
   void _resetZones() {
@@ -803,7 +848,9 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
     setState(() {
       showPairing = true;
       menuOpen = false;
+      menuButtonVisible = false;
     });
+    menuButtonHideTimer?.cancel();
   }
 
   Future<void> _attemptQuitApp() async {
@@ -839,6 +886,7 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
       setState(() {
         menuOpen = false;
       });
+      _showMenuButton();
       return false;
     }
 
@@ -971,29 +1019,38 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
       onWillPop: _onWillPop,
       child: Scaffold(
         backgroundColor: Colors.black,
-        body: Stack(
-          fit: StackFit.expand,
-          children: [
-            Container(
-              color: Colors.black,
+        body: Focus(
+          autofocus: true,
+          onKeyEvent: _handlePlayerKeyEvent,
+          child: Listener(
+            behavior: HitTestBehavior.opaque,
+            onPointerDown: (_) => _showMenuButton(),
+            child: Stack(
+              fit: StackFit.expand,
+              children: [
+                Container(
+                  color: Colors.black,
+                ),
+                ClipRect(
+                  child: SizedBox(
+                    width: surfaceWidth,
+                    height: surfaceHeight,
+                    child: _buildRotatedSurface(rotationDeg, surfaceWidth, surfaceHeight, content),
+                  ),
+                ),
+                if (menuButtonVisible || menuOpen)
+                  Positioned(
+                    top: 16,
+                    right: 16,
+                    child: _buildMenuButton(zoneDefs),
+                  ),
+                if (menuOpen)
+                  Positioned.fill(
+                    child: _buildMenuOverlay(zoneDefs, payloadBrightness, effectiveBrightnessPercent),
+                  ),
+              ],
             ),
-            ClipRect(
-              child: SizedBox(
-                width: surfaceWidth,
-                height: surfaceHeight,
-                child: _buildRotatedSurface(rotationDeg, surfaceWidth, surfaceHeight, content),
-              ),
-            ),
-            Positioned(
-              top: 16,
-              right: 16,
-              child: _buildMenuButton(zoneDefs),
-            ),
-            if (menuOpen)
-              Positioned.fill(
-                child: _buildMenuOverlay(zoneDefs, payloadBrightness, effectiveBrightnessPercent),
-              ),
-          ],
+          ),
         ),
       ),
     );
@@ -1335,6 +1392,13 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
 
     _logDebug('zone branch=$zoneId -> media slot mode=${zoneMediaModes[zoneId] ?? _getDefaultZoneMediaMode(zone)}');
     return MediaSlot(
+      key: ValueKey('media-slot:$zoneId:${items.map((item) {
+        final type = (item['type'] ?? item['kind'] ?? '').toString().toLowerCase();
+        final mediaId = item['media_id']?.toString() ?? '';
+        final url = (item['url'] ?? item['image_url'] ?? item['public_url'] ?? item['media_url'] ?? '').toString();
+        final duration = (item['duration'] ?? '').toString();
+        return '$type|$mediaId|$url|$duration';
+      }).join('||')}'),
       items: items,
       label: zoneName,
       mediaMode: zoneMediaModes[zoneId] ?? _getDefaultZoneMediaMode(zone),
@@ -2739,6 +2803,9 @@ class _MediaSlotState extends State<MediaSlot> {
   String? videoError;
   YoutubePlayerController? youtubeController;
   VideoPlayerController? videoController;
+  bool _videoCompletionHandled = false;
+  bool _youtubeCompletionHandled = false;
+  String? _activeVideoSourceKey;
 
   void _pausePlaybackForFocusLoss() {
     youtubeController?.pause();
@@ -2756,10 +2823,20 @@ class _MediaSlotState extends State<MediaSlot> {
   @override
   void didUpdateWidget(MediaSlot oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.items.length != widget.items.length) {
+    if (_itemsSignature(oldWidget.items) != _itemsSignature(widget.items)) {
       setState(() => currentIndex = 0);
       _setupTimer();
     }
+  }
+
+  String _itemsSignature(List<Map<String, dynamic>> items) {
+    return items.map((item) {
+      final type = (item['type'] ?? item['kind'] ?? '').toString().toLowerCase();
+      final mediaId = item['media_id']?.toString() ?? '';
+      final url = _resolveUrl(item);
+      final duration = (item['duration'] ?? '').toString();
+      return '$type|$mediaId|$url|$duration';
+    }).join('||');
   }
 
   void _setupTimer() {
@@ -2805,6 +2882,25 @@ class _MediaSlotState extends State<MediaSlot> {
     }
   }
 
+  void _disposePlaybackControllers() {
+    youtubeController?.dispose();
+    youtubeController = null;
+    videoController?.dispose();
+    videoController = null;
+    _activeVideoSourceKey = null;
+    _videoCompletionHandled = false;
+    _youtubeCompletionHandled = false;
+  }
+
+  void _restartCurrentVideo() {
+    if (!mounted) return;
+    videoController?.dispose();
+    videoController = null;
+    _activeVideoSourceKey = null;
+    _videoCompletionHandled = false;
+    setState(() {});
+  }
+
   void _toggleMute() {
     setState(() {
       isMuted = !isMuted;
@@ -2839,6 +2935,7 @@ class _MediaSlotState extends State<MediaSlot> {
   void _nextItem() {
     if (!mounted) return;
     controlsHideTimer?.cancel();
+    _disposePlaybackControllers();
     setState(() {
       currentIndex = (currentIndex + 1) % widget.items.length;
       showFrame = false;
@@ -2851,6 +2948,43 @@ class _MediaSlotState extends State<MediaSlot> {
         _setupTimer();
       }
     });
+  }
+
+  void _handleMediaCompletion(VoidCallback replayCurrent) {
+    if (!mounted) return;
+
+    // For playlists with multiple items, always move to the next item (wrap handled in _nextItem).
+    if (widget.items.length > 1) {
+      _nextItem();
+      return;
+    }
+
+    replayCurrent();
+  }
+
+  bool _isVideoPlaybackCompleted(VideoPlayerValue value) {
+    if (!value.isInitialized) return false;
+
+    final duration = value.duration;
+    final position = value.position;
+
+    // Ignore bogus/very-short durations that can be reported transiently.
+    if (duration.inMilliseconds < 1000) return false;
+
+    if (value.isCompleted) return true;
+
+    // Allow a small tolerance for decoder timing drift near the tail.
+    const tailTolerance = Duration(milliseconds: 250);
+    final nearEnd = position >= (duration - tailTolerance);
+    return nearEnd && !value.isPlaying;
+  }
+
+  bool _isLikelyEndOfStreamError(String message) {
+    final normalized = message.toLowerCase();
+    return normalized.contains('eofexception') ||
+        normalized.contains('source error') ||
+        normalized.contains('end of stream') ||
+        normalized.contains('behind live window');
   }
 
   @override
@@ -2895,6 +3029,10 @@ class _MediaSlotState extends State<MediaSlot> {
 
     final item = widget.items[currentIndex];
     final itemType = _resolveItemType(item);
+
+    if (itemType != 'video' && itemType != 'youtube') {
+      _disposePlaybackControllers();
+    }
 
     Widget content;
 
@@ -2977,10 +3115,14 @@ class _MediaSlotState extends State<MediaSlot> {
       right: 0,
       bottom: 0,
       child: Container(
+        height: 76,
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
         color: Colors.black.withOpacity(0.45),
-        child: Row(
-          children: [
+        child: SingleChildScrollView(
+          scrollDirection: Axis.horizontal,
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
             IconButton(
               onPressed: () {
                 if (hasVideo) {
@@ -3009,7 +3151,8 @@ class _MediaSlotState extends State<MediaSlot> {
               ),
             ),
             if (hasVideo)
-              Expanded(
+              SizedBox(
+                width: 140,
                 child: VideoProgressIndicator(
                   videoController!,
                   allowScrubbing: true,
@@ -3022,7 +3165,7 @@ class _MediaSlotState extends State<MediaSlot> {
                 ),
               )
             else
-              const Spacer(),
+              const SizedBox(width: 12),
             IconButton(
               onPressed: () async {
                 if (hasVideo) {
@@ -3061,7 +3204,8 @@ class _MediaSlotState extends State<MediaSlot> {
                 ),
               ),
             ),
-          ],
+            ],
+          ),
         ),
       ),
     );
@@ -3098,104 +3242,104 @@ class _MediaSlotState extends State<MediaSlot> {
               ),
             ),
             padding: EdgeInsets.all(20 * scaleFactor),
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      (item['title'] ?? 'Today').toString().toUpperCase(),
-                      style: TextStyle(
-                        fontSize: 10 * scaleFactor,
-                        letterSpacing: 4.5,
-                        color: textColor.withOpacity(0.45),
-                      ),
-                    ),
-                    SizedBox(height: 8 * scaleFactor),
-                    Text(
-                      item['location']?.toString() ?? 'Local time',
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(
-                        fontSize: 14 * scaleFactor,
-                        color: textColor.withOpacity(0.7),
-                      ),
-                    ),
-                  ],
-                ),
-                Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    SizedBox(
-                      width: double.infinity,
-                      child: FittedBox(
-                        fit: BoxFit.scaleDown,
-                        alignment: Alignment.centerLeft,
-                        child: Text(
-                          time,
-                          style: TextStyle(
-                            fontSize: 72 * scaleFactor,
-                            fontWeight: FontWeight.w900,
-                            color: textColor,
-                            letterSpacing: -2,
-                          ),
-                        ),
-                      ),
-                    ),
-                    SizedBox(height: 8 * scaleFactor),
-                    SizedBox(
-                      width: double.infinity,
-                      child: FittedBox(
-                        fit: BoxFit.scaleDown,
-                        alignment: Alignment.centerLeft,
-                        child: Text(
-                          date,
-                          style: TextStyle(
-                            fontSize: 18 * scaleFactor,
-                            color: textColor.withOpacity(0.8),
-                          ),
-                        ),
-                      ),
-                    ),
-                    SizedBox(height: 16 * scaleFactor),
-                    Container(
-                      padding: EdgeInsets.symmetric(
-                        horizontal: 12 * scaleFactor,
-                        vertical: 6 * scaleFactor,
-                      ),
-                      decoration: BoxDecoration(
-                        color: textColor.withOpacity(0.05),
-                        borderRadius: BorderRadius.circular(20),
-                        border: Border.all(color: textColor.withOpacity(0.2)),
-                      ),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Container(
-                            width: 8,
-                            height: 8,
-                            decoration: const BoxDecoration(
-                              color: Colors.greenAccent,
-                              shape: BoxShape.circle,
+            child: LayoutBuilder(
+              builder: (context, constraints) {
+                return SingleChildScrollView(
+                  child: ConstrainedBox(
+                    constraints: BoxConstraints(minHeight: constraints.maxHeight),
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              (item['title'] ?? 'Today').toString().toUpperCase(),
+                              style: TextStyle(
+                                fontSize: 10 * scaleFactor,
+                                letterSpacing: 4.5,
+                                color: textColor.withOpacity(0.45),
+                              ),
                             ),
-                          ),
-                          const SizedBox(width: 8),
-                          Text(
-                            'LIVE',
-                            style: TextStyle(
-                              fontSize: 12 * scaleFactor,
-                              color: textColor.withOpacity(0.6),
-                              letterSpacing: 3,
+                            SizedBox(height: 8 * scaleFactor),
+                            Text(
+                              item['location']?.toString() ?? 'Local time',
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                fontSize: 14 * scaleFactor,
+                                color: textColor.withOpacity(0.7),
+                              ),
                             ),
-                          ),
-                        ],
-                      ),
+                          ],
+                        ),
+                        Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            SizedBox(
+                              width: double.infinity,
+                              child: FittedBox(
+                                fit: BoxFit.scaleDown,
+                                alignment: Alignment.centerLeft,
+                                child: Text(
+                                  time,
+                                  style: TextStyle(
+                                    fontSize: 72 * scaleFactor,
+                                    fontWeight: FontWeight.w900,
+                                    color: textColor,
+                                    letterSpacing: -2,
+                                  ),
+                                ),
+                              ),
+                            ),
+                            SizedBox(height: 8 * scaleFactor),
+                            SizedBox(
+                              width: double.infinity,
+                              child: FittedBox(
+                                fit: BoxFit.scaleDown,
+                                alignment: Alignment.centerLeft,
+                                child: Text(
+                                  date,
+                                  style: TextStyle(
+                                    fontSize: 18 * scaleFactor,
+                                    color: textColor.withOpacity(0.8),
+                                  ),
+                                ),
+                              ),
+                            ),
+                            SizedBox(height: 16 * scaleFactor),
+                            Container(
+                              padding: EdgeInsets.symmetric(
+                                horizontal: 12 * scaleFactor,
+                                vertical: 6 * scaleFactor,
+                              ),
+                              decoration: BoxDecoration(
+                                color: textColor.withOpacity(0.05),
+                                borderRadius: BorderRadius.circular(20),
+                                border: Border.all(color: textColor.withOpacity(0.2)),
+                              ),
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Text(
+                                    'LIVE',
+                                    style: TextStyle(
+                                      fontSize: 12 * scaleFactor,
+                                      color: textColor.withOpacity(0.6),
+                                      letterSpacing: 3,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ],
+                        ),
+                      ],
                     ),
-                  ],
-                ),
-              ],
+                  ),
+                );
+              },
             ),
           ),
         );
@@ -3232,89 +3376,98 @@ class _MediaSlotState extends State<MediaSlot> {
           ),
         ),
         padding: EdgeInsets.all(20 * scaleFactor),
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  'WEATHER ☀️',
-                  style: TextStyle(
-                    fontSize: 10 * scaleFactor,
-                    letterSpacing: 4.5,
-                    color: textColor.withOpacity(0.85),
-                  ),
-                ),
-                SizedBox(height: 8 * scaleFactor),
-                Text(
-                  location,
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                    fontSize: 14 * scaleFactor,
-                    color: textColor.withOpacity(0.7),
-                  ),
-                ),
-              ],
-            ),
-            Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                SizedBox(
-                  width: double.infinity,
-                  child: FittedBox(
-                    fit: BoxFit.scaleDown,
-                    alignment: Alignment.centerLeft,
-                    child: Text(
-                      '$temp°',
-                      style: TextStyle(
-                        fontSize: 80 * scaleFactor,
-                        fontWeight: FontWeight.w900,
-                        color: textColor,
-                        letterSpacing: -2,
-                      ),
-                    ),
-                  ),
-                ),
-                SizedBox(height: 12 * scaleFactor),
-                Text(
-                  '☀️ $condition',
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                    fontSize: 18 * scaleFactor,
-                    fontWeight: FontWeight.w600,
-                    color: textColor.withOpacity(0.9),
-                  ),
-                ),
-                SizedBox(height: 12 * scaleFactor),
-                Wrap(
-                  spacing: 8 * scaleFactor,
-                  runSpacing: 8 * scaleFactor,
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            return SingleChildScrollView(
+              child: ConstrainedBox(
+                constraints: BoxConstraints(minHeight: constraints.maxHeight),
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    _buildWeatherChip(
-                      'H ${item['high'] ?? '--'}°',
-                      textColor,
-                      scaleFactor,
+                    Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'WEATHER ☀️',
+                          style: TextStyle(
+                            fontSize: 10 * scaleFactor,
+                            letterSpacing: 4.5,
+                            color: textColor.withOpacity(0.85),
+                          ),
+                        ),
+                        SizedBox(height: 8 * scaleFactor),
+                        Text(
+                          location,
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontSize: 14 * scaleFactor,
+                            color: textColor.withOpacity(0.7),
+                          ),
+                        ),
+                      ],
                     ),
-                    _buildWeatherChip(
-                      'L ${item['low'] ?? '--'}°',
-                      textColor,
-                      scaleFactor,
+                    Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        SizedBox(
+                          width: double.infinity,
+                          child: FittedBox(
+                            fit: BoxFit.scaleDown,
+                            alignment: Alignment.centerLeft,
+                            child: Text(
+                              '$temp°',
+                              style: TextStyle(
+                                fontSize: 80 * scaleFactor,
+                                fontWeight: FontWeight.w900,
+                                color: textColor,
+                                letterSpacing: -2,
+                              ),
+                            ),
+                          ),
+                        ),
+                        SizedBox(height: 12 * scaleFactor),
+                        Text(
+                          '☀️ $condition',
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontSize: 18 * scaleFactor,
+                            fontWeight: FontWeight.w600,
+                            color: textColor.withOpacity(0.9),
+                          ),
+                        ),
+                        SizedBox(height: 12 * scaleFactor),
+                        Wrap(
+                          spacing: 8 * scaleFactor,
+                          runSpacing: 8 * scaleFactor,
+                          children: [
+                            _buildWeatherChip(
+                              'H ${item['high'] ?? '--'}°',
+                              textColor,
+                              scaleFactor,
+                            ),
+                            _buildWeatherChip(
+                              'L ${item['low'] ?? '--'}°',
+                              textColor,
+                              scaleFactor,
+                            ),
+                            if (item['humidity'] != null)
+                              _buildWeatherChip(
+                                'Humidity ${item['humidity']}%',
+                                textColor,
+                                scaleFactor,
+                              ),
+                          ],
+                        ),
+                      ],
                     ),
-                    if (item['humidity'] != null)
-                      _buildWeatherChip(
-                        'Humidity ${item['humidity']}%',
-                        textColor,
-                        scaleFactor,
-                      ),
                   ],
                 ),
-              ],
-            ),
-          ],
+              ),
+            );
+          },
         ),
       ),
     );
@@ -3407,6 +3560,7 @@ class _MediaSlotState extends State<MediaSlot> {
 
     if (youtubeController == null || youtubeController!.initialVideoId != videoId) {
       youtubeController?.dispose();
+      _youtubeCompletionHandled = false;
       youtubeController = YoutubePlayerController(
         initialVideoId: videoId,
         flags: YoutubePlayerFlags(
@@ -3420,10 +3574,25 @@ class _MediaSlotState extends State<MediaSlot> {
       MediaSlot._claimAudioFocus(this);
       _applyMuteState();
       youtubeController!.addListener(() {
-        if (youtubeController!.value.playerState == PlayerState.ended) {
-          _nextItem();
+        final state = youtubeController!.value.playerState;
+        if (state == PlayerState.ended && !_youtubeCompletionHandled) {
+          _youtubeCompletionHandled = true;
+          _handleMediaCompletion(() {
+            youtubeController?.seekTo(Duration.zero);
+            youtubeController?.play();
+          });
+        } else if (state != PlayerState.ended) {
+          _youtubeCompletionHandled = false;
         }
       });
+    } else {
+      final state = youtubeController!.value.playerState;
+      if (state == PlayerState.ended) {
+        youtubeController!.seekTo(Duration.zero);
+        youtubeController!.play();
+      } else if (!youtubeController!.value.isPlaying) {
+        youtubeController!.play();
+      }
     }
 
     return YoutubePlayer(
@@ -3431,6 +3600,7 @@ class _MediaSlotState extends State<MediaSlot> {
       showVideoProgressIndicator: false,
       onReady: () {
         youtubeController?.play();
+        _showPlaybackControlsTemporarily();
       },
     );
   }
@@ -3439,25 +3609,61 @@ class _MediaSlotState extends State<MediaSlot> {
     final url = _resolveUrl(item);
     if (url.isEmpty) return const SizedBox();
 
-    if (videoController == null || videoController!.dataSource != url) {
+    final mediaId = item['media_id']?.toString();
+    final sourceKey = (mediaId != null && mediaId.isNotEmpty) ? 'media:$mediaId' : 'url:$url';
+
+    if (videoController == null || _activeVideoSourceKey != sourceKey) {
       videoController?.dispose();
       videoError = null;
+      _videoCompletionHandled = false;
+      _activeVideoSourceKey = sourceKey;
       videoController = VideoPlayerController.networkUrl(Uri.parse(url))
         ..initialize().then((_) {
           if (mounted) setState(() {});
           MediaSlot._claimAudioFocus(this);
-          videoController!.setLooping(false);
+          videoController!.setLooping(widget.items.length == 1);
           videoController!.setVolume(isMuted ? 0.0 : 1.0);
           videoController!.play();
+          _showPlaybackControlsTemporarily();
           videoController!.addListener(() {
-            if (videoController!.value.hasError && mounted) {
-              setState(() {
-                videoError = videoController!.value.errorDescription ?? 'Unable to play video';
-              });
+            if (videoController!.value.hasError) {
+              final errorDescription = videoController!.value.errorDescription ?? 'Unable to play video';
+              if (_isLikelyEndOfStreamError(errorDescription)) {
+                if (widget.items.length > 1) {
+                  if (!_videoCompletionHandled) {
+                    _videoCompletionHandled = true;
+                    _handleMediaCompletion(() {
+                      videoController?.seekTo(Duration.zero);
+                      videoController?.play();
+                    });
+                  }
+                } else {
+                  _restartCurrentVideo();
+                }
+                return;
+              }
+
+              if (mounted) {
+                setState(() {
+                  videoError = errorDescription;
+                });
+              }
               return;
             }
-            if (videoController!.value.position >= videoController!.value.duration) {
-              _nextItem();
+            final v = videoController!.value;
+            final ended = _isVideoPlaybackCompleted(v);
+            if (ended && !_videoCompletionHandled) {
+              _videoCompletionHandled = true;
+              if (widget.items.length > 1) {
+                _handleMediaCompletion(() {
+                  videoController?.seekTo(Duration.zero);
+                  videoController?.play();
+                });
+              } else {
+                _restartCurrentVideo();
+              }
+            } else if (!ended) {
+              _videoCompletionHandled = false;
             }
           });
         }).catchError((error) {
@@ -3467,6 +3673,18 @@ class _MediaSlotState extends State<MediaSlot> {
             });
           }
         });
+    } else {
+      final v = videoController!.value;
+      if (v.isInitialized && !v.isPlaying) {
+        final ended = _isVideoPlaybackCompleted(v);
+        if (ended) {
+          if (widget.items.length > 1) {
+            unawaited(videoController!.seekTo(Duration.zero).then((_) => videoController!.play()));
+          } else {
+            _restartCurrentVideo();
+          }
+        }
+      }
     }
 
     if (videoController == null || !videoController!.value.isInitialized) {
@@ -3808,8 +4026,7 @@ class _MediaSlotState extends State<MediaSlot> {
         item['image_url']?.toString() ??
         item['public_url']?.toString() ??
         item['media_url']?.toString() ??
-        (item['media_id'] != null ? '/api/media/${item['media_id']}' : '') ??
-        '';
+        (item['media_id'] != null ? '/api/media/${item['media_id']}' : '');
 
     if (candidate.isEmpty) return '';
     if (candidate.startsWith('http://') || candidate.startsWith('https://') ||
@@ -3817,7 +4034,7 @@ class _MediaSlotState extends State<MediaSlot> {
       return candidate;
     }
 
-    final base = 'https://rpsignage.com';
+    final base = 'http://10.18.51.60:8000';
     if (candidate.startsWith('/')) return '$base$candidate';
     return '$base/$candidate';
   }
@@ -4234,7 +4451,7 @@ class QueueBoard extends StatelessWidget {
                                     ],
                                   ),
                                 );
-                              }).toList(),
+                              }),
                             ],
                           ),
                         ),
