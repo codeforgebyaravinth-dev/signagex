@@ -2689,8 +2689,8 @@ int? _asInt(dynamic value) {
     flags: const YoutubePlayerFlags(
     autoPlay: true,
     mute: true,
-    hideControls: true,
-    disableDragSeek: true,
+    hideControls: false,
+    disableDragSeek: false,
     ),
     );
     youtubeController!.addListener(() {
@@ -2702,7 +2702,8 @@ int? _asInt(dynamic value) {
 
     return YoutubePlayer(
     controller: youtubeController!,
-    showVideoProgressIndicator: false,
+    showVideoProgressIndicator: true,
+    progressIndicatorColor: Colors.redAccent,
     onReady: () {
     youtubeController?.play();
     },

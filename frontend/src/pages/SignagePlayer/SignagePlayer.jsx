@@ -1297,6 +1297,29 @@ export default function SignagePlayer() {
       : (Array.isArray(payload?.queue_preview) ? payload.queue_preview : []);
   }, [providerData?.queue_preview, payload?.queue_preview]);
 
+  const hasQueueZone = useCallback(() => {
+    try {
+      const layout = payload?.template?.layout || {};
+      if (Array.isArray(layout.zones) && layout.zones.length > 0) {
+        return layout.zones.some((z) => {
+          const role = String(z?.role || "").toLowerCase();
+          const id = String(z?.id || "").toLowerCase();
+          const name = String(z?.name || "").toLowerCase();
+          return role === "queue" || /queue|token/.test(id) || /queue|token/.test(name);
+        });
+      }
+
+      // Fallback: check payload.zones keys
+      if (payload?.zones && typeof payload.zones === "object") {
+        return Object.keys(payload.zones).some((k) => /queue|token/i.test(k));
+      }
+
+      return false;
+    } catch (e) {
+      return false;
+    }
+  }, [payload]);
+
   const toggleZoneVisibility = useCallback((zoneId) => {
     setHiddenZoneIds((current) => (
       current.includes(zoneId)
@@ -1482,7 +1505,7 @@ export default function SignagePlayer() {
         }
       };
 
-      connectSocket();
+      if (hasQueueZone()) connectSocket();
 
       const id = setInterval(poll, 15_000);
       const handleVisibilityChange = () => {
@@ -1516,6 +1539,7 @@ export default function SignagePlayer() {
 
   useEffect(() => {
     if (!currentPairCode || showPairing || showSplash) return;
+    if (!hasQueueZone()) return; // skip announcements on players without a queue zone
     const lead = queuePreview?.find((item) => String(item?.status || "").toLowerCase() === "called") || queuePreview?.[0] || null;
     const announcement = buildQueueAnnouncement(lead);
 

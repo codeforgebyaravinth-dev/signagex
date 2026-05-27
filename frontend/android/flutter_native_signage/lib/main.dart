@@ -34,6 +34,37 @@ Map<String, dynamic> _decodeJsonMap(String source) {
   return decoded as Map<String, dynamic>;
 }
 
+String _queueTokenLabel(Map<String, dynamic> entry) {
+  final tokenValue = entry['token'] ??
+      entry['token_no'] ??
+      entry['token_number'] ??
+      entry['queue_token'] ??
+      entry['ticket_no'] ??
+      entry['ticket_number'];
+  final tokenText = tokenValue?.toString().trim() ?? '';
+  return tokenText.isNotEmpty ? tokenText : '—';
+}
+
+String _queueServiceLabel(Map<String, dynamic> entry) {
+  final serviceValue = entry['service_name'] ?? entry['service_type'] ?? entry['name'];
+  final serviceText = serviceValue?.toString().trim() ?? '';
+  return serviceText.isNotEmpty ? serviceText : '→ PLEASE PROCEED TO COUNTER ←';
+}
+
+String _queuePatientLabel(Map<String, dynamic> entry) {
+  final patientValue = entry['patient_name'] ?? entry['name'] ?? entry['service_name'];
+  final patientText = patientValue?.toString().trim() ?? '';
+  return patientText.isNotEmpty ? patientText : 'GUEST';
+}
+
+String? _queueWaitLabel(Map<String, dynamic> entry) {
+  final waitValue = entry['wait_after_mins'];
+  if (waitValue == null) return null;
+  final waitText = waitValue.toString().trim();
+  if (waitText.isEmpty || waitText == '0') return null;
+  return '${waitText}m';
+}
+
 class SignageApp extends StatelessWidget {
   const SignageApp({super.key});
 
@@ -130,8 +161,9 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
     try {
       _flutterTts = FlutterTts();
       await _flutterTts?.setLanguage('en-US');
-      await _flutterTts?.setSpeechRate(0.95);
-      await _flutterTts?.setPitch(1.0);
+      await _flutterTts?.awaitSpeakCompletion(true);
+      await _flutterTts?.setSpeechRate(0.55);
+      await _flutterTts?.setPitch(0.98);
       _ttsReady = true;
     } catch (e) {
       _ttsReady = false;
@@ -445,6 +477,8 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
 
   Future<void> _connectQueueSocket() async {
     if (currentPairCode == null) return;
+    // Only connect websocket for queue updates when this player has a queue zone
+    if (!_hasQueueZone()) return;
     try {
       _queueSocketRetryTimer?.cancel();
       // If already connected, noop
@@ -503,6 +537,9 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
 
   Future<void> _maybeAnnounceQueue() async {
     try {
+      // Only announce if this player's template contains a queue zone
+      if (!_hasQueueZone()) return;
+
       final queuePreview = _getQueuePreview();
       final lead = queuePreview.firstWhere((item) {
         final status = (item['status'] ?? '').toString().toLowerCase();
@@ -552,6 +589,8 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
   Future<void> _speak(String text) async {
     if (!_ttsReady || _flutterTts == null) return;
     try {
+      await _flutterTts?.setSpeechRate(0.55);
+      await _flutterTts?.setPitch(0.98);
       await _flutterTts?.stop();
       await _flutterTts?.speak(text);
     } catch (_) {}
@@ -1666,6 +1705,17 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
     return ['header', 'weather', 'bookings'].contains(role.toLowerCase());
   }
 
+  bool _hasQueueZone() {
+    final zones = _getZoneDefinitions();
+    for (final z in zones) {
+      final id = (z['id'] ?? '').toString();
+      final name = (z['name'] ?? '').toString();
+      final role = (z['role'] ?? '').toString();
+      if (_isQueueZone(id, name, role)) return true;
+    }
+    return false;
+  }
+
   List<dynamic> _getQueuePreview() {
     final providerPreview = providerData?['queue_preview'];
     if (providerPreview is List && providerPreview.isNotEmpty) {
@@ -1904,13 +1954,15 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
                                     ),
                                   ],
                                 ),
-                                Slider(
-                                  value: effectiveBrightnessPercent,
-                                  min: 10,
-                                  max: 100,
-                                  divisions: 18,
-                                  label: '${effectiveBrightnessPercent.round()}%',
-                                  onChanged: _setBrightnessOverride,
+                                ExcludeFocus(
+                                  child: Slider(
+                                    value: effectiveBrightnessPercent,
+                                    min: 10,
+                                    max: 100,
+                                    divisions: 18,
+                                    label: '${effectiveBrightnessPercent.round()}%',
+                                    onChanged: _setBrightnessOverride,
+                                  ),
                                 ),
                                 Wrap(
                                   spacing: 8,
@@ -1968,13 +2020,15 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
                                     fontWeight: FontWeight.w600,
                                   ),
                                 ),
-                                Slider(
-                                  value: weatherClockScale,
-                                  min: 0.7,
-                                  max: 1.5,
-                                  divisions: 8,
-                                  label: '${(weatherClockScale * 100).round()}%',
-                                  onChanged: _setWeatherClockScale,
+                                ExcludeFocus(
+                                  child: Slider(
+                                    value: weatherClockScale,
+                                    min: 0.7,
+                                    max: 1.5,
+                                    divisions: 8,
+                                    label: '${(weatherClockScale * 100).round()}%',
+                                    onChanged: _setWeatherClockScale,
+                                  ),
                                 ),
                                 const SizedBox(height: 6),
                                 Text(
@@ -2028,13 +2082,15 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
                                     fontWeight: FontWeight.w600,
                                   ),
                                 ),
-                                Slider(
-                                  value: tickerSpeed,
-                                  min: 20,
-                                  max: 140,
-                                  divisions: 12,
-                                  label: '${tickerSpeed.round()}',
-                                  onChanged: _setTickerSpeed,
+                                ExcludeFocus(
+                                  child: Slider(
+                                    value: tickerSpeed,
+                                    min: 20,
+                                    max: 140,
+                                    divisions: 12,
+                                    label: '${tickerSpeed.round()}',
+                                    onChanged: _setTickerSpeed,
+                                  ),
                                 ),
                                 const SizedBox(height: 6),
                                 Text(
@@ -2107,35 +2163,29 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
                           Row(
                             children: ['auto', 'landscape', 'portrait'].map((mode) {
                               final isSelected = orientationOverride == mode;
-                              return Expanded(
+                                return Expanded(
                                 child: Padding(
                                   padding: const EdgeInsets.symmetric(horizontal: 4),
-                                  child: GestureDetector(
-                                    onTap: () => _setOrientation(mode),
-                                    child: Container(
-                                      padding: const EdgeInsets.symmetric(vertical: 8),
-                                      decoration: BoxDecoration(
-                                        color: isSelected
-                                            ? Colors.cyan.withOpacity(0.2)
-                                            : Colors.white.withOpacity(0.05),
-                                        borderRadius: BorderRadius.circular(12),
-                                        border: Border.all(
-                                          color: isSelected
-                                              ? Colors.cyan.withOpacity(0.4)
-                                              : Colors.white10,
-                                        ),
+                                  child: TextButton(
+                                    onPressed: () => _setOrientation(mode),
+                                    style: ButtonStyle(
+                                      padding: MaterialStateProperty.all(const EdgeInsets.symmetric(vertical: 8)),
+                                      backgroundColor: MaterialStateProperty.resolveWith((states) =>
+                                        isSelected ? Colors.cyan.withOpacity(0.2) : Colors.white.withOpacity(0.05)
                                       ),
-                                      child: Text(
-                                        mode.toUpperCase(),
-                                        textAlign: TextAlign.center,
-                                        style: TextStyle(
-                                          fontSize: 10,
-                                          fontWeight: FontWeight.w600,
-                                          letterSpacing: 2,
-                                          color: isSelected
-                                              ? Colors.cyanAccent
-                                              : Colors.white70,
-                                        ),
+                                      shape: MaterialStateProperty.all(RoundedRectangleBorder(
+                                        borderRadius: BorderRadius.circular(12),
+                                        side: BorderSide(color: isSelected ? Colors.cyan.withOpacity(0.4) : Colors.white10),
+                                      )),
+                                    ),
+                                    child: Text(
+                                      mode.toUpperCase(),
+                                      textAlign: TextAlign.center,
+                                      style: TextStyle(
+                                        fontSize: 10,
+                                        fontWeight: FontWeight.w600,
+                                        letterSpacing: 2,
+                                        color: isSelected ? Colors.cyanAccent : Colors.white70,
                                       ),
                                     ),
                                   ),
@@ -2235,8 +2285,8 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
                                           ],
                                         ),
                                       ),
-                                      GestureDetector(
-                                        onTap: () {
+                                      TextButton(
+                                        onPressed: () {
                                           setState(() {
                                             if (isHidden) {
                                               hiddenZoneIds.remove(zoneId);
@@ -2246,37 +2296,37 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
                                           });
                                           _saveZonePreferences();
                                         },
-                                        child: Container(
-                                          padding: const EdgeInsets.symmetric(
+                                        style: ButtonStyle(
+                                          padding: MaterialStateProperty.all(const EdgeInsets.symmetric(
                                             horizontal: 12,
                                             vertical: 6,
+                                          )),
+                                          backgroundColor: MaterialStateProperty.resolveWith((states) =>
+                                            isHidden ? Colors.white.withOpacity(0.1) : Colors.red.withOpacity(0.15)
                                           ),
-                                          decoration: BoxDecoration(
-                                            color: isHidden
-                                                ? Colors.white.withOpacity(0.1)
-                                                : Colors.red.withOpacity(0.15),
+                                          shape: MaterialStateProperty.all(RoundedRectangleBorder(
                                             borderRadius: BorderRadius.circular(20),
-                                          ),
-                                          child: Row(
-                                            mainAxisSize: MainAxisSize.min,
-                                            children: [
-                                              Icon(
-                                                isHidden ? Icons.visibility : Icons.visibility_off,
-                                                size: 14,
+                                          )),
+                                        ),
+                                        child: Row(
+                                          mainAxisSize: MainAxisSize.min,
+                                          children: [
+                                            Icon(
+                                              isHidden ? Icons.visibility : Icons.visibility_off,
+                                              size: 14,
+                                              color: isHidden ? Colors.white70 : Colors.redAccent,
+                                            ),
+                                            const SizedBox(width: 4),
+                                            Text(
+                                              isHidden ? 'SHOW' : 'HIDE',
+                                              style: TextStyle(
+                                                fontSize: 10,
+                                                fontWeight: FontWeight.w600,
+                                                letterSpacing: 2,
                                                 color: isHidden ? Colors.white70 : Colors.redAccent,
                                               ),
-                                              const SizedBox(width: 4),
-                                              Text(
-                                                isHidden ? 'SHOW' : 'HIDE',
-                                                style: TextStyle(
-                                                  fontSize: 10,
-                                                  fontWeight: FontWeight.w600,
-                                                  letterSpacing: 2,
-                                                  color: isHidden ? Colors.white70 : Colors.redAccent,
-                                                ),
-                                              ),
-                                            ],
-                                          ),
+                                            ),
+                                          ],
                                         ),
                                       ),
                                     ],
@@ -3161,16 +3211,11 @@ class _MediaSlotState extends State<MediaSlot> {
     _disposePlaybackControllers();
     setState(() {
       currentIndex = (currentIndex + 1) % widget.items.length;
-      showFrame = false;
+      showFrame = true;
       videoError = null;
       showPlaybackControls = false;
     });
-    Future.delayed(const Duration(milliseconds: 30), () {
-      if (mounted) {
-        setState(() => showFrame = true);
-        _setupTimer();
-      }
-    });
+    _setupTimer();
   }
 
   void _handleMediaCompletion(VoidCallback replayCurrent) {
@@ -3286,28 +3331,20 @@ class _MediaSlotState extends State<MediaSlot> {
         content = _buildMedia(item);
     }
 
-    return AnimatedOpacity(
-      opacity: showFrame ? 1.0 : 0.0,
-      duration: const Duration(milliseconds: 500),
-      child: AnimatedScale(
-        scale: showFrame ? 1.0 : 1.01,
-        duration: const Duration(milliseconds: 500),
-        child: LayoutBuilder(
-          builder: (context, constraints) {
-            return ClipRect(
-              child: FittedBox(
-                fit: BoxFit.contain,
-                alignment: Alignment.topLeft,
-                child: SizedBox(
-                  width: constraints.maxWidth,
-                  height: constraints.maxHeight,
-                  child: content,
-                ),
-              ),
-            );
-          },
-        ),
-      ),
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        return ClipRect(
+          child: FittedBox(
+            fit: BoxFit.contain,
+            alignment: Alignment.topLeft,
+            child: SizedBox(
+              width: constraints.maxWidth,
+              height: constraints.maxHeight,
+              child: content,
+            ),
+          ),
+        );
+      },
     );
   }
 
@@ -3789,9 +3826,9 @@ class _MediaSlotState extends State<MediaSlot> {
         flags: YoutubePlayerFlags(
           autoPlay: true,
           mute: isMuted,
-          hideControls: true,
-          controlsVisibleAtStart: false,
-          disableDragSeek: true,
+          hideControls: false,
+          controlsVisibleAtStart: true,
+          disableDragSeek: false,
         ),
       );
       MediaSlot._claimAudioFocus(this);
@@ -3820,7 +3857,8 @@ class _MediaSlotState extends State<MediaSlot> {
 
     return YoutubePlayer(
       controller: youtubeController!,
-      showVideoProgressIndicator: false,
+      showVideoProgressIndicator: true,
+      progressIndicatorColor: Colors.redAccent,
       onReady: () {
         youtubeController?.play();
         _showPlaybackControlsTemporarily();
@@ -3944,40 +3982,45 @@ class _MediaSlotState extends State<MediaSlot> {
 
     if (entries.isEmpty) {
       if (itemType == 'queue') {
-        entries = widget.queuePreview.isNotEmpty
-            ? widget.queuePreview
-            : widget.liveQueue;
+        entries = widget.queuePreview.isNotEmpty ? widget.queuePreview : widget.liveQueue;
       } else {
         entries = widget.todayBookingsPreview.isNotEmpty
             ? widget.todayBookingsPreview
-            : (widget.queuePreview.isNotEmpty
-                ? widget.queuePreview
-                : widget.liveQueue);
+            : (widget.queuePreview.isNotEmpty ? widget.queuePreview : widget.liveQueue);
       }
     }
 
+    final tableEntries = entries
+        .cast<dynamic>()
+        .take(5)
+        .map((raw) => raw as Map<String, dynamic>)
+        .map((entry) => {
+              'token': _queueTokenLabel(entry),
+              'name': _queuePatientLabel(entry),
+              'service': _queueServiceLabel(entry),
+              'time': entry['assigned_time']?.toString() ?? entry['preferred_time']?.toString() ?? '${entry['wait_after_mins'] ?? 0} min',
+              'status': (entry['status'] ?? 'pending').toString(),
+            })
+        .toList();
+
+    final tableTitle = item['title']?.toString() ?? "Today's bookings";
     return Container(
       width: double.infinity,
       height: double.infinity,
-      decoration: const BoxDecoration(
-        gradient: LinearGradient(
-          begin: Alignment.topCenter,
-          end: Alignment.bottomCenter,
-          colors: [Color(0xFFF8FAFC), Color(0xFFEEF2FF)],
-        ),
-      ),
+      color: Colors.white,
       padding: const EdgeInsets.all(20),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Row(
+            crossAxisAlignment: CrossAxisAlignment.end,
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
               Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   const Text(
-                    'QUEUE',
+                    'Queue',
                     style: TextStyle(
                       fontSize: 10,
                       letterSpacing: 4.5,
@@ -3986,7 +4029,7 @@ class _MediaSlotState extends State<MediaSlot> {
                   ),
                   const SizedBox(height: 8),
                   Text(
-                    item['title']?.toString() ?? "Today's bookings",
+                    tableTitle,
                     style: const TextStyle(
                       fontSize: 28,
                       fontWeight: FontWeight.w900,
@@ -3996,7 +4039,7 @@ class _MediaSlotState extends State<MediaSlot> {
                 ],
               ),
               const Text(
-                'LIVE BOARD',
+                'Live board',
                 style: TextStyle(
                   fontSize: 12,
                   letterSpacing: 2,
@@ -4005,116 +4048,137 @@ class _MediaSlotState extends State<MediaSlot> {
               ),
             ],
           ),
-          const SizedBox(height: 20),
+          const SizedBox(height: 16),
           Expanded(
-            child: entries.isEmpty
-                ? Container(
+            child: Container(
               decoration: BoxDecoration(
-                border: Border.all(
-                  color: const Color(0xFFCBD5E1),
-                  style: BorderStyle.solid,
-                ),
-                borderRadius: BorderRadius.circular(16),
+                borderRadius: BorderRadius.circular(24),
+                border: Border.all(color: const Color(0xFFE5E7EB)),
                 color: Colors.white,
-              ),
-              padding: const EdgeInsets.all(16),
-              child: const Center(
-                child: Text(
-                  'No bookings yet.',
-                  style: TextStyle(color: Color(0xFF6B7280)),
-                ),
-              ),
-            )
-                : ListView.builder(
-              itemCount: entries.length.clamp(0, 4),
-              itemBuilder: (context, index) {
-                final entry = entries[index] as Map<String, dynamic>;
-                return Container(
-                  margin: const EdgeInsets.only(bottom: 12),
-                  padding: const EdgeInsets.all(12),
-                  decoration: BoxDecoration(
-                    color: Colors.white,
-                    borderRadius: BorderRadius.circular(16),
-                    border: Border.all(color: Colors.white),
-                    boxShadow: [
-                      BoxShadow(
-                        color: const Color(0xFF0F172A).withOpacity(0.05),
-                        blurRadius: 30,
-                        offset: const Offset(0, 12),
-                      ),
-                    ],
+                boxShadow: [
+                  BoxShadow(
+                    color: const Color(0xFF0F172A).withOpacity(0.08),
+                    blurRadius: 40,
+                    offset: const Offset(0, 18),
                   ),
-                  child: Row(
-                    children: [
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              'TOKEN ${entry['token'] ?? index + 1}',
-                              style: const TextStyle(
-                                fontSize: 10,
-                                letterSpacing: 3.2,
-                                color: Color(0xFF94A3B8),
-                              ),
-                            ),
-                            Text(
-                              entry['patient_name']?.toString() ??
-                                  entry['service_name']?.toString() ?? 'Booking',
-                              style: const TextStyle(
-                                fontSize: 18,
-                                fontWeight: FontWeight.w600,
-                                color: Color(0xFF111827),
-                              ),
-                            ),
-                            Text(
-                              entry['service_type']?.toString() ??
-                                  entry['service_name']?.toString() ?? 'Appointment',
-                              style: const TextStyle(
-                                color: Color(0xFF6B7280),
-                              ),
-                            ),
+                ],
+              ),
+              child: tableEntries.isEmpty
+                  ? const Center(
+                      child: Text(
+                        'No bookings yet.',
+                        style: TextStyle(color: Color(0xFF6B7280), fontSize: 15),
+                      ),
+                    )
+                  : SingleChildScrollView(
+                      scrollDirection: Axis.horizontal,
+                      child: SingleChildScrollView(
+                        child: DataTable(
+                          headingRowColor: MaterialStateProperty.all(const Color(0xFFF9FAFB)),
+                          dataRowMinHeight: 56,
+                          dataRowMaxHeight: 64,
+                          columnSpacing: 28,
+                          horizontalMargin: 20,
+                          dividerThickness: 0,
+                          columns: const [
+                            DataColumn(label: Text('Token', style: TextStyle(fontSize: 11, letterSpacing: 1.2, color: Color(0xFF6B7280), fontWeight: FontWeight.w700))),
+                            DataColumn(label: Text('Name', style: TextStyle(fontSize: 11, letterSpacing: 1.2, color: Color(0xFF6B7280), fontWeight: FontWeight.w700))),
+                            DataColumn(label: Text('Service', style: TextStyle(fontSize: 11, letterSpacing: 1.2, color: Color(0xFF6B7280), fontWeight: FontWeight.w700))),
+                            DataColumn(label: Text('Time', style: TextStyle(fontSize: 11, letterSpacing: 1.2, color: Color(0xFF6B7280), fontWeight: FontWeight.w700))),
+                            DataColumn(label: Text('Status', style: TextStyle(fontSize: 11, letterSpacing: 1.2, color: Color(0xFF6B7280), fontWeight: FontWeight.w700))),
                           ],
+                          rows: tableEntries.map((entry) {
+                            final status = entry['status'].toString().toLowerCase();
+                            final statusLabel = status == 'called' ? 'Currently serving' : status == 'completed' ? 'Completed' : status;
+                            final statusBg = status == 'called'
+                                ? const Color(0xFFECFDF5)
+                                : status == 'completed'
+                                    ? const Color(0xFFF8FAFC)
+                                    : const Color(0xFFF9FAFB);
+                            final statusFg = status == 'called'
+                                ? const Color(0xFF047857)
+                                : status == 'completed'
+                                    ? const Color(0xFF64748B)
+                                    : const Color(0xFF64748B);
+
+                            return DataRow(
+                              color: MaterialStateProperty.resolveWith<Color?>((states) {
+                                if (status == 'called') return const Color(0xFFECFDF5);
+                                return null;
+                              }),
+                              cells: [
+                                DataCell(
+                                  Container(
+                                    width: 36,
+                                    height: 36,
+                                    alignment: Alignment.center,
+                                    decoration: BoxDecoration(
+                                      color: const Color(0xFF111827),
+                                      borderRadius: BorderRadius.circular(4),
+                                    ),
+                                    child: Text(
+                                      entry['token']!,
+                                      style: const TextStyle(
+                                        color: Colors.white,
+                                        fontFamily: 'monospace',
+                                        fontWeight: FontWeight.w700,
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                                DataCell(
+                                  Text(
+                                    entry['name']!,
+                                    style: const TextStyle(
+                                      fontWeight: FontWeight.w600,
+                                      color: Color(0xFF0F172A),
+                                    ),
+                                  ),
+                                ),
+                                DataCell(
+                                  Text(
+                                    entry['service']!,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: const TextStyle(
+                                      fontSize: 12,
+                                      color: Color(0xFF6B7280),
+                                    ),
+                                  ),
+                                ),
+                                DataCell(
+                                  Text(
+                                    entry['time']!,
+                                    style: const TextStyle(
+                                      fontFamily: 'monospace',
+                                      fontSize: 12,
+                                      color: Color(0xFF0F172A),
+                                    ),
+                                  ),
+                                ),
+                                DataCell(
+                                  Container(
+                                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                                    decoration: BoxDecoration(
+                                      color: statusBg,
+                                      borderRadius: BorderRadius.circular(999),
+                                    ),
+                                    child: Text(
+                                      statusLabel,
+                                      style: TextStyle(
+                                        fontSize: 11,
+                                        fontWeight: FontWeight.w700,
+                                        letterSpacing: 0.6,
+                                        color: statusFg,
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            );
+                          }).toList(),
                         ),
                       ),
-                      Column(
-                        crossAxisAlignment: CrossAxisAlignment.end,
-                        children: [
-                          Text(
-                            entry['assigned_time']?.toString() ??
-                                entry['preferred_time']?.toString() ??
-                                '${entry['wait_after_mins'] ?? 0} min',
-                            style: const TextStyle(
-                              fontSize: 28,
-                              fontWeight: FontWeight.w900,
-                              color: Color(0xFF111827),
-                            ),
-                          ),
-                          Container(
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 12,
-                              vertical: 4,
-                            ),
-                            decoration: BoxDecoration(
-                              color: const Color(0xFFF8FAFC),
-                              borderRadius: BorderRadius.circular(20),
-                              border: Border.all(color: const Color(0xFFE2E8F0)),
-                            ),
-                            child: const Text(
-                              'SCHEDULED',
-                              style: TextStyle(
-                                fontSize: 10,
-                                letterSpacing: 3.5,
-                                color: Color(0xFF64748B),
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ],
-                  ),
-                );
-              },
+                    ),
             ),
           ),
         ],
@@ -4440,43 +4504,36 @@ class QueueBoard extends StatelessWidget {
   Widget build(BuildContext context) {
     return LayoutBuilder(
       builder: (context, constraints) {
-        final scale = max(0.58, min(1.0, min(constraints.maxWidth / 480, constraints.maxHeight / 720)));
+        final width = constraints.maxWidth;
+        final height = constraints.maxHeight;
+        final baseScale = max(0.6, min(1.0, min(width / 1280, height / 720)));
 
-        if (queuePreview.isEmpty) {
+        final current = queuePreview.isNotEmpty ? (queuePreview.first as Map<String, dynamic>) : null;
+        final nextTokens = queuePreview.length > 1 ? queuePreview.sublist(1, min(queuePreview.length, 3)) : <dynamic>[];
+
+        if (current == null) {
           return Container(
-            decoration: const BoxDecoration(
-              gradient: LinearGradient(
-                colors: [Colors.pink, Colors.deepOrange],
-              ),
-            ),
+            color: const Color(0xFFF8FAFC),
             child: Center(
               child: Text(
-                'NO QUEUE',
-                style: TextStyle(
-                  color: Colors.white,
-                  fontSize: 24 * scale,
-                  fontWeight: FontWeight.bold,
-                ),
+                'No queue items.',
+                style: TextStyle(color: const Color(0xFF6B7280), fontSize: 16 * baseScale),
               ),
             ),
           );
         }
 
-        final currentToken = queuePreview.first as Map<String, dynamic>;
-        final nextTokens = queuePreview.length > 1
-            ? queuePreview.sublist(1, min(3, queuePreview.length))
-            : [];
-        final currentTokenLabel = _readTokenLabel(currentToken);
-        final currentServiceLabel = _readServiceLabel(currentToken);
-        final currentPatientLabel = _readPatientLabel(currentToken);
+        final tokenLabel = _queueTokenLabel(current);
+        final patientLabel = _queuePatientLabel(current);
+        final serviceLabel = _queueServiceLabel(current);
 
         return ClipRect(
           child: FittedBox(
             fit: BoxFit.contain,
             alignment: Alignment.topLeft,
             child: SizedBox(
-              width: constraints.maxWidth,
-              height: constraints.maxHeight,
+              width: width,
+              height: height,
               child: Container(
                 decoration: const BoxDecoration(
                   gradient: LinearGradient(
@@ -4487,222 +4544,153 @@ class QueueBoard extends StatelessWidget {
                 ),
                 child: Column(
                   children: [
-              Container(
-                width: double.infinity,
-                padding: EdgeInsets.symmetric(vertical: 14 * scale),
-                decoration: BoxDecoration(
-                  color: Colors.white.withOpacity(0.15),
-                  border: Border(
-                    bottom: BorderSide(color: Colors.white.withOpacity(0.3), width: 2 * scale),
-                  ),
-                ),
-                child: Center(
-                  child: Text(
-                    '🔴 LIVE QUEUE STATUS',
-                    style: TextStyle(
-                      color: Colors.white,
-                      fontWeight: FontWeight.w900,
-                      fontSize: 16 * scale,
-                      letterSpacing: 4,
-                    ),
-                  ),
-                ),
-              ),
-              Expanded(
-                child: Padding(
-                  padding: EdgeInsets.symmetric(horizontal: 16 * scale, vertical: 14 * scale),
-                  child: Column(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      Text(
-                        '⚡ CURRENTLY SERVING',
-                        textAlign: TextAlign.center,
-                        style: TextStyle(
-                          fontSize: 11 * scale,
-                          fontWeight: FontWeight.w800,
-                          color: Colors.white.withOpacity(0.92),
-                          letterSpacing: 2.2,
-                        ),
-                      ),
-                      SizedBox(height: 10 * scale),
-                      FittedBox(
-                        fit: BoxFit.scaleDown,
+                    // Top status bar
+                    Container(
+                      width: double.infinity,
+                      padding: EdgeInsets.symmetric(vertical: 14 * baseScale),
+                      decoration: BoxDecoration(color: Colors.white.withOpacity(0.08), border: Border(bottom: BorderSide(color: Colors.white.withOpacity(0.18), width: 2))),
+                      child: Center(
                         child: Text(
-                          currentTokenLabel,
+                          '🔴 LIVE QUEUE STATUS',
                           style: TextStyle(
-                            fontSize: 132 * scale,
-                            fontWeight: FontWeight.w900,
                             color: Colors.white,
-                            height: 0.92,
-                            shadows: const [
-                              Shadow(color: Colors.black26, offset: Offset(4, 4), blurRadius: 12),
-                            ],
+                            fontWeight: FontWeight.w900,
+                            letterSpacing: 6.0 * baseScale,
+                            fontSize: 16 * baseScale,
                           ),
                         ),
                       ),
-                      SizedBox(height: 10 * scale),
-                      Text(
-                        currentPatientLabel,
-                        textAlign: TextAlign.center,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyle(
-                          fontSize: 24 * scale,
-                          fontWeight: FontWeight.w800,
-                          color: Colors.white,
-                        ),
-                      ),
-                      SizedBox(height: 8 * scale),
-                      Text(
-                        currentServiceLabel,
-                        textAlign: TextAlign.center,
-                        maxLines: 2,
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyle(
-                          fontSize: 13 * scale,
-                          fontWeight: FontWeight.w600,
-                          color: Colors.white.withOpacity(0.85),
-                          letterSpacing: 0.6,
-                        ),
-                      ),
-                      if (nextTokens.isNotEmpty) ...[
-                        SizedBox(height: 14 * scale),
-                        Container(
-                          width: double.infinity,
-                          padding: EdgeInsets.all(10 * scale),
-                          decoration: BoxDecoration(
-                            color: Colors.black.withOpacity(0.22),
-                            borderRadius: BorderRadius.circular(12 * scale),
-                            border: Border.all(color: Colors.white.withOpacity(0.28)),
-                          ),
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Center(
-                                child: Text(
-                                  '⏩ NEXT IN QUEUE',
-                                  style: TextStyle(
-                                    color: Colors.white.withOpacity(0.72),
-                                    fontSize: 9.5 * scale,
-                                    fontWeight: FontWeight.w800,
-                                    letterSpacing: 1.8,
-                                  ),
-                                ),
-                              ),
-                              SizedBox(height: 8 * scale),
-                              ...nextTokens.map((token) {
-                                final entry = token as Map<String, dynamic>;
-                                final nextTokenLabel = _readTokenLabel(entry);
-                                final nextPatientLabel = _readPatientLabel(entry);
-                                final nextServiceLabel = _readServiceLabel(entry);
-                                final waitLabel = _readWaitLabel(entry);
+                    ),
 
-                                return Container(
-                                  width: double.infinity,
-                                  margin: EdgeInsets.only(bottom: 8 * scale),
-                                  padding: EdgeInsets.symmetric(horizontal: 10 * scale, vertical: 8 * scale),
-                                  decoration: BoxDecoration(
-                                    color: Colors.white.withOpacity(0.14),
-                                    borderRadius: BorderRadius.circular(10 * scale),
-                                    border: Border.all(color: Colors.white.withOpacity(0.24)),
-                                  ),
-                                  child: Row(
-                                    children: [
-                                      Container(
-                                        constraints: BoxConstraints(minWidth: 44 * scale),
-                                        child: Text(
-                                          nextTokenLabel,
-                                          textAlign: TextAlign.center,
-                                          style: TextStyle(
-                                            color: Colors.white,
-                                            fontSize: 28 * scale,
-                                            fontWeight: FontWeight.w900,
+                    // Main token area
+                    Expanded(
+                      child: Center(
+                        child: Column(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            Text(
+                              '⚡ CURRENTLY SERVING',
+                              style: TextStyle(
+                                color: Colors.white.withOpacity(0.95),
+                                fontWeight: FontWeight.w800,
+                                letterSpacing: 4.0 * baseScale,
+                                fontSize: 18 * baseScale,
+                              ),
+                            ),
+                            SizedBox(height: 12 * baseScale),
+                            Text(
+                              tokenLabel,
+                              textAlign: TextAlign.center,
+                              style: TextStyle(
+                                color: Colors.white,
+                                fontWeight: FontWeight.w900,
+                                fontSize: clampFontSize(width, 100, 220) * baseScale,
+                                shadows: [const Shadow(offset: Offset(4,4), blurRadius: 0, color: Color.fromARGB(60,0,0,0))],
+                                height: 0.9,
+                              ),
+                            ),
+                            SizedBox(height: 16 * baseScale),
+                            Text(
+                              patientLabel,
+                              textAlign: TextAlign.center,
+                              style: TextStyle(
+                                color: Colors.white,
+                                fontWeight: FontWeight.w800,
+                                fontSize: 28 * baseScale,
+                              ),
+                            ),
+                            SizedBox(height: 10 * baseScale),
+                            Text(
+                              serviceLabel.toUpperCase(),
+                              textAlign: TextAlign.center,
+                              style: TextStyle(
+                                color: Colors.white.withOpacity(0.85),
+                                fontWeight: FontWeight.w600,
+                                fontSize: 14 * baseScale,
+                                letterSpacing: 1.2,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+
+                    // Next tokens strip
+                    if (nextTokens.isNotEmpty)
+                      Container(
+                        width: double.infinity,
+                        decoration: BoxDecoration(color: Colors.black.withOpacity(0.18), border: Border(top: BorderSide(color: Colors.white.withOpacity(0.18), width: 2))),
+                        padding: EdgeInsets.symmetric(horizontal: 20 * baseScale, vertical: 18 * baseScale),
+                        child: Column(
+                          children: [
+                            Text(
+                              '⏩ NEXT IN QUEUE',
+                              style: TextStyle(color: Colors.white.withOpacity(0.78), fontWeight: FontWeight.w800, letterSpacing: 3.0 * baseScale, fontSize: 13 * baseScale),
+                            ),
+                            SizedBox(height: 12 * baseScale),
+                            Row(
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: nextTokens.map((t) {
+                                final e = t as Map<String, dynamic>;
+                                final tok = _queueTokenLabel(e);
+                                final name = _queuePatientLabel(e);
+                                final svc = _queueServiceLabel(e);
+                                final wait = _queueWaitLabel(e);
+
+                                return Expanded(
+                                  child: Container(
+                                    margin: EdgeInsets.symmetric(horizontal: 8 * baseScale),
+                                    padding: EdgeInsets.all(14 * baseScale),
+                                    decoration: BoxDecoration(color: Colors.white.withOpacity(0.08), border: Border.all(color: Colors.white.withOpacity(0.18)), borderRadius: BorderRadius.circular(12 * baseScale)),
+                                    child: Row(
+                                      children: [
+                                        Text(
+                                          tok,
+                                          style: TextStyle(color: Colors.white, fontWeight: FontWeight.w900, fontSize: 28 * baseScale),
+                                        ),
+                                        SizedBox(width: 12 * baseScale),
+                                        Expanded(
+                                          child: Column(
+                                            crossAxisAlignment: CrossAxisAlignment.start,
+                                            children: [
+                                              Text(name, style: TextStyle(color: Colors.white, fontWeight: FontWeight.w800, fontSize: 16 * baseScale), overflow: TextOverflow.ellipsis),
+                                              SizedBox(height: 6 * baseScale),
+                                              Text(svc, style: TextStyle(color: Colors.white.withOpacity(0.75), fontSize: 12 * baseScale, letterSpacing: 0.6)),
+                                            ],
                                           ),
                                         ),
-                                      ),
-                                      Container(
-                                        margin: EdgeInsets.symmetric(horizontal: 10 * scale),
-                                        width: 1,
-                                        height: 34 * scale,
-                                        color: Colors.white.withOpacity(0.35),
-                                      ),
-                                      Expanded(
-                                        child: Column(
-                                          crossAxisAlignment: CrossAxisAlignment.start,
-                                          children: [
-                                            Text(
-                                              nextPatientLabel,
-                                              maxLines: 1,
-                                              overflow: TextOverflow.ellipsis,
-                                              style: TextStyle(
-                                                color: Colors.white,
-                                                fontSize: 13 * scale,
-                                                fontWeight: FontWeight.w700,
-                                              ),
-                                            ),
-                                            SizedBox(height: 2 * scale),
-                                            Text(
-                                              nextServiceLabel,
-                                              maxLines: 1,
-                                              overflow: TextOverflow.ellipsis,
-                                              style: TextStyle(
-                                                color: Colors.white.withOpacity(0.68),
-                                                fontSize: 10 * scale,
-                                                fontWeight: FontWeight.w600,
-                                              ),
-                                            ),
-                                          ],
-                                        ),
-                                      ),
-                                      if (waitLabel != null)
-                                        Container(
-                                          margin: EdgeInsets.only(left: 8 * scale),
-                                          padding: EdgeInsets.symmetric(horizontal: 6 * scale, vertical: 4 * scale),
-                                          decoration: BoxDecoration(
-                                            color: Colors.white.withOpacity(0.14),
-                                            borderRadius: BorderRadius.circular(6 * scale),
+                                        if (wait != null) ...[
+                                          SizedBox(width: 8 * baseScale),
+                                          Column(
+                                            children: [
+                                              Text(wait, style: TextStyle(color: Colors.white, fontWeight: FontWeight.w900, fontSize: 16 * baseScale)),
+                                              Text('wait', style: TextStyle(color: Colors.white.withOpacity(0.7), fontSize: 11 * baseScale, fontWeight: FontWeight.w700)),
+                                            ],
                                           ),
-                                          child: Text(
-                                            waitLabel,
-                                            style: TextStyle(
-                                              color: Colors.white,
-                                              fontSize: 9 * scale,
-                                              fontWeight: FontWeight.w800,
-                                            ),
-                                          ),
-                                        ),
-                                    ],
+                                        ]
+                                      ],
+                                    ),
                                   ),
                                 );
-                              }),
-                            ],
+                              }).toList(),
+                            ),
+                          ],
+                        ),
+                      ),
+
+                    // Notice banner
+                    if (notices.isNotEmpty && notices.first != null)
+                      Container(
+                        width: double.infinity,
+                        padding: EdgeInsets.symmetric(vertical: 14 * baseScale, horizontal: 18 * baseScale),
+                        decoration: BoxDecoration(color: Colors.black.withOpacity(0.24), border: Border(top: BorderSide(color: Colors.white.withOpacity(0.12), width: 2))),
+                        child: Center(
+                          child: Text(
+                            '📢 ${notices.first['title'] ?? notices.first['body'] ?? "QUEUE UPDATES AVAILABLE"}',
+                            style: TextStyle(color: Colors.white.withOpacity(0.95), fontWeight: FontWeight.w800, fontSize: 14 * baseScale),
                           ),
                         ),
-                      ],
-                    ],
-                  ),
-                ),
-              ),
-              if (notices.isNotEmpty && notices.first != null)
-                Container(
-                  width: double.infinity,
-                  padding: EdgeInsets.symmetric(vertical: 12 * scale, horizontal: 16 * scale),
-                  decoration: BoxDecoration(
-                    color: Colors.black.withOpacity(0.3),
-                    border: Border(top: BorderSide(color: Colors.white.withOpacity(0.3), width: 2 * scale)),
-                  ),
-                  child: Text(
-                    '📢 ${notices.first['title'] ?? notices.first['body'] ?? 'QUEUE UPDATES AVAILABLE'}',
-                    textAlign: TextAlign.center,
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      fontWeight: FontWeight.bold,
-                      color: Colors.white,
-                      fontSize: 12 * scale,
-                    ),
-                  ),
-                ),
+                      ),
                   ],
                 ),
               ),
@@ -4713,39 +4701,10 @@ class QueueBoard extends StatelessWidget {
     );
   }
 
-  String _readTokenLabel(Map<String, dynamic> entry) {
-    final tokenValue = entry['token'] ??
-        entry['token_no'] ??
-        entry['token_number'] ??
-        entry['queue_token'] ??
-        entry['ticket_no'] ??
-        entry['ticket_number'];
-    final tokenText = tokenValue?.toString().trim() ?? '';
-    return tokenText.isNotEmpty ? tokenText : '—';
-  }
-
-  String _readServiceLabel(Map<String, dynamic> entry) {
-    final serviceValue = entry['service_name'] ??
-        entry['service_type'] ??
-        entry['name'];
-    final serviceText = serviceValue?.toString().trim() ?? '';
-    return serviceText.isNotEmpty ? serviceText : '→ PLEASE PROCEED TO COUNTER ←';
-  }
-
-  String _readPatientLabel(Map<String, dynamic> entry) {
-    final patientValue = entry['patient_name'] ??
-        entry['name'] ??
-        entry['service_name'];
-    final patientText = patientValue?.toString().trim() ?? '';
-    return patientText.isNotEmpty ? patientText : 'GUEST';
-  }
-
-  String? _readWaitLabel(Map<String, dynamic> entry) {
-    final waitValue = entry['wait_after_mins'];
-    if (waitValue == null) return null;
-    final waitText = waitValue.toString().trim();
-    if (waitText.isEmpty || waitText == '0') return null;
-    return '${waitText}m';
+  // Helper to mimic responsive font scaling used in web player
+  double clampFontSize(double width, double minPx, double maxPx) {
+    final ratio = (width / 1280).clamp(0.5, 1.8);
+    return max(minPx, min(maxPx, minPx * ratio));
   }
 }
 

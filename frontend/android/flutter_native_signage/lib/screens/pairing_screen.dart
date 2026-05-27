@@ -2440,8 +2440,8 @@ class _MediaSlotState extends State<MediaSlot> {
         flags: const YoutubePlayerFlags(
           autoPlay: true,
           mute: false,
-          hideControls: true,
-          disableDragSeek: true,
+          hideControls: false,
+          disableDragSeek: false,
         ),
       );
       youtubeController!.addListener(() {
@@ -2453,7 +2453,8 @@ class _MediaSlotState extends State<MediaSlot> {
 
     return YoutubePlayer(
       controller: youtubeController!,
-      showVideoProgressIndicator: false,
+      showVideoProgressIndicator: true,
+      progressIndicatorColor: Colors.redAccent,
     );
   }
 
