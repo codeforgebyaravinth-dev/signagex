@@ -60,7 +60,8 @@ function ProtectedRoute({ role, children }) {
 function Root() {
   const { user, loading } = useAuth();
   if (isNativePlayerShell()) {
-    return <Navigate to="/play" replace />;
+    //return <Navigate to="/play" replace />;
+    return <Navigate to="/login" replace />;
   }
   if (loading || user === null) return null;
   if (user === false) return <Navigate to="/login" replace />;

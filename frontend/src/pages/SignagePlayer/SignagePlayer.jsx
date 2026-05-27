@@ -1263,6 +1263,7 @@ export default function SignagePlayer() {
   const queueSocketRef = useRef(null);
   const queueSocketAttemptRef = useRef(0);
   const queueSocketRetryRef = useRef(null);
+  const queueMessageRefreshRef = useRef(null);
   const queueAnnouncementReadyRef = useRef(false);
   const lastQueueAnnouncementKeyRef = useRef("");
   const offlineBeaconSentRef = useRef(false);
@@ -1489,7 +1490,15 @@ export default function SignagePlayer() {
           };
 
           socket.onmessage = () => {
+            // refresh immediately and once more shortly after, so queue changes appear near-instant
             poll();
+            if (queueMessageRefreshRef.current) {
+              window.clearTimeout(queueMessageRefreshRef.current);
+            }
+            queueMessageRefreshRef.current = window.setTimeout(() => {
+              poll();
+              queueMessageRefreshRef.current = null;
+            }, 700);
           };
 
           socket.onerror = () => {
@@ -1505,9 +1514,9 @@ export default function SignagePlayer() {
         }
       };
 
-      if (hasQueueZone()) connectSocket();
+      connectSocket();
 
-      const id = setInterval(poll, 15_000);
+      const id = setInterval(poll, hasQueueZone() ? 5_000 : 15_000);
       const handleVisibilityChange = () => {
         if (document.visibilityState === "visible") poll();
       };
@@ -1525,6 +1534,10 @@ export default function SignagePlayer() {
           window.clearTimeout(queueSocketRetryRef.current);
           queueSocketRetryRef.current = null;
         }
+        if (queueMessageRefreshRef.current) {
+          window.clearTimeout(queueMessageRefreshRef.current);
+          queueMessageRefreshRef.current = null;
+        }
         if (queueSocketRef.current) {
           try {
             queueSocketRef.current.close();
@@ -1535,7 +1548,7 @@ export default function SignagePlayer() {
         }
       };
     }
-  }, [poll, currentPairCode, queueSocketUrl, sendOfflineBeacon, showPairing, showSplash]);
+  }, [poll, currentPairCode, queueSocketUrl, sendOfflineBeacon, showPairing, showSplash, hasQueueZone]);
 
   useEffect(() => {
     if (!currentPairCode || showPairing || showSplash) return;
