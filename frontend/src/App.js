@@ -29,14 +29,14 @@ import PublicBooking from "./pages/PublicBooking";
 import SignagePlayer from "./pages/SignagePlayer/SignagePlayer";
 
 function isNativePlayerShell() {
-  /**if (typeof window === "undefined") return false;
+ if (typeof window === "undefined") return false;
   try {
     if (window.Capacitor && typeof window.Capacitor.getPlatform === "function") {
       return window.Capacitor.getPlatform() !== "web";
     }
   } catch {
     return false;
-  }*/
+  }
   return false;
 }
 
@@ -59,10 +59,10 @@ function ProtectedRoute({ role, children }) {
 
 function Root() {
   const { user, loading } = useAuth();
-  /*if (isNativePlayerShell()) {
+  if (isNativePlayerShell()) {
     return <Navigate to="/play" replace />;
     
-  }*/
+  }
   if (loading || user === null) return null;
   if (user === false) return <Navigate to="/login" replace />;
   const home = user.role === "admin" ? "/admin" : user.role === "dealer" ? "/dealer" : "/client";
