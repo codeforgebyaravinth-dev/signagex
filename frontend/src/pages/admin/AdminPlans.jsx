@@ -11,7 +11,7 @@ import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from ".
 import { Plus, Pencil, Trash2, IndianRupee, Check } from "lucide-react";
 import { toast } from "sonner";
 
-const empty = { name: "", type: "cloud", billing_cycle: "monthly", price: 0, storage_limit_gb: 0, description: "", features: [] };
+const empty = { name: "", type: "cloud", billing_cycle: "monthly", duration_days: 30, price: 0, storage_limit_gb: 0, description: "", features: [] };
 
 export default function AdminPlans() {
   const [items, setItems] = useState([]);
@@ -26,7 +26,7 @@ export default function AdminPlans() {
   useEffect(() => { load(); }, []);
 
   const openCreate = () => { setEditing(null); setForm(empty); setOpen(true); };
-  const openEdit = (p) => { setEditing(p); setForm({ ...empty, ...p }); setOpen(true); };
+  const openEdit = (p) => { setEditing(p); setForm({ ...empty, ...p, duration_days: p.duration_days || (p.billing_cycle === "yearly" ? 365 : 30) }); setOpen(true); };
 
   const submit = async (e) => {
     e.preventDefault();
@@ -47,6 +47,14 @@ export default function AdminPlans() {
     if (!featInput.trim()) return;
     setForm((f) => ({ ...f, features: [...f.features, featInput.trim()] }));
     setFeatInput("");
+  };
+
+  const setCycle = (billing_cycle) => {
+    setForm((current) => ({
+      ...current,
+      billing_cycle,
+      duration_days: billing_cycle === "yearly" ? 365 : billing_cycle === "monthly" ? 30 : (current.duration_days || 30),
+    }));
   };
 
   return (
@@ -80,7 +88,10 @@ export default function AdminPlans() {
             <div className="flex items-baseline gap-1 mt-2 mb-4">
               <IndianRupee className="w-5 h-5 text-[#111827]" />
               <span className="font-display text-4xl font-extrabold tracking-tighter">{p.price?.toLocaleString?.()}</span>
-              <span className="text-sm text-[#6B7280]">/ {p.billing_cycle === "yearly" ? "yr" : "mo"}</span>
+              <span className="text-sm text-[#6B7280]">/ {p.billing_cycle === "custom" ? "custom" : p.billing_cycle === "yearly" ? "yr" : "mo"}</span>
+            </div>
+            <div className="mb-2 text-xs text-[#6B7280]">
+              Duration: <span className="font-semibold text-[#111827]">{Number(p.duration_days || (p.billing_cycle === "yearly" ? 365 : 30))} days</span>
             </div>
               <div className="text-xs text-[#6B7280] mb-2">
                 Server space limit: <span className="font-semibold text-[#111827]">{Number(p.storage_limit_gb || 0)} GB</span>
@@ -128,11 +139,12 @@ export default function AdminPlans() {
             <div className="grid grid-cols-2 gap-4">
               <div>
                 <Label className="text-xs uppercase tracking-wider text-[#6B7280]">Billing Cycle</Label>
-                <Select value={form.billing_cycle || "monthly"} onValueChange={(v) => setForm({ ...form, billing_cycle: v })}>
+                <Select value={form.billing_cycle || "monthly"} onValueChange={setCycle}>
                   <SelectTrigger className="rounded-sm" data-testid="plan-cycle"><SelectValue /></SelectTrigger>
                   <SelectContent>
                     <SelectItem value="monthly">Monthly</SelectItem>
                     <SelectItem value="yearly">Yearly</SelectItem>
+                    <SelectItem value="custom">Custom</SelectItem>
                   </SelectContent>
                 </Select>
               </div>
@@ -140,6 +152,18 @@ export default function AdminPlans() {
                 <Label className="text-xs uppercase tracking-wider text-[#6B7280]">Server Space Limit (GB)</Label>
                 <Input type="number" min="0" step="0.1" value={form.storage_limit_gb} onChange={(e) => setForm({ ...form, storage_limit_gb: parseFloat(e.target.value || 0) })} className="rounded-sm" data-testid="plan-storage-limit" />
               </div>
+            </div>
+            <div>
+              <Label className="text-xs uppercase tracking-wider text-[#6B7280]">Duration (days)</Label>
+              <Input
+                type="number"
+                min="1"
+                value={form.duration_days}
+                onChange={(e) => setForm({ ...form, duration_days: parseInt(e.target.value || "0", 10) })}
+                className="rounded-sm"
+                data-testid="plan-duration-days"
+              />
+              <p className="mt-1 text-xs text-[#6B7280]">Use custom duration for non-standard subscriptions.</p>
             </div>
             <div>
               <Label className="text-xs uppercase tracking-wider text-[#6B7280]">Description</Label>

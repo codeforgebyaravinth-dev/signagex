@@ -21,6 +21,7 @@ const ADMIN_NAV = [
 const DEALER_NAV = [
   { to: "/dealer", label: "Dashboard", Icon: LayoutDashboard, end: true },
   { to: "/dealer/clients", label: "My Clients", Icon: Users },
+  { to: "/dealer/plans", label: "Plans", Icon: Layers },
   { to: "/dealer/screens", label: "Screens", Icon: Monitor },
   { to: "/dealer/templates", label: "Templates", Icon: FileVideo },
   { to: "/dealer/payments", label: "Payments", Icon: Wallet },

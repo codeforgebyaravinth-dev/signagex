@@ -4,6 +4,8 @@ import PageHeader from "../../components/PageHeader";
 import { Input } from "../../components/ui/input";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../../components/ui/table";
 import { Search, Monitor } from "lucide-react";
+import StatusBadge from "../../components/StatusBadge";
+import DeviceLiveBadge from "../../components/DeviceLiveBadge";
 
 const STATUS = {
   paired: { label: "Paired", cls: "bg-[#10B981]/10 text-[#047857] border-[#10B981]/30" },
@@ -34,10 +36,11 @@ export default function AdminDevices() {
               <TableHead className="text-[11px] uppercase tracking-wider text-[#6B7280]">Dealer</TableHead>
               <TableHead className="text-[11px] uppercase tracking-wider text-[#6B7280]">Pair Code</TableHead>
               <TableHead className="text-[11px] uppercase tracking-wider text-[#6B7280]">Status</TableHead>
+              <TableHead className="text-[11px] uppercase tracking-wider text-[#6B7280]">Live</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
-            {filtered.length === 0 && <TableRow><TableCell colSpan={5} className="text-center py-10 text-sm text-[#6B7280]">No devices paired yet.</TableCell></TableRow>}
+            {filtered.length === 0 && <TableRow><TableCell colSpan={6} className="text-center py-10 text-sm text-[#6B7280]">No devices paired yet.</TableCell></TableRow>}
             {filtered.map((d) => {
               const s = STATUS[d.status] || STATUS.unpaired;
               return (
@@ -55,7 +58,10 @@ export default function AdminDevices() {
                   <TableCell>{d.dealer_name || "—"}</TableCell>
                   <TableCell className="font-mono text-xs">{d.pair_code}</TableCell>
                   <TableCell>
-                    <span className={`inline-flex items-center px-2 py-0.5 rounded-sm border text-[11px] font-semibold uppercase tracking-wider ${s.cls}`}>{s.label}</span>
+                    <StatusBadge status={d.status} />
+                  </TableCell>
+                  <TableCell>
+                    <DeviceLiveBadge status={d.status} lastSeen={d.last_seen} />
                   </TableCell>
                 </TableRow>
               );

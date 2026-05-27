@@ -21,7 +21,7 @@ import boto3
 import jwt
 import requests
 import xml.etree.ElementTree as ET
-from fastapi import FastAPI, APIRouter, HTTPException, Request, Response, Depends, UploadFile, File, Form
+from fastapi import FastAPI, APIRouter, HTTPException, Request, Response, Depends, UploadFile, File, Form, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -46,11 +46,44 @@ WEATHER_CACHE: Dict[str, Dict[str, Any]] = {}
 APP_TIMEZONE = os.environ.get("APP_TIMEZONE", "Asia/Kolkata")
 
 
+class QueueConnectionManager:
+    def __init__(self):
+        self._connections: Dict[str, set] = {}
+
+    async def connect(self, client_id: str, websocket: WebSocket):
+        await websocket.accept()
+        self._connections.setdefault(client_id, set()).add(websocket)
+
+    def disconnect(self, client_id: str, websocket: WebSocket):
+        sockets = self._connections.get(client_id)
+        if not sockets:
+            return
+        sockets.discard(websocket)
+        if not sockets:
+            self._connections.pop(client_id, None)
+
+    async def broadcast(self, client_id: str, payload: dict):
+        sockets = list(self._connections.get(client_id, set()))
+        for websocket in sockets:
+            try:
+                await websocket.send_json(payload)
+            except Exception:
+                self.disconnect(client_id, websocket)
+
+
+queue_ws_manager = QueueConnectionManager()
+
+
 def _app_now() -> datetime:
     try:
         return datetime.now(ZoneInfo(APP_TIMEZONE))
     except Exception:
         return datetime.now(timezone.utc)
+
+
+async def _broadcast_queue_refresh(client_id: str, reason: str = "update"):
+    if client_id:
+        await queue_ws_manager.broadcast(client_id, {"type": "queue_refresh", "client_id": client_id, "reason": reason, "timestamp": now_iso()})
 
 
 def _weather_description(code: Optional[Any]) -> str:
@@ -204,6 +237,7 @@ async def find_user_any(uid: str) -> Optional[dict]:
     c = await db.clients.find_one({"id": uid}, {"_id": 0, "password_hash": 0})
     if c:
         c["role"] = "client"
+        c = await _sync_client_wallet_status(c)
     return c
 
 async def get_current_user(request: Request) -> dict:
@@ -241,18 +275,20 @@ class LoginIn(BaseModel):
 class PlanIn(BaseModel):
     name: str
     type: Literal["cloud", "usb", "hybrid"]
-    billing_cycle: Literal["monthly", "yearly"] = "monthly"
+    billing_cycle: Literal["monthly", "yearly", "custom"] = "monthly"
     price: float = 0.0
     storage_limit_gb: float = 0.0
+    duration_days: Optional[int] = None
     description: str = ""
     features: List[str] = []
 
 class PlanUpdate(BaseModel):
     name: Optional[str] = None
     type: Optional[Literal["cloud", "usb", "hybrid"]] = None
-    billing_cycle: Optional[Literal["monthly", "yearly"]] = None
+    billing_cycle: Optional[Literal["monthly", "yearly", "custom"]] = None
     price: Optional[float] = None
     storage_limit_gb: Optional[float] = None
+    duration_days: Optional[int] = None
     description: Optional[str] = None
     features: Optional[List[str]] = None
 
@@ -312,6 +348,7 @@ class ClientCreate(BaseModel):
     name: str; email: EmailStr; password: str
     phone: str = ""; gst_number: str = ""; address: str = ""
     plan: Literal["cloud", "usb", "hybrid"] = "cloud"
+    plan_id: Optional[str] = None
     vertical: Literal["general", "doctor", "salon", "retailer", "society"] = "general"
     wallet_balance: float = 0.0
     assigned_template_ids: List[str] = []
@@ -322,6 +359,7 @@ class ClientUpdate(BaseModel):
     phone: Optional[str] = None; gst_number: Optional[str] = None
     address: Optional[str] = None
     plan: Optional[Literal["cloud", "usb", "hybrid"]] = None
+    plan_id: Optional[str] = None
     vertical: Optional[Literal["general", "doctor", "salon", "retailer", "society"]] = None
     assigned_template_ids: Optional[List[str]] = None
     status: Optional[Literal["active", "suspended", "pending"]] = None
@@ -348,6 +386,32 @@ class PairRequestIn(BaseModel):
 class PairCompleteIn(BaseModel):
     pair_code: str
     device_id: str
+
+
+async def _complete_device_pairing(device_filter: dict, pair_code: str, device_id: str):
+    pairing = await db.pairings.find_one({"code": pair_code, "used": False})
+    if not pairing:
+        raise HTTPException(status_code=404, detail="Pair code not found or already used")
+
+    try:
+        exp_dt = datetime.fromisoformat(str(pairing.get("expires_at"))) if pairing.get("expires_at") else None
+        if exp_dt and exp_dt < datetime.now(timezone.utc):
+            raise HTTPException(status_code=400, detail="Pair code expired")
+    except HTTPException:
+        raise
+    except Exception:
+        pass
+
+    device = await db.devices.find_one(device_filter)
+    if not device:
+        raise HTTPException(status_code=404, detail="Device not found")
+
+    await db.devices.update_one(
+        {"id": device_id},
+        {"$set": {"pair_code": pairing["code"], "fingerprint": pairing["device_fingerprint"], "status": "paired", "paired_at": now_iso()}},
+    )
+    await db.pairings.update_one({"_id": pairing["_id"]}, {"$set": {"used": True, "paired_device_id": device_id}})
+    return {"ok": True, "device_id": device_id, "pair_code": pairing["code"]}
 
 
 GST_RE = re.compile(r"^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][0-9A-Z]Z[0-9A-Z]$")
@@ -383,6 +447,33 @@ def _clean_gst_value(value: Optional[str]) -> str:
     if not GST_RE.fullmatch(text):
         raise HTTPException(status_code=400, detail="GST number must be 15 characters in the standard format, like 29ABCDE1234F1Z5.")
     return text
+
+
+def _plan_duration_days(plan: Optional[dict]) -> int:
+    if not plan:
+        return 30
+    billing_cycle = str(plan.get("billing_cycle") or "monthly").lower()
+    if billing_cycle == "yearly":
+        return max(1, int(plan.get("duration_days") or 365))
+    if billing_cycle == "custom":
+        return max(1, int(plan.get("duration_days") or 0))
+    return max(1, int(plan.get("duration_days") or 30))
+
+
+def _subscription_window_for_plan(plan: Optional[dict], start_at: Optional[datetime] = None) -> tuple[Optional[str], Optional[str]]:
+    if not plan:
+        return None, None
+    started = (start_at or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    expires = started + timedelta(days=_plan_duration_days(plan))
+    return started.isoformat(), expires.isoformat()
+
+
+def _subscription_fields_for_plan(plan: Optional[dict], start_at: Optional[datetime] = None) -> dict:
+    started_at, expires_at = _subscription_window_for_plan(plan, start_at=start_at)
+    return {
+        "plan_started_at": started_at,
+        "plan_expires_at": expires_at,
+    }
 
 class DeviceUpdate(BaseModel):
     name: Optional[str] = None
@@ -651,12 +742,29 @@ async def list_plans(_: dict = Depends(require_role("admin"))):
 
 @api.post("/admin/plans")
 async def create_plan(body: PlanIn, _: dict = Depends(require_role("admin"))):
-    doc = {"id": str(uuid.uuid4()), **body.model_dump(), "created_at": now_iso()}
+    duration_days = body.duration_days
+    billing_cycle = (body.billing_cycle or "monthly").lower()
+    if billing_cycle == "custom":
+        if not duration_days or int(duration_days) <= 0:
+            raise HTTPException(status_code=400, detail="Custom plans need a duration in days")
+    elif duration_days is None:
+        duration_days = 365 if billing_cycle == "yearly" else 30
+    doc = {"id": str(uuid.uuid4()), **body.model_dump(exclude_none=True), "duration_days": int(duration_days or 0), "created_at": now_iso()}
     await db.plans.insert_one(doc); return clean(doc)
 
 @api.put("/admin/plans/{pid}")
 async def update_plan(pid: str, body: PlanUpdate, _: dict = Depends(require_role("admin"))):
     upd = {k: v for k, v in body.model_dump(exclude_none=True).items()}
+    if "billing_cycle" in upd:
+        upd["billing_cycle"] = str(upd["billing_cycle"]).lower()
+    if upd.get("billing_cycle") == "custom" and int(upd.get("duration_days") or 0) <= 0:
+        raise HTTPException(status_code=400, detail="Custom plans need a duration in days")
+    if "duration_days" in upd:
+        upd["duration_days"] = max(1, int(upd["duration_days"] or 0))
+    elif upd.get("billing_cycle") == "monthly":
+        upd.setdefault("duration_days", 30)
+    elif upd.get("billing_cycle") == "yearly":
+        upd.setdefault("duration_days", 365)
     if not upd: raise HTTPException(status_code=400, detail="Nothing to update")
     r = await db.plans.find_one_and_update({"id": pid}, {"$set": upd}, return_document=True, projection={"_id": 0})
     if not r: raise HTTPException(status_code=404, detail="Plan not found")
@@ -687,6 +795,11 @@ async def create_dealer(body: DealerCreate, _: dict = Depends(require_role("admi
            "plan": body.plan, "plan_id": body.plan_id, "wallet_balance": float(body.wallet_balance),
            "dealer_code": dealer_code,
            "created_at": now_iso()}
+    if body.plan_id:
+        plan_doc = await db.plans.find_one({"id": body.plan_id}, {"_id": 0})
+        if not plan_doc:
+            raise HTTPException(status_code=400, detail="Invalid subscription plan selected")
+        doc.update(_subscription_fields_for_plan(plan_doc))
     await db.users.insert_one(doc); return clean(doc)
 
 @api.put("/admin/dealers/{did}")
@@ -697,6 +810,16 @@ async def update_dealer(did: str, body: DealerUpdate, _: dict = Depends(require_
         upd["phone"] = _clean_phone_value(upd["phone"])
     if "gst_number" in upd:
         upd["gst_number"] = _clean_gst_value(upd["gst_number"])
+    if "plan_id" in upd:
+        if upd["plan_id"]:
+            plan_doc = await db.plans.find_one({"id": upd["plan_id"]}, {"_id": 0})
+            if not plan_doc:
+                raise HTTPException(status_code=400, detail="Invalid subscription plan selected")
+            upd["plan"] = plan_doc.get("type", upd.get("plan", "cloud"))
+            upd.update(_subscription_fields_for_plan(plan_doc))
+        else:
+            upd.pop("plan_started_at", None)
+            upd.pop("plan_expires_at", None)
     if not upd: raise HTTPException(status_code=400, detail="Nothing to update")
     r = await db.users.find_one_and_update({"id": did, "role": "dealer"}, {"$set": upd}, return_document=True, projection={"_id": 0, "password_hash": 0})
     if not r: raise HTTPException(status_code=404, detail="Dealer not found")
@@ -753,7 +876,9 @@ async def delete_template(tid: str, _: dict = Depends(require_role("admin"))):
 async def list_all_clients(_: dict = Depends(require_role("admin"))):
     docs = await db.clients.find({}, {"_id": 0, "password_hash": 0}).to_list(2000)
     dealers = {d["id"]: d["name"] for d in await db.users.find({"role": "dealer"}, {"_id": 0, "id": 1, "name": 1}).to_list(1000)}
-    for c in docs: c["dealer_name"] = dealers.get(c.get("dealer_id", ""), "")
+    for c in docs:
+        c["dealer_name"] = dealers.get(c.get("dealer_id", ""), "")
+        await _sync_client_wallet_status(c)
     return docs
 
 # ---------------- Admin: Devices ----------------
@@ -790,7 +915,9 @@ async def admin_stats(_: dict = Depends(require_role("admin"))):
 @api.get("/dealer/clients")
 async def list_my_clients(user: dict = Depends(require_role("dealer"))):
     docs = await db.clients.find({"dealer_id": user["id"]}, {"_id": 0, "password_hash": 0}).to_list(2000)
-    for d in docs: d["dealer_name"] = user["name"]
+    for d in docs:
+        d["dealer_name"] = user["name"]
+        await _sync_client_wallet_status(d)
     return docs
 
 @api.post("/dealer/clients")
@@ -802,17 +929,38 @@ async def create_client(body: ClientCreate, user: dict = Depends(require_role("d
     dealer_tpl_filter = {"$or": [{"assigned_dealer_ids": user["id"]}, {"assigned_dealer_ids": {"$exists": True, "$size": 0}}, {"assigned_dealer_ids": {"$exists": False}}]}
     valid = set([t["id"] for t in await db.templates.find(dealer_tpl_filter, {"_id": 0, "id": 1}).to_list(1000)])
     safe = [t for t in body.assigned_template_ids if t in valid]
+    # validate optional plan_id and resolve plan metadata
+    plan_doc = None
+    if body.plan_id:
+        plan_doc = await db.plans.find_one({"id": body.plan_id}, {"_id": 0})
+        if not plan_doc:
+            raise HTTPException(status_code=400, detail="Invalid subscription plan selected")
+
     client_code = await gen_client_code()
     phone = _clean_phone_value(body.phone)
     gst_number = _clean_gst_value(body.gst_number)
+    # If a specific subscription plan is chosen, set plan and plan_id accordingly.
+    status = "pending"
+    plan_value = body.plan
+    if plan_doc:
+        plan_value = plan_doc.get("type", plan_value)
+        try:
+            required = float(plan_doc.get("price", 0) or 0)
+            wallet_balance = float(body.wallet_balance or 0)
+            if required <= 0 or wallet_balance >= required:
+                status = "active"
+        except Exception:
+            status = "pending"
+    subscription_fields = _subscription_fields_for_plan(plan_doc) if plan_doc else {"plan_started_at": None, "plan_expires_at": None}
+
     doc = {"id": str(uuid.uuid4()), "name": body.name, "email": email,
            "password_hash": hash_password(body.password),
            "phone": phone, "gst_number": gst_number, "address": body.address,
-           "plan": body.plan, "vertical": body.vertical, "wallet_balance": float(body.wallet_balance),
+           "plan": plan_value, "plan_id": body.plan_id, "vertical": body.vertical, "wallet_balance": float(body.wallet_balance),
            "dealer_id": user["id"], "dealer_name": user["name"],
            "client_code": client_code,
             "assigned_template_ids": safe, "doctor_profile": {}, "salon_profile": {},
-           "status": "pending", "created_at": now_iso()}
+           "status": status, "created_at": now_iso(), **subscription_fields}
     await db.clients.insert_one(doc); return clean(doc)
 
 @api.put("/dealer/clients/{cid}")
@@ -826,6 +974,18 @@ async def update_client(cid: str, body: ClientUpdate, user: dict = Depends(requi
         upd["phone"] = _clean_phone_value(upd["phone"])
     if "gst_number" in upd:
         upd["gst_number"] = _clean_gst_value(upd["gst_number"])
+    plan_doc = None
+    if "plan_id" in upd:
+        if upd["plan_id"]:
+            plan_doc = await db.plans.find_one({"id": upd["plan_id"]}, {"_id": 0})
+            if not plan_doc:
+                raise HTTPException(status_code=400, detail="Invalid subscription plan selected")
+            upd["plan"] = plan_doc.get("type", upd.get("plan", "cloud"))
+            upd.update(_subscription_fields_for_plan(plan_doc))
+        else:
+            upd["plan"] = body.plan or upd.get("plan", "cloud")
+            upd.pop("plan_started_at", None)
+            upd.pop("plan_expires_at", None)
     if body.assigned_template_ids is not None:
         dealer_tpl_filter = {"$or": [{"assigned_dealer_ids": user["id"]}, {"assigned_dealer_ids": {"$exists": True, "$size": 0}}, {"assigned_dealer_ids": {"$exists": False}}]}
         valid = set([t["id"] for t in await db.templates.find(dealer_tpl_filter, {"_id": 0, "id": 1}).to_list(1000)])
@@ -833,6 +993,9 @@ async def update_client(cid: str, body: ClientUpdate, user: dict = Depends(requi
     if not upd: raise HTTPException(status_code=400, detail="Nothing to update")
     r = await db.clients.find_one_and_update({"id": cid, "dealer_id": user["id"]}, {"$set": upd}, return_document=True, projection={"_id": 0, "password_hash": 0})
     if not r: raise HTTPException(status_code=404, detail="Client not found")
+    if plan_doc:
+        r["plan"] = plan_doc.get("type", r.get("plan", "cloud"))
+    await _sync_client_wallet_status(r)
     r["dealer_name"] = user["name"]; return r
 
 @api.delete("/dealer/clients/{cid}")
@@ -850,6 +1013,7 @@ async def credit_client(cid: str, body: CreditIn, user: dict = Depends(require_r
     r = await db.clients.find_one_and_update({"id": cid, "dealer_id": user["id"]}, {"$inc": {"wallet_balance": float(body.amount)}}, return_document=True, projection={"_id": 0, "password_hash": 0})
     if not r: raise HTTPException(status_code=404, detail="Client not found")
     await db.users.update_one({"id": user["id"]}, {"$inc": {"wallet_balance": -float(body.amount)}})
+    await _sync_client_wallet_status(r)
     r["dealer_name"] = user["name"]; return r
 
 @api.get("/dealer/templates")
@@ -876,14 +1040,20 @@ async def dealer_stats(user: dict = Depends(require_role("dealer"))):
     devices_count = await db.devices.count_documents({"client_id": {"$in": client_ids}})
     p = [{"$match": {"dealer_id": user["id"]}}, {"$group": {"_id": None, "total": {"$sum": "$wallet_balance"}}}]
     cw = await db.clients.aggregate(p).to_list(1)
-    dealer = await db.users.find_one({"id": user["id"]}, {"_id": 0, "wallet_balance": 1})
+    dealer = await db.users.find_one({"id": user["id"]}, {"_id": 0, "wallet_balance": 1, "plan_id": 1, "plan": 1, "plan_started_at": 1, "plan_expires_at": 1})
+    subscription_plan = None
+    if dealer and dealer.get("plan_id"):
+        subscription_plan = await db.plans.find_one({"id": dealer["plan_id"]}, {"_id": 0})
     plan_counts = {t: 0 for t in PLAN_TYPES}
     async for c in db.clients.find({"dealer_id": user["id"]}, {"_id": 0, "plan": 1}):
         plan_counts[c.get("plan", "cloud")] = plan_counts.get(c.get("plan", "cloud"), 0) + 1
     return {"clients": clients_count, "templates": templates_count, "devices": devices_count,
             "wallet_balance": round(dealer.get("wallet_balance", 0) if dealer else 0, 2),
             "clients_wallet_total": round(cw[0]["total"] if cw else 0, 2),
-            "plan_distribution": plan_counts}
+            "plan_distribution": plan_counts,
+            "subscription_plan": subscription_plan,
+            "subscription_started_at": dealer.get("plan_started_at") if dealer else None,
+            "subscription_expires_at": dealer.get("plan_expires_at") if dealer else None}
 
 # ---------------- Client: Self / Devices / Templates / Storefront ----------------
 @api.get("/client/me")
@@ -893,7 +1063,7 @@ async def client_me(user: dict = Depends(require_role("client"))):
     return await hydrate_client(c)
 
 @api.get("/client/stats")
-async def client_stats(user: dict = Depends(require_role("client"))):
+async def client_stats(user: dict = Depends(require_role("client", allow_pending=True))):
     c = await db.clients.find_one({"id": user["id"]}, {"_id": 0})
     devices = await db.devices.count_documents({"client_id": user["id"]})
     paired = await db.devices.count_documents({"client_id": user["id"], "status": "paired"})
@@ -910,6 +1080,7 @@ async def client_stats(user: dict = Depends(require_role("client"))):
     used_bytes = await _get_media_usage_bytes(user["id"])
     used_gb = used_bytes / (1024 * 1024 * 1024)
     remaining_gb = max(0.0, limit_gb - used_gb) if limit_gb > 0 else 0.0
+    state = await _client_funding_state(c or {})
 
     return {"devices": devices, "paired": paired, "templates": tpls,
             "wallet_balance": round(c.get("wallet_balance", 0) if c else 0, 2),
@@ -919,6 +1090,9 @@ async def client_stats(user: dict = Depends(require_role("client"))):
             "storage_remaining_gb": round(remaining_gb, 2),
             "storage_usage_pct": round((used_gb / limit_gb) * 100, 2) if limit_gb > 0 else 0,
             "plan_name": plan.get("name") if plan else "",
+            "subscription_active": state["active"],
+            "subscription_required_amount": state["required_amount"],
+            "subscription_expires_at": state["expires"],
             **extras}
 
 @api.get("/client/templates")
@@ -940,13 +1114,24 @@ async def create_device(body: DeviceCreate, user: dict = Depends(require_role("c
             raise HTTPException(status_code=400, detail="Playlist not assigned to you")
     pair_code = body.pair_code or gen_pair_code()
     doc = {"id": str(uuid.uuid4()), "name": body.name, "location": body.location,
-           "pair_code": pair_code, "status": "paired" if body.pair_code else "unpaired",
+           "pair_code": pair_code, "status": "unpaired",
            "client_id": user["id"], "dealer_id": c.get("dealer_id", ""),
-           "template_id": body.template_id, "paired_at": now_iso() if body.pair_code else None,
+              "template_id": body.template_id, "paired_at": None,
         "playlist_id": body.playlist_id or "",
         "orientation": body.orientation or "auto", "brightness": int(body.brightness or 100),
            "created_at": now_iso()}
     await db.devices.insert_one(doc); return clean(doc)
+
+
+async def _unpair_device(device_filter: dict):
+    device = await db.devices.find_one(device_filter, {"_id": 0})
+    if not device:
+        raise HTTPException(status_code=404, detail="Device not found")
+    await db.devices.update_one(
+        {"id": device["id"]},
+        {"$set": {"status": "unpaired", "last_seen": None}, "$unset": {"fingerprint": "", "paired_at": ""}},
+    )
+    return {"ok": True, "device_id": device["id"], "status": "unpaired"}
 
 
 # Public: device requests a short-lived pairing code that must be entered in the client panel
@@ -983,28 +1168,23 @@ async def pair_status(pair_code: str):
 # Client: complete pairing by supplying the code and selecting a device to bind
 @api.post("/client/pair/complete")
 async def client_pair_complete(body: PairCompleteIn, user: dict = Depends(require_role("client"))):
-    pairing = await db.pairings.find_one({"code": body.pair_code, "used": False})
-    if not pairing:
-        raise HTTPException(status_code=404, detail="Pair code not found or already used")
-    # expiry check
-    try:
-        exp_dt = datetime.fromisoformat(str(pairing.get("expires_at"))) if pairing.get("expires_at") else None
-        if exp_dt and exp_dt < datetime.now(timezone.utc):
-            raise HTTPException(status_code=400, detail="Pair code expired")
-    except HTTPException:
-        raise
-    except Exception:
-        pass
+    return await _complete_device_pairing({"id": body.device_id, "client_id": user["id"]}, body.pair_code, body.device_id)
 
-    device = await db.devices.find_one({"id": body.device_id, "client_id": user["id"]})
-    if not device:
-        raise HTTPException(status_code=404, detail="Device not found")
 
-    await db.devices.update_one({"id": body.device_id}, {"$set": {"pair_code": pairing["code"],
-                                                                  "fingerprint": pairing["device_fingerprint"],
-                                                                  "status": "paired", "paired_at": now_iso()}})
-    await db.pairings.update_one({"_id": pairing["_id"]}, {"$set": {"used": True, "paired_device_id": body.device_id}})
-    return {"ok": True, "device_id": body.device_id, "pair_code": pairing["code"]}
+@api.post("/client/devices/{did}/unpair")
+async def client_unpair_device(did: str, user: dict = Depends(require_role("client"))):
+    return await _unpair_device({"id": did, "client_id": user["id"]})
+
+
+@api.post("/dealer/pair/complete")
+async def dealer_pair_complete(body: PairCompleteIn, user: dict = Depends(require_role("dealer"))):
+    client_ids = [c["id"] for c in await db.clients.find({"dealer_id": user["id"]}, {"_id": 0, "id": 1}).to_list(2000)]
+    return await _complete_device_pairing({"id": body.device_id, "client_id": {"$in": client_ids}}, body.pair_code, body.device_id)
+
+
+@api.post("/dealer/devices/{did}/unpair")
+async def dealer_unpair_device(did: str, user: dict = Depends(require_role("dealer"))):
+    return await _unpair_device({"id": did, "dealer_id": user["id"]})
 
 @api.put("/client/devices/{did}")
 async def update_device(did: str, body: DeviceUpdate, user: dict = Depends(require_role("client"))):
@@ -1132,13 +1312,25 @@ async def _build_service_appointment_board(client_id: str, recent_limit: int = 5
     today_items = await db.appointments.find({"client_id": client_id, "date": today}, {"_id": 0}).to_list(1000)
     recent_items = await db.appointments.find({"client_id": client_id}, {"_id": 0}).sort("created_at", -1).to_list(max(20, recent_limit))
 
+    def _queue_time_value(value: Any) -> float:
+        if not value:
+            return 0.0
+        text = str(value)
+        try:
+            return datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp()
+        except Exception:
+            return 0.0
+
+    def _queue_sort_key(item: Dict[str, Any]):
+        status_rank = _appointment_status_rank(item.get("status"))
+        if str(item.get("status") or "").lower() == "called":
+            timestamp = item.get("recalled_at") or item.get("called_at") or item.get("updated_at") or item.get("created_at")
+            return (status_rank, -_queue_time_value(timestamp), int(item.get("token") or 0))
+        return (status_rank, int(item.get("token") or 0), item.get("created_at") or "")
+
     live_queue = sorted(
         [item for item in today_items if item.get("status") in ("called", "pending")],
-        key=lambda item: (
-            _appointment_status_rank(item.get("status")),
-            int(item.get("token") or 0),
-            item.get("created_at") or "",
-        ),
+        key=_queue_sort_key,
     )
 
     today_bookings = sorted(
@@ -1240,10 +1432,12 @@ async def _set_service_appointment_status(aid: str, status: str, user: dict):
     if not current:
         raise HTTPException(status_code=404, detail="Appointment not found")
 
-    update: Dict[str, Any] = {"status": status}
+    update: Dict[str, Any] = {"status": status, "updated_at": now_iso()}
     if status == "called" and current.get("status") == "called":
         update["recalled_at"] = now_iso()
         update["recall_count"] = int(current.get("recall_count") or 0) + 1
+    elif status == "called":
+        update["called_at"] = now_iso()
 
     r = await db.appointments.find_one_and_update(
         {"id": aid, "client_id": user["id"]},
@@ -1253,6 +1447,7 @@ async def _set_service_appointment_status(aid: str, status: str, user: dict):
     )
     if not r:
         raise HTTPException(status_code=404, detail="Appointment not found")
+    await _broadcast_queue_refresh(user["id"], reason=f"status:{status}")
     return r
 
 
@@ -1426,6 +1621,7 @@ async def _public_service_profile(cid: str):
             queue_preview.append({
                 "token": item.get("token"),
                 "patient_name": item.get("patient_name", ""),
+                "patient_phone": item.get("patient_phone", ""),
                 "service_name": item.get("service_name", ""),
                 "service_type": item.get("service_name", ""),
                 "service_duration_mins": duration,
@@ -1433,6 +1629,10 @@ async def _public_service_profile(cid: str):
                 "assigned_time": display_time,
                 "source": item.get("source", "public"),
                 "status": item.get("status", "pending"),
+                "recall_count": item.get("recall_count", 0),
+                "called_at": item.get("called_at", ""),
+                "recalled_at": item.get("recalled_at", ""),
+                "updated_at": item.get("updated_at", ""),
                 "routed_location": item.get("routed_location", ""),
                 "routed_device_name": item.get("routed_device_name", ""),
                 "wait_after_mins": queue_minutes,
@@ -1588,6 +1788,7 @@ async def _book_service(cid: str, body: AppointmentCreate, source: Optional[str]
     await db.appointments.insert_one(doc)
     if c.get("vertical") == "doctor":
         await _upsert_clinic_patient(cid, body.patient_phone, body.patient_name)
+    await _broadcast_queue_refresh(cid, reason="booked")
     return clean(doc)
 
 
@@ -1620,6 +1821,24 @@ async def create_service_appointment(vertical: Literal["doctor", "salon"], body:
         raise HTTPException(status_code=403, detail=f"Not a {_service_label(vertical).lower()} account")
     body.source = "manual"
     return await _book_service(user["id"], body, source="manual")
+
+
+@api.websocket("/ws/queue/{pair_code}")
+async def queue_updates_socket(websocket: WebSocket, pair_code: str):
+    device = await db.devices.find_one({"pair_code": pair_code}, {"_id": 0, "client_id": 1})
+    client_id = str(device.get("client_id") or "") if device else ""
+    if not client_id:
+        await websocket.close(code=1008)
+        return
+
+    await queue_ws_manager.connect(client_id, websocket)
+    try:
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        queue_ws_manager.disconnect(client_id, websocket)
+    except Exception:
+        queue_ws_manager.disconnect(client_id, websocket)
 
 
 @api.get("/client/doctor/patients")
@@ -1784,8 +2003,9 @@ async def _resolve_storage_plan_for_client(client: dict) -> Optional[dict]:
     candidate_ids = []
     if client.get("plan_id"):
         candidate_ids.append(client["plan_id"])
+    dealer = None
     if client.get("dealer_id"):
-        dealer = await db.users.find_one({"id": client["dealer_id"]}, {"_id": 0, "plan_id": 1, "plan": 1})
+        dealer = await db.users.find_one({"id": client["dealer_id"]}, {"_id": 0, "plan_id": 1, "plan": 1, "plan_expires_at": 1})
         if dealer:
             if dealer.get("plan_id"):
                 candidate_ids.append(dealer["plan_id"])
@@ -1797,6 +2017,13 @@ async def _resolve_storage_plan_for_client(client: dict) -> Optional[dict]:
     for candidate in candidate_ids:
         plan = await db.plans.find_one({"$or": [{"id": candidate}, {"type": candidate}]}, {"_id": 0})
         if plan:
+            # if this plan comes from dealer assignment and dealer has an expiry, include it
+            try:
+                if dealer and dealer.get("plan_id") and candidate == dealer.get("plan_id") and dealer.get("plan_expires_at"):
+                    plan = dict(plan)
+                    plan["expires_at"] = dealer.get("plan_expires_at")
+            except Exception:
+                pass
             return plan
     return None
 
@@ -1815,25 +2042,66 @@ async def _get_client_storage_quota(client: dict) -> tuple[int, float, Optional[
     return int(limit_gb * 1024 * 1024 * 1024), limit_gb, plan
 
 
-@api.get("/client/subscription")
-async def get_client_subscription(user: dict = Depends(require_role("client"))):
-    client = await db.clients.find_one({"id": user["id"]}, {"_id": 0})
-    if not client:
-        raise HTTPException(status_code=404, detail="Client not found")
-    plan = await _resolve_storage_plan_for_client(client)
-    if not plan:
-        return {"active": False, "plan": None}
-    # determine active flag heuristically
-    expires = plan.get("expires_at") or plan.get("valid_till") or None
-    active = True
+async def _client_funding_state(client: dict) -> dict:
+    plan = await _resolve_storage_plan_for_client(client or {})
+    wallet_balance = float((client or {}).get("wallet_balance", 0) or 0)
+    required_amount = float((plan or {}).get("price", 0) or 0)
+    client_status = str((client or {}).get("status") or "").lower()
+    expires = (plan or {}).get("expires_at") or (plan or {}).get("valid_till") or None
+    expired = False
     if expires:
         try:
             exp_dt = datetime.fromisoformat(str(expires)) if isinstance(expires, str) else None
-            if exp_dt and exp_dt < datetime.now(timezone.utc):
-                active = False
+            expired = bool(exp_dt and exp_dt < datetime.now(timezone.utc))
         except Exception:
-            active = True
-    return {"active": active, "plan": plan}
+            expired = False
+    funded = required_amount <= 0 or wallet_balance >= required_amount
+    suspended = client_status == "suspended"
+    active = funded and not expired and not suspended
+    return {
+        "plan": plan,
+        "wallet_balance": wallet_balance,
+        "required_amount": required_amount,
+        "expires": expires,
+        "expired": expired,
+        "suspended": suspended,
+        "client_status": client_status or None,
+        "funded": funded,
+        "active": active,
+    }
+
+
+async def _sync_client_wallet_status(client: dict) -> dict:
+    if not client:
+        return client
+    if client.get("status") == "suspended":
+        return client
+    state = await _client_funding_state(client)
+    desired_status = "active" if state["active"] else "pending"
+    if client.get("status") != desired_status:
+        await db.clients.update_one({"id": client["id"]}, {"$set": {"status": desired_status}})
+        client["status"] = desired_status
+    return client
+
+
+@api.get("/client/subscription")
+async def get_client_subscription(user: dict = Depends(require_role("client", allow_pending=True))):
+    client = await db.clients.find_one({"id": user["id"]}, {"_id": 0})
+    if not client:
+        raise HTTPException(status_code=404, detail="Client not found")
+    state = await _client_funding_state(client)
+    return {
+        "active": state["active"],
+        "plan": state["plan"],
+        "wallet_balance": state["wallet_balance"],
+        "required_amount": state["required_amount"],
+        "started_at": client.get("plan_started_at"),
+        "expires_at": state["expires"],
+        "expired": state["expired"],
+        "suspended": state["suspended"],
+        "client_status": state["client_status"],
+        "funded": state["funded"],
+    }
 
 # ==================== Media ====================
 class MediaUpdate(BaseModel):
@@ -2356,23 +2624,19 @@ async def player_payload(pair_code: str, request: Request):
     # enforce subscription: do not return playlist if client's subscription is inactive
     client = await db.clients.find_one({"id": device.get("client_id")}, {"_id": 0})
     weather = _resolve_weather_snapshot(client.get("address", "")) if client else None
-    plan = await _resolve_storage_plan_for_client(client)
-    active = True
-    if not plan:
-        active = False
-    else:
-        expires = plan.get("expires_at") or plan.get("valid_till") or None
-        if expires:
-            try:
-                exp_dt = datetime.fromisoformat(str(expires)) if isinstance(expires, str) else None
-                if exp_dt and exp_dt < datetime.now(timezone.utc):
-                    active = False
-            except Exception:
-                pass
-    if not active:
+    subscription_state = await _client_funding_state(client or {}) if client else {"active": False, "expired": True, "suspended": False, "plan": None}
+    if not subscription_state.get("active"):
+        reason = "Account suspended" if subscription_state.get("suspended") else "Subscription expired"
         # return minimal payload indicating subscription required
         await db.devices.update_one({"id": device["id"]}, {"$set": {"status": "suspended", "last_seen": now_iso()}})
-        return {"device_id": device["id"], "client_id": device["client_id"], "subscription_active": False, "weather": weather, "message": "Subscription required to run signage"}
+        return {
+            "device_id": device["id"],
+            "client_id": device["client_id"],
+            "subscription_active": False,
+            "subscription_reason": reason,
+            "weather": weather,
+            "message": reason,
+        }
     now = datetime.now(timezone.utc)
     dow = now.weekday()
     cur_min = now.hour * 60 + now.minute
@@ -2505,6 +2769,21 @@ async def player_payload(pair_code: str, request: Request):
             "poll_after_seconds": 60}
 
 
+@public_api.post("/player/{pair_code}/offline")
+async def player_offline(pair_code: str, request: Request):
+    device = await db.devices.find_one({"pair_code": pair_code}, {"_id": 0})
+    if not device:
+        raise HTTPException(status_code=404, detail="Device not found. Check pair code.")
+
+    provided_fp = request.headers.get("X-Device-Fingerprint") or request.query_params.get("device_fingerprint")
+    saved_fp = device.get("fingerprint")
+    if saved_fp and provided_fp and provided_fp != saved_fp:
+        raise HTTPException(status_code=403, detail="Device not authorized. Fingerprint mismatch.")
+
+    await db.devices.update_one({"id": device["id"]}, {"$set": {"status": "offline", "last_seen": now_iso()}})
+    return {"ok": True, "device_id": device["id"], "status": "offline"}
+
+
 
 # ==================== Admin Settings (UPI) ====================
 class SettingsIn(BaseModel):
@@ -2528,7 +2807,6 @@ async def admin_put_settings(body: SettingsIn, _: dict = Depends(require_role("a
     if not upd: raise HTTPException(status_code=400, detail="Nothing to update")
     await db.settings.update_one({"_key": SETTINGS_KEY}, {"$set": upd}, upsert=True)
     s = await get_settings(); s.pop("_key", None); return s
-
 # Public settings (UPI for QR) — dealers/clients fetch their payee's UPI
 @api.get("/admin/upi")
 async def admin_upi_for_anyone(_: dict = Depends(get_current_user)):
@@ -2574,6 +2852,13 @@ async def admin_set_dealer_status(did: str, body: StatusIn, _: dict = Depends(re
 
 @api.put("/admin/clients/{cid}/status")
 async def admin_set_client_status(cid: str, body: StatusIn, _: dict = Depends(require_role("admin"))):
+    if body.status == "active":
+        client = await db.clients.find_one({"id": cid}, {"_id": 0})
+        if not client:
+            raise HTTPException(status_code=404, detail="Client not found")
+        state = await _client_funding_state(client)
+        if not state["active"]:
+            raise HTTPException(status_code=400, detail="Client wallet balance is insufficient for the selected plan")
     r = await db.clients.find_one_and_update({"id": cid}, {"$set": {"status": body.status}},
                                               return_document=True, projection={"_id": 0, "password_hash": 0})
     if not r: raise HTTPException(status_code=404, detail="Client not found")
@@ -2667,6 +2952,12 @@ async def dealer_verify_client_payment(pid: str, body: StatusIn, user: dict = De
     if body.status not in ("active", "pending"): raise HTTPException(status_code=400, detail="Status must be active or pending (rejected)")
     p = await db.payments.find_one({"id": pid, "payee_id": user["id"], "payee_role": "dealer"}, {"_id": 0})
     if not p: raise HTTPException(status_code=404, detail="Payment not found")
+    if body.status == "active":
+        client = await db.clients.find_one({"id": p["payer_id"], "dealer_id": user["id"]}, {"_id": 0})
+        if client:
+            state = await _client_funding_state(client)
+            if not state["active"]:
+                raise HTTPException(status_code=400, detail="Client wallet balance is insufficient for the selected plan")
     new_status = "verified" if body.status == "active" else "rejected"
     await db.payments.update_one({"id": pid}, {"$set": {"status": new_status, "verified_at": now_iso()}})
     if new_status == "verified":
@@ -2698,6 +2989,12 @@ async def admin_list_payments(_: dict = Depends(require_role("admin"))):
     for p in items: p["payer_display"] = dealers.get(p.get("payer_id", ""), p.get("payer_name", ""))
     return items
 
+
+@api.get("/dealer/plans")
+async def dealer_list_plans(_: dict = Depends(require_role("dealer"))):
+    items = await db.plans.find({}, {"_id": 0}).sort("price", 1).to_list(500)
+    return items
+
 @api.post("/admin/payments/{pid}/verify")
 async def admin_verify_payment(pid: str, body: StatusIn, _: dict = Depends(require_role("admin"))):
     if body.status not in ("active", "pending"): raise HTTPException(status_code=400, detail="Status must be active or pending (rejected)")
@@ -2706,7 +3003,17 @@ async def admin_verify_payment(pid: str, body: StatusIn, _: dict = Depends(requi
     new_status = "verified" if body.status == "active" else "rejected"
     await db.payments.update_one({"id": pid}, {"$set": {"status": new_status, "verified_at": now_iso()}})
     if new_status == "verified":
-        await db.users.update_one({"id": p["payer_id"], "role": "dealer"}, {"$set": {"status": "active"}})
+        # Activate dealer and, if this payment was for a plan, attach plan and expiry
+        update_doc = {"status": "active"}
+        try:
+            plan_id = p.get("plan_id")
+            if plan_id:
+                plan_doc = await db.plans.find_one({"id": plan_id}, {"_id": 0})
+                if plan_doc:
+                    update_doc.update({"plan_id": plan_id, **_subscription_fields_for_plan(plan_doc)})
+        except Exception:
+            pass
+        await db.users.update_one({"id": p["payer_id"], "role": "dealer"}, {"$set": update_doc})
     return {"ok": True, "status": new_status}
 
 

@@ -20,6 +20,7 @@ const STATUS = {
 export default function DealerPayments() {
   const [adminUpi, setAdminUpi] = useState({});
   const [me, setMe] = useState(null);
+  const [plans, setPlans] = useState([]);
   const [payments, setPayments] = useState({ outgoing: [], incoming: [] });
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState({ amount: "", upi_txn_id: "", notes: "", screenshot_url: "" });
@@ -28,10 +29,10 @@ export default function DealerPayments() {
 
   const load = async () => {
     try {
-      const [u, m, p] = await Promise.all([
-        api.get("/admin/upi"), api.get("/dealer/me"), api.get("/dealer/payments"),
+      const [u, m, p, pl] = await Promise.all([
+        api.get("/admin/upi"), api.get("/dealer/me"), api.get("/dealer/payments"), api.get("/dealer/plans"),
       ]);
-      setAdminUpi(u.data); setMe(m.data); setPayments(p.data);
+      setAdminUpi(u.data); setMe(m.data); setPayments(p.data); setPlans(pl.data || []);
     } catch {}
   };
   useEffect(() => { load(); }, []);
@@ -102,6 +103,9 @@ export default function DealerPayments() {
             <div><Label className="text-xs uppercase tracking-wider text-[#6B7280]">QR image URL (optional)</Label>
               <Input value={me?.upi_qr_url || ""} onChange={(e) => setMe({ ...me, upi_qr_url: e.target.value })} placeholder="https://..." className="rounded-sm" data-testid="dealer-upi-qr" /></div>
           </div>
+          {me?.plan_expires_at && (
+            <div className="mt-3 text-sm text-[#6B7280]">Plan expires: <span className="font-mono">{new Date(me.plan_expires_at).toLocaleDateString()}</span></div>
+          )}
           <Button onClick={saveUpi} className="rounded-sm bg-[#111827] hover:bg-[#374151] text-white mt-3" data-testid="save-dealer-upi"><Save className="w-4 h-4 mr-2" /> Save</Button>
         </div>
       </div>
@@ -125,6 +129,17 @@ export default function DealerPayments() {
           <DialogHeader><DialogTitle className="font-display text-2xl font-extrabold tracking-tight">Pay Admin</DialogTitle></DialogHeader>
           <form onSubmit={submit} className="space-y-4">
             {adminUpi.upi_id && <div className="bg-[#F9FAFB] border border-[#E5E7EB] rounded-sm p-3 font-mono text-sm">UPI: {adminUpi.upi_id}</div>}
+            <div>
+              <Label className="text-xs uppercase tracking-wider text-[#6B7280]">Subscription plan (optional)</Label>
+              <select value={form.plan_id || ""} onChange={(e) => {
+                const pid = e.target.value || null;
+                const sel = plans.find(p => p.id === pid);
+                setForm({ ...form, plan_id: pid, amount: sel ? String(sel.price || sel.amount || "") : form.amount });
+              }} className="w-full rounded-sm border px-2 py-2">
+                <option value="">— Select plan —</option>
+                {plans.map(p => (<option key={p.id} value={p.id}>{p.name || p.type} — ₹{p.price}</option>))}
+              </select>
+            </div>
             <div><Label className="text-xs uppercase tracking-wider text-[#6B7280]">Amount (₹)</Label>
               <Input type="number" min="1" value={form.amount} onChange={(e) => setForm({ ...form, amount: e.target.value })} required className="rounded-sm" data-testid="pay-amount" /></div>
             <div><Label className="text-xs uppercase tracking-wider text-[#6B7280]">UPI Transaction ID</Label>

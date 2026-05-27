@@ -9,6 +9,8 @@ import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from ".
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../../components/ui/table";
 import { Pencil, Trash2, Monitor, ExternalLink, Search } from "lucide-react";
 import { toast } from "sonner";
+import StatusBadge from "../../components/StatusBadge";
+import DeviceLiveBadge from "../../components/DeviceLiveBadge";
 
 export default function DealerScreens() {
   const [items, setItems] = useState([]);
@@ -49,6 +51,29 @@ export default function DealerScreens() {
     catch (e) { toast.error(formatErr(e.response?.data?.detail)); }
   };
 
+  const completePairing = async (device) => {
+    const code = window.prompt("Enter the pair code shared by the client:");
+    if (!code) return;
+    try {
+      await api.post("/dealer/pair/complete", { pair_code: code.trim(), device_id: device.id });
+      toast.success("Screen paired successfully");
+      load();
+    } catch (e) {
+      toast.error(formatErr(e.response?.data?.detail));
+    }
+  };
+
+  const unpairDevice = async (device) => {
+    if (!window.confirm(`Unpair ${device.name}?`)) return;
+    try {
+      await api.post(`/dealer/devices/${device.id}/unpair`);
+      toast.success("Screen unpaired");
+      load();
+    } catch (e) {
+      toast.error(formatErr(e.response?.data?.detail));
+    }
+  };
+
   const tplName = (id) => templates.find((t) => t.id === id)?.name || "—";
 
   const filtered = items.filter((d) => {
@@ -59,7 +84,7 @@ export default function DealerScreens() {
 
   return (
     <div data-testid="dealer-screens-page">
-      <PageHeader overline="Dealer / Screens" title="Client screens." subtitle="All signage screens registered by your clients. Edit name, location and assigned template." />
+      <PageHeader overline="Dealer / Screens" title="Client screens." subtitle="Screens are created by the client. Ask for the pair code, then complete pairing here and assign the screen settings." />
 
       <div className="flex flex-col md:flex-row gap-3 mb-4">
         <div className="relative flex-1 max-w-md">
@@ -83,10 +108,11 @@ export default function DealerScreens() {
             <TableHead className="text-[11px] uppercase tracking-wider text-[#6B7280]">Pair Code</TableHead>
             <TableHead className="text-[11px] uppercase tracking-wider text-[#6B7280]">Template</TableHead>
             <TableHead className="text-[11px] uppercase tracking-wider text-[#6B7280]">Status</TableHead>
+            <TableHead className="text-[11px] uppercase tracking-wider text-[#6B7280]">Live</TableHead>
             <TableHead></TableHead>
           </TableRow></TableHeader>
           <TableBody>
-            {filtered.length === 0 && <TableRow><TableCell colSpan={6} className="text-center py-10 text-sm text-[#6B7280]">No screens.</TableCell></TableRow>}
+            {filtered.length === 0 && <TableRow><TableCell colSpan={7} className="text-center py-10 text-sm text-[#6B7280]">No screens.</TableCell></TableRow>}
             {filtered.map((d) => (
               <TableRow key={d.id} data-testid={`screen-row-${d.id}`}>
                 <TableCell>
@@ -101,8 +127,18 @@ export default function DealerScreens() {
                 <TableCell className="text-sm">{d.client_name || "—"}</TableCell>
                 <TableCell className="font-mono text-xs">{d.pair_code}</TableCell>
                 <TableCell className="text-sm">{tplName(d.template_id)}</TableCell>
-                <TableCell><span className="text-[11px] uppercase tracking-wider font-semibold">{d.status}</span></TableCell>
+                <TableCell><StatusBadge status={d.status} /></TableCell>
+                <TableCell><DeviceLiveBadge status={d.status} lastSeen={d.last_seen} /></TableCell>
                 <TableCell className="text-right">
+                  {d.status === "paired" ? (
+                    <Button size="sm" variant="outline" className="rounded-sm mr-1" onClick={() => unpairDevice(d)} data-testid={`unpair-screen-${d.id}`}>
+                      Unpair
+                    </Button>
+                  ) : (
+                    <Button size="sm" variant="outline" className="rounded-sm mr-1" onClick={() => completePairing(d)} data-testid={`pair-screen-${d.id}`}>
+                      Pair
+                    </Button>
+                  )}
                   <a href={`/play/${d.pair_code}`} target="_blank" rel="noreferrer" className="inline-flex items-center text-xs px-2 py-1 border border-[#E5E7EB] rounded-sm hover:bg-[#F3F4F6] mr-1" data-testid={`open-player-${d.id}`}>
                     <ExternalLink className="w-3 h-3 mr-1" /> Player
                   </a>

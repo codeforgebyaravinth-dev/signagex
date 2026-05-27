@@ -12,6 +12,7 @@ import AdminDevices from "./pages/admin/AdminDevices";
 import AdminPayments from "./pages/admin/AdminPayments";
 import DealerDashboard from "./pages/dealer/DealerDashboard";
 import DealerClients from "./pages/dealer/DealerClients";
+import DealerPlans from "./pages/dealer/DealerPlans";
 import DealerTemplates from "./pages/dealer/DealerTemplates";
 import DealerScreens from "./pages/dealer/DealerScreens";
 import DealerPayments from "./pages/dealer/DealerPayments";
@@ -101,6 +102,7 @@ export default function App() {
           <Route element={<ProtectedRoute role="dealer"><Layout /></ProtectedRoute>}>
             <Route path="/dealer" element={<DealerDashboard />} />
             <Route path="/dealer/clients" element={<DealerClients />} />
+            <Route path="/dealer/plans" element={<DealerPlans />} />
             <Route path="/dealer/screens" element={<DealerScreens />} />
             <Route path="/dealer/templates" element={<DealerTemplates />} />
             <Route path="/dealer/payments" element={<DealerPayments />} />

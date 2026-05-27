@@ -12,6 +12,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from ".
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "../../components/ui/dropdown-menu";
 import { Search, MoreVertical, Pause, Play, ArrowRightLeft } from "lucide-react";
 import { toast } from "sonner";
+import { formatDateTime } from "../../lib/utils";
 
 export default function AdminClients() {
   const [clients, setClients] = useState([]);
@@ -88,7 +89,19 @@ export default function AdminClients() {
                 </TableCell>
                 <TableCell className="text-sm">{c.dealer_name || "—"}</TableCell>
                 <TableCell className="font-mono text-xs">{c.gst_number || "—"}</TableCell>
-                <TableCell><PlanBadge plan={c.plan} /></TableCell>
+                <TableCell>
+                  <div className="space-y-1">
+                    {c.plan_id ? (
+                      <>
+                        <div className="font-semibold text-sm">{c.plan_name || c.plan || "Subscription"}</div>
+                        <div className="text-xs text-[#6B7280]">Start {formatDateTime(c.plan_started_at || c.created_at)}</div>
+                        <div className="text-xs text-[#6B7280]">End {formatDateTime(c.plan_expires_at || c.subscription_expires_at)}</div>
+                      </>
+                    ) : (
+                      <PlanBadge plan={c.plan} />
+                    )}
+                  </div>
+                </TableCell>
                 <TableCell><StatusBadge status={c.status} /></TableCell>
                 <TableCell className="text-right font-mono">₹ {Number(c.wallet_balance || 0).toLocaleString()}</TableCell>
                 <TableCell>

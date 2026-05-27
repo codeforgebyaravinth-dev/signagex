@@ -3,6 +3,7 @@ import { useParams, useNavigate } from "react-router-dom";
 import axios from "axios";
 import { Monitor, CircleSlash, Maximize, Menu, X, Eye, EyeOff, RotateCcw, RefreshCw, Play, Smartphone, Tv, Wifi, CheckCircle, AlertCircle, ArrowRight } from "lucide-react";
 import { API_BASE } from "../../lib/api";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../../components/ui/table";
 
 const RAW_BASE = (process.env.REACT_APP_BACKEND_URL || "https://rpsignage.com").replace(/\/$/, "");
 const BASE = RAW_BASE.replace(/\/api$/, "");
@@ -176,6 +177,24 @@ function getWeatherConditionLabel(weather = {}, conditionText = "") {
   return text || "Clear skies";
 }
 
+function buildQueueAnnouncement(entry) {
+  if (!entry) return null;
+  const token = String(entry.token || entry.token_no || entry.number || entry.queue_number || "").trim();
+  if (!token) return null;
+
+  const status = String(entry.status || "").toLowerCase();
+  if (status !== "called") return null;
+
+  const recallCount = Number(entry.recall_count || 0);
+  const isRecall = recallCount > 0 || Boolean(entry.recalled_at);
+  const key = `${token}:${status}:${recallCount}:${entry.recalled_at || ""}`;
+  const text = isRecall
+    ? `Recall for token ${token}. Please return to the counter.`
+    : `Token ${token}, please proceed to the counter.`;
+
+  return { key, text };
+}
+
 async function fetchWeatherFromCoords(latitude, longitude) {
   const response = await fetch(
     `https://api.open-meteo.com/v1/forecast?latitude=${encodeURIComponent(latitude)}&longitude=${encodeURIComponent(longitude)}&current=temperature_2m,weather_code,relative_humidity_2m&daily=temperature_2m_max,temperature_2m_min&timezone=auto`
@@ -197,12 +216,14 @@ async function fetchWeatherFromCoords(latitude, longitude) {
   };
 }
 
-function MediaSlot({ items, label, queuePreview, weatherData, zone, canvasWidth, canvasHeight, mediaMode, viewportScale = 1 }) {
+function MediaSlot({ items, label, queuePreview, weatherData, zone, canvasWidth, canvasHeight, mediaMode, viewportScale = 1, isMuted, isMutedRef }) {
   const [idx, setIdx] = useState(0);
   const [showFrame, setShowFrame] = useState(true);
   const timerRef = useRef(null);
   const youtubeRef = useRef(null);
   const youtubePlayerRef = useRef(null);
+  const currentYoutubeIdRef = useRef(null);
+  const videoElemRef = useRef(null);
   const zoneScale = getZoneScale(zone, canvasWidth, canvasHeight, /^(header|weather)$/i.test(zone?.role || ""), viewportScale);
   const itemCount = Math.max(1, items?.length || 0);
   const handleMediaEnd = useCallback(() => {
@@ -217,11 +238,38 @@ function MediaSlot({ items, label, queuePreview, weatherData, zone, canvasWidth,
     return () => clearTimeout(frame);
   }, [idx, items, handleMediaEnd]);
 
+  // Keep HTML5 video and YouTube player in sync with mute state
+  useEffect(() => {
+    try {
+      if (videoElemRef.current) {
+        videoElemRef.current.muted = Boolean(isMuted);
+      }
+    } catch (e) {}
+
+    try {
+      if (youtubePlayerRef.current) {
+        if (isMuted) {
+          try { youtubePlayerRef.current.mute(); } catch {}
+        } else {
+          try { youtubePlayerRef.current.unMute ? youtubePlayerRef.current.unMute() : youtubePlayerRef.current.unmute && youtubePlayerRef.current.unmute(); } catch {}
+        }
+      }
+    } catch (e) {}
+  }, [isMuted]);
+
   useEffect(() => {
     if (!items || items.length === 0) return;
     const cur = items[idx];
     if (!cur) return;
-    if (cur.kind === "video") return;
+
+    const curType = String(cur.type || cur.kind || "").toLowerCase();
+    const youtubeId = getYoutubeId(cur?.url);
+    const isYoutube = Boolean(youtubeId) || curType === "youtube";
+    const isHtml5Video = ((cur.type === "media" || cur.media_id) && !isImageItem(cur)) || curType === "video";
+
+    // If this item is a video (HTML5 or YouTube) let the media's ended event drive progression
+    if (isHtml5Video || isYoutube) return;
+
     timerRef.current = setTimeout(() => setIdx((i) => (i + 1) % items.length), (cur.duration || 10) * 1000);
     return () => clearTimeout(timerRef.current);
   }, [idx, items, handleMediaEnd]);
@@ -229,10 +277,15 @@ function MediaSlot({ items, label, queuePreview, weatherData, zone, canvasWidth,
   useEffect(() => {
     const cur = items?.[idx];
     const youtubeId = getYoutubeId(cur?.url);
-    if (!cur || (!youtubeId && String(cur.type || cur.kind || "").toLowerCase() !== "youtube")) {
+    const curType = String(cur?.type || cur?.kind || "").toLowerCase();
+    const isYoutube = Boolean(youtubeId) || curType === "youtube";
+
+    // If there's no YouTube item active, destroy any existing player and exit
+    if (!cur || !isYoutube) {
       if (youtubePlayerRef.current) {
-        youtubePlayerRef.current.destroy();
+        try { youtubePlayerRef.current.destroy(); } catch {};
         youtubePlayerRef.current = null;
+        currentYoutubeIdRef.current = null;
       }
       return;
     }
@@ -240,15 +293,23 @@ function MediaSlot({ items, label, queuePreview, weatherData, zone, canvasWidth,
     let cancelled = false;
     loadYouTubeIframeApi().then((YT) => {
       if (cancelled || !YT?.Player || !youtubeRef.current) return;
-      if (youtubePlayerRef.current) {
-        youtubePlayerRef.current.destroy();
-        youtubePlayerRef.current = null;
-      }
-
       const videoId = youtubeId;
       if (!videoId) {
         handleMediaEnd();
         return;
+      }
+
+      // If same video already loaded, ensure it's playing and do nothing else
+      if (youtubePlayerRef.current && currentYoutubeIdRef.current === videoId) {
+        try { youtubePlayerRef.current.playVideo && youtubePlayerRef.current.playVideo(); } catch {}
+        return;
+      }
+
+      // Different video: destroy existing and create new
+      if (youtubePlayerRef.current) {
+        try { youtubePlayerRef.current.destroy(); } catch {};
+        youtubePlayerRef.current = null;
+        currentYoutubeIdRef.current = null;
       }
 
       youtubePlayerRef.current = new YT.Player(youtubeRef.current, {
@@ -265,9 +326,10 @@ function MediaSlot({ items, label, queuePreview, weatherData, zone, canvasWidth,
         events: {
           onReady: (event) => {
             try {
-              if (isMuted) event.target.mute(); else event.target.unMute();
+              if (isMutedRef.current) event.target.mute(); else event.target.unMute();
             } catch (e) {}
-            event.target.playVideo();
+            try { event.target.playVideo(); } catch (e) {}
+            currentYoutubeIdRef.current = videoId;
           },
           onStateChange: (event) => {
             if (event.data === YT.PlayerState.ENDED) {
@@ -280,12 +342,19 @@ function MediaSlot({ items, label, queuePreview, weatherData, zone, canvasWidth,
 
     return () => {
       cancelled = true;
+    };
+  }, [idx, items, handleMediaEnd]);
+
+  // Destroy YouTube player on component unmount
+  useEffect(() => {
+    return () => {
       if (youtubePlayerRef.current) {
-        youtubePlayerRef.current.destroy();
+        try { youtubePlayerRef.current.destroy(); } catch {};
         youtubePlayerRef.current = null;
+        currentYoutubeIdRef.current = null;
       }
     };
-  }, [idx, items, handleMediaEnd, isMuted]);
+  }, []);
 
   if (!items || items.length === 0) {
     return (
@@ -303,20 +372,23 @@ function MediaSlot({ items, label, queuePreview, weatherData, zone, canvasWidth,
     const now = new Date();
     const time = now.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
     const date = now.toLocaleDateString(undefined, { weekday: "long", month: "short", day: "numeric" });
+    const zoneScaleBoosted = Math.max(0.95, getZoneScale(zone, canvasWidth, canvasHeight, true, viewportScale));
     return (
-      <div className="w-full h-full bg-[radial-gradient(circle_at_top,_rgba(255,255,255,0.14),_transparent_35%),linear-gradient(180deg,#111827,#0B1120)] p-5 text-white flex flex-col justify-between overflow-hidden">
-        <div>
-          <div className="text-[10px] uppercase tracking-[0.45em] text-white/45">{cur.title || "Today"}</div>
-          <div className="mt-2 text-sm text-white/70">{cur.location || "Local time"}</div>
-        </div>
-        <div>
-          <div className="font-display text-6xl font-black tracking-tight leading-none">{time}</div>
-          <div className="mt-2 text-lg text-white/80">{date}</div>
-          <div className="mt-4 inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1.5 text-xs uppercase tracking-[0.25em] text-white/60">
-            <span className="h-2 w-2 rounded-full bg-emerald-400" /> Live
+      <ResponsiveZoneShell scale={zoneScaleBoosted}>
+        <div className="w-full h-full bg-[radial-gradient(circle_at_top,_rgba(255,255,255,0.14),_transparent_35%),linear-gradient(180deg,#111827,#0B1120)] p-5 text-white flex flex-col justify-between overflow-hidden">
+          <div>
+            <div className="text-[10px] uppercase tracking-[0.45em] text-white/45">{cur.title || "Today"}</div>
+            <div className="mt-2 text-sm text-white/70">{cur.location || "Local time"}</div>
+          </div>
+          <div>
+            <div className="font-display text-6xl font-black tracking-tight leading-none">{time}</div>
+            <div className="mt-2 text-lg text-white/80">{date}</div>
+            <div className="mt-4 inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1.5 text-xs uppercase tracking-[0.25em] text-white/60">
+              <span className="h-2 w-2 rounded-full bg-emerald-400" /> Live
+            </div>
           </div>
         </div>
-      </div>
+      </ResponsiveZoneShell>
     );
   }
 
@@ -325,22 +397,25 @@ function MediaSlot({ items, label, queuePreview, weatherData, zone, canvasWidth,
     const condition = getWeatherConditionLabel(weather, cur.condition || cur.summary || "");
     const locationLabel = weather.location || "Current conditions";
     const emoji = getWeatherEmoji(weather, condition);
+    const zoneScaleBoosted = Math.max(0.95, getZoneScale(zone, canvasWidth, canvasHeight, true, viewportScale));
     return (
-      <div className="w-full h-full bg-[radial-gradient(circle_at_top,_rgba(56,189,248,0.22),_transparent_40%),linear-gradient(180deg,#0F172A,#111827)] p-5 text-white flex flex-col justify-between overflow-hidden">
-        <div>
-          <div className="text-[10px] uppercase tracking-[0.45em] text-cyan-200/70 flex items-center gap-2">Weather <span className="text-base leading-none">{emoji}</span></div>
-          <div className="mt-2 text-sm text-white/70">{locationLabel}</div>
-        </div>
-        <div className="space-y-3">
-          <div className="font-display text-7xl font-black tracking-tight leading-none">{weather.temperature ?? cur.temperature ?? "--"}°</div>
-          <div className="text-lg font-semibold text-white/90 flex items-center gap-2"><span>{emoji}</span><span>{condition}</span></div>
-          <div className="flex flex-wrap gap-2 text-xs uppercase tracking-[0.22em] text-white/60">
-            <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1.5">H {weather.high ?? cur.high ?? "--"}°</span>
-            <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1.5">L {weather.low ?? cur.low ?? "--"}°</span>
-            <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1.5">Humidity {weather.humidity ?? cur.humidity ?? "--"}%</span>
+      <ResponsiveZoneShell scale={zoneScaleBoosted}>
+        <div className="w-full h-full bg-[radial-gradient(circle_at_top,_rgba(56,189,248,0.22),_transparent_40%),linear-gradient(180deg,#0F172A,#111827)] p-5 text-white flex flex-col justify-between overflow-hidden">
+          <div>
+            <div className="text-[10px] uppercase tracking-[0.45em] text-cyan-200/70 flex items-center gap-2">Weather <span className="text-base leading-none">{emoji}</span></div>
+            <div className="mt-2 text-sm text-white/70">{locationLabel}</div>
+          </div>
+          <div className="space-y-3">
+            <div className="font-display text-7xl font-black tracking-tight leading-none">{weather.temperature ?? cur.temperature ?? "--"}°</div>
+            <div className="text-lg font-semibold text-white/90 flex items-center gap-2"><span>{emoji}</span><span>{condition}</span></div>
+            <div className="flex flex-wrap gap-2 text-xs uppercase tracking-[0.22em] text-white/60">
+              <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1.5">H {weather.high ?? cur.high ?? "--"}°</span>
+              <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1.5">L {weather.low ?? cur.low ?? "--"}°</span>
+              <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1.5">Humidity {weather.humidity ?? cur.humidity ?? "--"}%</span>
+            </div>
           </div>
         </div>
-      </div>
+      </ResponsiveZoneShell>
     );
   }
 
@@ -355,36 +430,59 @@ function MediaSlot({ items, label, queuePreview, weatherData, zone, canvasWidth,
       name: item.patient_name || item.service_name || "Booking",
       time: item.assigned_time || item.preferred_time || `${item.wait_after_mins || 0} min`,
       service: item.service_type || item.service_name || item.patient_name || "Appointment",
+      status: item.status || "pending",
     }));
+    const queueScale = Math.min(2.2, Math.max(1.05, zoneScale * 1.45));
     return (
-      <div className="w-full h-full bg-[linear-gradient(180deg,#F8FAFC,#EEF2FF)] p-5 text-[#111827] flex flex-col overflow-hidden">
-        <div className="flex items-end justify-between gap-3 mb-4">
-          <div>
-            <div className="text-[10px] uppercase tracking-[0.45em] text-[#6B7280]">Queue</div>
-            <div className="mt-2 font-display text-3xl font-black tracking-tight">{cur.title || "Today's bookings"}</div>
-          </div>
-          <div className="text-right text-xs text-[#6B7280] uppercase tracking-[0.25em]">Live board</div>
-        </div>
-        <div className="space-y-3 overflow-hidden">
-          {entries.length === 0 ? (
-            <div className="rounded-2xl border border-dashed border-[#CBD5E1] bg-white p-4 text-sm text-[#6B7280]">No bookings yet.</div>
-          ) : entries.map((entry, index) => (
-            <div key={`${entry.name}-${index}`} className="rounded-2xl border border-white bg-white/90 shadow-[0_12px_30px_-20px_rgba(15,23,42,0.5)] px-4 py-3 flex items-center justify-between gap-4">
-              <div className="min-w-0">
-                <div className="flex items-center gap-2 text-[10px] uppercase tracking-[0.32em] text-[#94A3B8]">
-                  <span>Token {entry.token || index + 1}</span>
-                </div>
-                <div className="font-semibold text-lg truncate">{entry.name}</div>
-                <div className="text-sm text-[#6B7280] truncate">{entry.service || "Appointment"}</div>
-              </div>
-              <div className="text-right shrink-0">
-                <div className="font-display text-2xl font-black tracking-tight">{entry.time}</div>
-                <div className="text-[10px] uppercase tracking-[0.3em] text-[#94A3B8]">{entry.service || "Booking"}</div>
-              </div>
+      <ResponsiveZoneShell scale={queueScale}>
+        <div className="w-full h-full bg-white p-5 text-[#111827] flex flex-col overflow-hidden">
+          <div className="flex items-end justify-between gap-3 mb-4">
+            <div>
+              <div className="text-[10px] uppercase tracking-[0.45em] text-[#6B7280]">Queue</div>
+              <div className="mt-2 font-display text-3xl font-black tracking-tight">{cur.title || "Today's bookings"}</div>
             </div>
-          ))}
+            <div className="text-right text-xs text-[#6B7280] uppercase tracking-[0.25em]">Live board</div>
+          </div>
+          <div className="flex-1 overflow-hidden rounded-[1.5rem] border border-[#E5E7EB] bg-white shadow-[0_18px_40px_-24px_rgba(15,23,42,0.3)]">
+            <Table>
+              <TableHeader>
+                <TableRow className="bg-[#F9FAFB] hover:bg-[#F9FAFB]">
+                  <TableHead className="text-[11px] uppercase tracking-wider text-[#6B7280]">Token</TableHead>
+                  <TableHead className="text-[11px] uppercase tracking-wider text-[#6B7280]">Name</TableHead>
+                  <TableHead className="text-[11px] uppercase tracking-wider text-[#6B7280]">Service</TableHead>
+                  <TableHead className="text-[11px] uppercase tracking-wider text-[#6B7280]">Time</TableHead>
+                  <TableHead className="text-[11px] uppercase tracking-wider text-[#6B7280]">Status</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {entries.length === 0 ? (
+                  <TableRow>
+                    <TableCell colSpan={5} className="text-center py-10 text-sm text-[#6B7280]">No bookings yet.</TableCell>
+                  </TableRow>
+                ) : entries.map((entry, index) => (
+                  <TableRow key={`${entry.token || entry.name}-${index}`}>
+                    <TableCell>
+                      <span className="inline-flex items-center justify-center w-9 h-9 rounded-sm bg-[#111827] text-white font-mono font-bold">
+                        {entry.token || index + 1}
+                      </span>
+                    </TableCell>
+                    <TableCell>
+                      <div className="font-semibold text-[#0F172A] truncate">{entry.name}</div>
+                    </TableCell>
+                    <TableCell className="text-xs text-[#6B7280] truncate">{entry.service || "Appointment"}</TableCell>
+                    <TableCell className="font-mono text-xs text-[#0F172A]">{entry.time}</TableCell>
+                    <TableCell>
+                      <span className={`inline-flex items-center rounded-full px-2 py-1 text-[11px] uppercase tracking-wider font-semibold ${String(entry.status).toLowerCase() === "called" ? "bg-emerald-50 text-emerald-700" : String(entry.status).toLowerCase() === "completed" ? "bg-slate-50 text-slate-600" : "bg-[#F9FAFB] text-[#64748B]"}`}>
+                        {entry.status === "called" ? "Currently serving" : entry.status}
+                      </span>
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </div>
         </div>
-      </div>
+      </ResponsiveZoneShell>
     );
   }
 
@@ -438,6 +536,7 @@ function MediaSlot({ items, label, queuePreview, weatherData, zone, canvasWidth,
         <img src={resolveSrc(cur)} alt={cur.name} className={`w-full h-full ${getMediaFit(cur, mediaMode)} object-center bg-black`} onError={(e) => { console.error('Media load error', resolveSrc(cur), e); handleMediaEnd(); }} />
       ) : (
         <video
+          ref={videoElemRef}
           src={resolveSrc(cur)}
           autoPlay
           muted={isMuted}
@@ -451,6 +550,7 @@ function MediaSlot({ items, label, queuePreview, weatherData, zone, canvasWidth,
       <img src={resolveSrc(cur)} alt={cur.name} className={`w-full h-full ${getMediaFit(cur, mediaMode)} object-center bg-black`} onError={(e) => { console.error('Media load error', resolveSrc(cur), e); handleMediaEnd(); }} />
     ) : (
       <video
+        ref={videoElemRef}
         src={resolveSrc(cur)}
         autoPlay
         muted={isMuted}
@@ -741,69 +841,71 @@ function AutoWidgetZone({ zone, queuePreview, payload, providerData, weatherData
   }
 
   if (role === "bookings") {
-    const rawEntries = Array.isArray(providerData?.queue_preview) && providerData.queue_preview.length > 0
-      ? providerData.queue_preview
-      : (Array.isArray(queuePreview) ? queuePreview : []);
+    const rawEntries = Array.isArray(providerData?.today_bookings_preview) && providerData.today_bookings_preview.length > 0
+      ? providerData.today_bookings_preview
+      : (Array.isArray(providerData?.queue_preview) && providerData.queue_preview.length > 0
+        ? providerData.queue_preview
+        : (Array.isArray(queuePreview) ? queuePreview : []));
     const entries = rawEntries.map((item) => ({
       token: item.token,
       name: item.patient_name || item.service_name || "Booking",
+      phone: item.patient_phone || item.phone || "—",
       time: item.assigned_time || item.preferred_time || `${item.wait_after_mins || 0} min`,
       service: item.service_type || item.service_name || "Appointment",
+      location: item.routed_location || item.booking_location || "Default location",
+      status: item.status || "pending",
+      waitAfterMins: Number(item.wait_after_mins || 0),
     }));
 
     return (
       <ResponsiveZoneShell scale={zoneScale}>
-        <div className="w-full h-full bg-[linear-gradient(180deg,#F8FAFC,#EEF2FF)] p-5 text-[#111827] flex flex-col">
-          <div className="grid h-full gap-4 lg:grid-cols-[0.85fr_1.15fr]">
-            <div className="relative overflow-hidden rounded-[2rem] border border-[#DBE4F0] bg-[linear-gradient(180deg,#0F172A,#111827)] p-5 text-white shadow-[0_20px_60px_-36px_rgba(15,23,42,0.65)]">
-            <div className="absolute -right-8 -top-8 h-24 w-24 rounded-full bg-fuchsia-400/20 blur-3xl" />
-            <div className="absolute -left-8 bottom-0 h-20 w-20 rounded-full bg-cyan-400/12 blur-3xl" />
-            <div className="relative">
-              <div className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1 text-[10px] uppercase tracking-[0.35em] text-white/65">
-                <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" /> Front desk
+        <div className="w-full h-full bg-white p-5 text-[#111827] flex flex-col">
+          <div className="h-full flex flex-col rounded-[2rem] border border-[#E5E7EB] bg-white shadow-[0_18px_40px_-24px_rgba(15,23,42,0.3)] overflow-hidden">
+            <div className="flex items-end justify-between gap-3 px-5 py-4 border-b border-[#E5E7EB] bg-[#F9FAFB]">
+              <div>
+                <div className="text-[10px] uppercase tracking-[0.4em] text-[#94A3B8]">Bookings</div>
+                <div className="mt-1 font-display text-[clamp(1.6rem,3vw,2.4rem)] font-black tracking-tight text-[#0F172A]">Today’s bookings</div>
               </div>
-              <div className="mt-4 text-[10px] uppercase tracking-[0.4em] text-white/45">{zone?.name || "Today's bookings"}</div>
-              <div className="mt-2 font-display text-[clamp(2.25rem,4vw,3.5rem)] font-black uppercase tracking-[0.08em] text-white">Booking Lane</div>
-              <div className="mt-3 text-sm text-white/70 max-w-xs">A premium guest list for appointments and walk-ins, designed for lobby screens.</div>
+              <div className="text-[10px] uppercase tracking-[0.35em] text-[#94A3B8]">Live board</div>
+            </div>
 
-              <div className="mt-8 rounded-[1.75rem] border border-white/10 bg-white/6 p-4">
-                <div className="text-[10px] uppercase tracking-[0.4em] text-white/50">Visible entries</div>
-                <div className="mt-2 font-display text-[clamp(3rem,6vw,4.5rem)] font-black tracking-tight text-white">{String(entries.length).padStart(2, "0")}</div>
-                <div className="mt-1 text-[10px] uppercase tracking-[0.35em] text-white/40">Auto refreshed</div>
-              </div>
-            </div>
-            </div>
-            <div className="rounded-[2rem] border border-white/80 bg-white/90 shadow-[0_18px_40px_-24px_rgba(15,23,42,0.3)] p-4 md:p-5 overflow-hidden">
-              <div className="flex items-end justify-between gap-3 pb-4 border-b border-[#E2E8F0]">
-                <div>
-                  <div className="text-[10px] uppercase tracking-[0.4em] text-[#94A3B8]">Queue</div>
-                  <div className="mt-1 font-display text-[clamp(1.6rem,3vw,2.4rem)] font-black tracking-tight text-[#0F172A]">Today’s bookings</div>
-                </div>
-                <div className="text-[10px] uppercase tracking-[0.35em] text-[#94A3B8]">Live board</div>
-              </div>
-              <div className="mt-4 grid gap-3 overflow-hidden">
+            <Table>
+              <TableHeader>
+                <TableRow className="bg-[#F9FAFB] hover:bg-[#F9FAFB]">
+                  <TableHead className="text-[11px] uppercase tracking-wider text-[#6B7280]">Token</TableHead>
+                  <TableHead className="text-[11px] uppercase tracking-wider text-[#6B7280]">Name</TableHead>
+                  <TableHead className="text-[11px] uppercase tracking-wider text-[#6B7280]">Phone</TableHead>
+                  <TableHead className="text-[11px] uppercase tracking-wider text-[#6B7280]">Time</TableHead>
+                  <TableHead className="text-[11px] uppercase tracking-wider text-[#6B7280]">Status</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
                 {entries.length === 0 ? (
-                  <div className="rounded-[1.5rem] border border-dashed border-[#CBD5E1] bg-[#F8FAFC] p-5 text-sm text-[#64748B]">No bookings yet.</div>
-                ) : entries.slice(0, 4).map((entry, index) => (
-                  <div key={`${entry.name}-${index}`} className="rounded-[1.5rem] border border-[#E2E8F0] bg-white px-4 py-4 shadow-[0_14px_30px_-22px_rgba(15,23,42,0.25)] flex items-center justify-between gap-4">
-                    <div className="min-w-0 flex items-center gap-4">
-                      <div className="flex h-14 w-14 shrink-0 items-center justify-center rounded-[1.25rem] bg-[linear-gradient(135deg,#111827,#334155)] text-white font-display text-base font-black tracking-tight shadow-lg">
-                        {entry.token || String(entry.name || "B").slice(0, 1).toUpperCase()}
-                      </div>
-                      <div className="min-w-0">
-                        <div className="text-[10px] uppercase tracking-[0.32em] text-[#94A3B8]">Token {entry.token || index + 1}</div>
-                        <div className="font-semibold text-lg truncate text-[#0F172A]">{entry.name}</div>
-                        <div className="mt-1 text-sm text-[#64748B] truncate">{entry.service || "Appointment"}</div>
-                      </div>
-                    </div>
-                    <div className="text-right shrink-0">
-                      <div className="inline-flex items-center rounded-full border border-[#E2E8F0] bg-[#F8FAFC] px-3 py-1 text-[10px] uppercase tracking-[0.35em] text-[#64748B]">Scheduled</div>
-                      <div className="mt-2 font-display text-[clamp(1.4rem,2.5vw,2rem)] font-black tracking-tight text-[#0F172A]">{entry.time}</div>
-                    </div>
-                  </div>
+                  <TableRow>
+                    <TableCell colSpan={5} className="text-center py-10 text-sm text-[#6B7280]">No bookings yet.</TableCell>
+                  </TableRow>
+                ) : entries.slice(0, 8).map((entry, index) => (
+                  <TableRow key={`${entry.token || entry.name}-${index}`}>
+                    <TableCell>
+                      <span className="inline-flex items-center justify-center w-9 h-9 rounded-sm bg-[#111827] text-white font-mono font-bold">
+                        {entry.token || "—"}
+                      </span>
+                    </TableCell>
+                    <TableCell>
+                      <div className="font-semibold truncate text-[#0F172A]">{entry.name}</div>
+                      <div className="text-xs text-[#6B7280] truncate">{entry.service || "Appointment"}</div>
+                    </TableCell>
+                    <TableCell className="font-mono text-xs text-[#0F172A]">{entry.phone || "—"}</TableCell>
+                    <TableCell className="font-mono text-xs text-[#0F172A]">{entry.time}</TableCell>
+                    <TableCell>
+                      <span className={`inline-flex items-center rounded-full px-2 py-1 text-[11px] uppercase tracking-wider font-semibold ${String(entry.status).toLowerCase() === "called" ? "bg-emerald-50 text-emerald-700" : String(entry.status).toLowerCase() === "completed" ? "bg-slate-50 text-slate-600" : "bg-[#F9FAFB] text-[#64748B]"}`}>
+                        {entry.status === "called" ? "Currently serving" : entry.status}
+                      </span>
+                    </TableCell>
+                  </TableRow>
                 ))}
-              </div>
-            </div>
+              </TableBody>
+            </Table>
           </div>
         </div>
       </ResponsiveZoneShell>
@@ -1158,6 +1260,12 @@ export default function SignagePlayer() {
   const [voiceError, setVoiceError] = useState("");
   const [voiceTranscript, setVoiceTranscript] = useState("");
   const voiceGreetingPlayedRef = useRef(false);
+  const queueSocketRef = useRef(null);
+  const queueSocketAttemptRef = useRef(0);
+  const queueSocketRetryRef = useRef(null);
+  const queueAnnouncementReadyRef = useRef(false);
+  const lastQueueAnnouncementKeyRef = useRef("");
+  const offlineBeaconSentRef = useRef(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [orientationOverride, setOrientationOverride] = useState("auto");
   const [hiddenZoneIds, setHiddenZoneIds] = useState([]);
@@ -1173,8 +1281,21 @@ export default function SignagePlayer() {
   // Feature flag: set to false to completely disable voice features
   const ENABLE_VOICE = false;
 
+  const isMutedRef = useRef(false);
+  const [isMuted, setIsMuted] = useState(false);
+
+  useEffect(() => {
+    isMutedRef.current = isMuted;
+  }, [isMuted]);
+
   const zonePrefsKey = useMemo(() => `signage-player-zone-prefs:${currentPairCode || "default"}`, [currentPairCode]);
   const orientationPrefsKey = useMemo(() => `signage-player-orientation:${currentPairCode || "default"}`, [currentPairCode]);
+
+  const queuePreview = useMemo(() => {
+    return Array.isArray(providerData?.queue_preview)
+      ? providerData.queue_preview
+      : (Array.isArray(payload?.queue_preview) ? payload.queue_preview : []);
+  }, [providerData?.queue_preview, payload?.queue_preview]);
 
   const toggleZoneVisibility = useCallback((zoneId) => {
     setHiddenZoneIds((current) => (
@@ -1211,6 +1332,36 @@ export default function SignagePlayer() {
     setOrientationOverride(["auto", "landscape", "portrait"].includes(mode) ? mode : "auto");
   }, []);
 
+  const sendOfflineBeacon = useCallback(() => {
+    if (!currentPairCode || offlineBeaconSentRef.current) return;
+    offlineBeaconSentRef.current = true;
+
+    try {
+      const fingerprint = getOrCreateFingerprint();
+      const target = `${BASE}/api/public/player/${encodeURIComponent(currentPairCode)}/offline?device_fingerprint=${encodeURIComponent(fingerprint)}`;
+
+      if (typeof navigator !== "undefined" && typeof navigator.sendBeacon === "function") {
+        navigator.sendBeacon(target, new Blob([""], { type: "text/plain" }));
+        return;
+      }
+
+      fetch(target, {
+        method: "POST",
+        keepalive: true,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ device_fingerprint: fingerprint }),
+      }).catch(() => {});
+    } catch {
+      // ignore offline beacon failures
+    }
+  }, [currentPairCode]);
+
+  const queueSocketUrl = useCallback(() => {
+    const baseUrl = new URL(`${BASE}/api/ws/queue/${encodeURIComponent(currentPairCode)}`);
+    baseUrl.protocol = baseUrl.protocol === "https:" ? "wss:" : "ws:";
+    return baseUrl.toString();
+  }, [currentPairCode]);
+
   // Handle pairing
   const handlePair = (code) => {
     setCurrentPairCode(code);
@@ -1229,6 +1380,12 @@ export default function SignagePlayer() {
     window.addEventListener("resize", updateViewport);
     return () => window.removeEventListener("resize", updateViewport);
   }, []);
+
+  useEffect(() => {
+    offlineBeaconSentRef.current = false;
+    queueAnnouncementReadyRef.current = false;
+    lastQueueAnnouncementKeyRef.current = "";
+  }, [currentPairCode]);
 
   useEffect(() => {
     if (showPairing && !currentPairCode) requestPairCodeAndWait();
@@ -1258,10 +1415,138 @@ export default function SignagePlayer() {
   useEffect(() => {
     if (currentPairCode && !showPairing && !showSplash) {
       poll();
-      const id = setInterval(poll, 60_000);
-      return () => clearInterval(id);
+      const connectSocket = () => {
+        if (!currentPairCode || showPairing || showSplash || typeof window === "undefined" || typeof WebSocket === "undefined") return;
+
+        const clearRetryTimer = () => {
+          if (queueSocketRetryRef.current) {
+            window.clearTimeout(queueSocketRetryRef.current);
+            queueSocketRetryRef.current = null;
+          }
+        };
+
+        const closeSocket = () => {
+          if (queueSocketRef.current) {
+            try {
+              queueSocketRef.current.onopen = null;
+              queueSocketRef.current.onmessage = null;
+              queueSocketRef.current.onerror = null;
+              queueSocketRef.current.onclose = null;
+              queueSocketRef.current.close();
+            } catch {
+              // ignore socket close failures
+            }
+            queueSocketRef.current = null;
+          }
+        };
+
+        const scheduleReconnect = () => {
+          clearRetryTimer();
+          const attempt = Math.min((queueSocketAttemptRef.current || 0) + 1, 6);
+          queueSocketAttemptRef.current = attempt;
+          const delay = Math.min(30_000, 1000 * (2 ** Math.max(0, attempt - 1)));
+          queueSocketRetryRef.current = window.setTimeout(connectSocket, delay);
+        };
+
+        clearRetryTimer();
+        closeSocket();
+
+        try {
+          const socket = new WebSocket(queueSocketUrl());
+          queueSocketRef.current = socket;
+
+          socket.onopen = () => {
+            queueSocketAttemptRef.current = 0;
+            try {
+              socket.send(JSON.stringify({ type: "subscribe", client_id: currentPairCode }));
+            } catch {
+              // ignore subscribe failures
+            }
+            poll();
+          };
+
+          socket.onmessage = () => {
+            poll();
+          };
+
+          socket.onerror = () => {
+            // reconnect handled by onclose
+          };
+
+          socket.onclose = () => {
+            if (!currentPairCode || showPairing || showSplash) return;
+            scheduleReconnect();
+          };
+        } catch {
+          scheduleReconnect();
+        }
+      };
+
+      connectSocket();
+
+      const id = setInterval(poll, 15_000);
+      const handleVisibilityChange = () => {
+        if (document.visibilityState === "visible") poll();
+      };
+
+      document.addEventListener("visibilitychange", handleVisibilityChange);
+      window.addEventListener("pagehide", sendOfflineBeacon);
+      window.addEventListener("beforeunload", sendOfflineBeacon);
+
+      return () => {
+        clearInterval(id);
+        document.removeEventListener("visibilitychange", handleVisibilityChange);
+        window.removeEventListener("pagehide", sendOfflineBeacon);
+        window.removeEventListener("beforeunload", sendOfflineBeacon);
+        if (queueSocketRetryRef.current) {
+          window.clearTimeout(queueSocketRetryRef.current);
+          queueSocketRetryRef.current = null;
+        }
+        if (queueSocketRef.current) {
+          try {
+            queueSocketRef.current.close();
+          } catch {
+            // ignore socket close failures
+          }
+          queueSocketRef.current = null;
+        }
+      };
     }
-  }, [poll, currentPairCode, showPairing, showSplash]);
+  }, [poll, currentPairCode, queueSocketUrl, sendOfflineBeacon, showPairing, showSplash]);
+
+  useEffect(() => {
+    if (!currentPairCode || showPairing || showSplash) return;
+    const lead = queuePreview?.find((item) => String(item?.status || "").toLowerCase() === "called") || queuePreview?.[0] || null;
+    const announcement = buildQueueAnnouncement(lead);
+
+    if (!announcement) {
+      queueAnnouncementReadyRef.current = true;
+      lastQueueAnnouncementKeyRef.current = "";
+      return;
+    }
+
+    if (!queueAnnouncementReadyRef.current) {
+      queueAnnouncementReadyRef.current = true;
+      lastQueueAnnouncementKeyRef.current = announcement.key;
+      return;
+    }
+
+    if (lastQueueAnnouncementKeyRef.current === announcement.key) return;
+    lastQueueAnnouncementKeyRef.current = announcement.key;
+
+    try {
+      if (typeof window !== "undefined" && window.speechSynthesis) {
+        const utter = new SpeechSynthesisUtterance(announcement.text);
+        utter.lang = navigator.language || "en-US";
+        utter.rate = 0.95;
+        utter.pitch = 1;
+        window.speechSynthesis.cancel();
+        window.speechSynthesis.speak(utter);
+      }
+    } catch {
+      // ignore speech synthesis failures
+    }
+  }, [currentPairCode, queuePreview, showPairing, showSplash]);
 
   // Load preferences after pairing
   useEffect(() => {
@@ -1818,9 +2103,8 @@ export default function SignagePlayer() {
   const shouldCompactLayout = fillBlankSpaces && hiddenZoneIds.length > 0;
   const zoneEntries = visibleZoneDefs.map((zone) => ({ zone, items: payload?.zones?.[zone.id] || [] }));
   const hasContent = zoneEntries.some(({ items }) => items.length > 0);
-  const queuePreview = Array.isArray(providerData?.queue_preview)
-    ? providerData.queue_preview
-    : (Array.isArray(payload?.queue_preview) ? payload.queue_preview : []);
+  const subscriptionActive = payload?.subscription_active !== false;
+  const subscriptionReason = payload?.subscription_reason || payload?.message || "Subscription expired";
   const notices = Array.isArray(providerData?.notices)
     ? providerData.notices
     : (Array.isArray(payload?.notices) ? payload.notices : []);
@@ -1848,6 +2132,20 @@ export default function SignagePlayer() {
     <div ref={wrapRef} className="min-h-screen bg-black text-white flex flex-col" data-testid="signage-player">
       <div className="flex-1 relative min-h-0 bg-black overflow-hidden">
         <div className={`absolute ${effectiveOrientation === "portrait" ? "" : "inset-0"}`} style={contentStyle}>
+          {!subscriptionActive ? (
+            <div className="w-full h-full flex items-center justify-center bg-[radial-gradient(circle_at_top,_rgba(239,68,68,0.18),_transparent_38%),linear-gradient(180deg,#111827,#0B1120)] p-8 text-center">
+              <div className="max-w-xl rounded-[2rem] border border-white/10 bg-white/5 px-8 py-10 shadow-[0_30px_80px_-40px_rgba(0,0,0,0.5)]">
+                <div className="text-[10px] uppercase tracking-[0.45em] text-red-200/70">Playback blocked</div>
+                <h1 className="mt-3 font-display text-4xl font-black tracking-tight">{subscriptionReason}</h1>
+                <p className="mt-4 text-sm leading-6 text-white/70">
+                  This signage player is inactive until the subscription is renewed or the account is reactivated. Your client panel remains accessible for account management.
+                </p>
+                <div className="mt-6 inline-flex items-center gap-2 rounded-full border border-red-300/20 bg-red-500/10 px-4 py-2 text-xs uppercase tracking-[0.3em] text-red-100">
+                  <span className="h-2 w-2 rounded-full bg-red-400" /> Subscription required
+                </div>
+              </div>
+            </div>
+          ) : null}
           {overlay ? (
             overlay.takeover ? (
               <div className="absolute inset-0 z-40 flex items-center justify-center pointer-events-auto">
@@ -1914,7 +2212,7 @@ export default function SignagePlayer() {
             )
           ) : null}
 
-          {!hasContent ? (
+          {subscriptionActive && !hasContent ? (
             <div className="w-full h-full flex items-center justify-center">
               <div className="text-center max-w-md p-8">
                 <div className="text-[10px] uppercase tracking-[0.25em] text-white/40 mb-3">No content scheduled</div>
@@ -1996,6 +2294,8 @@ export default function SignagePlayer() {
                           canvasWidth={canvasWidth}
                           canvasHeight={canvasHeight}
                           viewportScale={viewportScale}
+                          isMuted={isMuted}
+                          isMutedRef={isMutedRef}
                           mediaMode={zoneMediaModes?.[zone.id] || getDefaultZoneMediaMode(zone)}
                         />
                       )}
@@ -2030,6 +2330,8 @@ export default function SignagePlayer() {
                       canvasWidth={canvasWidth}
                       canvasHeight={canvasHeight}
                       viewportScale={viewportScale}
+                      isMuted={isMuted}
+                      isMutedRef={isMutedRef}
                       mediaMode={zoneMediaModes?.[zone.id] || getDefaultZoneMediaMode(zone)}
                     />
                   )}
@@ -2088,6 +2390,13 @@ export default function SignagePlayer() {
                         className="inline-flex items-center justify-center gap-2 rounded-2xl border border-white/10 bg-white/5 px-3 py-2.5 text-sm font-medium text-white hover:bg-white/10 col-span-2"
                       >
                         <Smartphone className="h-4 w-4" /> Change Device
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setIsMuted((m) => !m)}
+                        className="inline-flex items-center justify-center gap-2 rounded-2xl border border-white/10 bg-white/5 px-3 py-2.5 text-sm font-medium text-white hover:bg-white/10"
+                      >
+                        {isMuted ? "Unmute" : "Mute"}
                       </button>
                       <button
                         type="button"

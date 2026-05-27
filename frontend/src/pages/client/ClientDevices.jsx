@@ -10,6 +10,8 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from ".
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "../../components/ui/dropdown-menu";
 import { Plus, MoreVertical, Pencil, Trash2, Monitor, ExternalLink, Copy } from "lucide-react";
 import { toast } from "sonner";
+import StatusBadge from "../../components/StatusBadge";
+import DeviceLiveBadge from "../../components/DeviceLiveBadge";
 
 const empty = { name: "", location: "", pair_code: "", template_id: "", brightness: 100 };
 
@@ -49,12 +51,23 @@ export default function ClientDevices() {
     catch (e) { toast.error(formatErr(e.response?.data?.detail)); }
   };
 
+  const unpair = async (device) => {
+    if (!window.confirm(`Unpair ${device.name}?`)) return;
+    try {
+      await api.post(`/client/devices/${device.id}/unpair`);
+      toast.success("Device unpaired");
+      load();
+    } catch (e) {
+      toast.error(formatErr(e.response?.data?.detail));
+    }
+  };
+
   const tplName = (id) => templates.find((t) => t.id === id)?.name || "—";
   const playlistName = (id) => playlists.find((p) => p.id === id)?.name || "—";
 
   return (
     <div data-testid="client-devices-page">
-      <PageHeader overline="Client / Devices" title="Signage screens." subtitle="Pair your screens and assign a template to each.">
+      <PageHeader overline="Client / Devices" title="Signage screens." subtitle="Create screens here, then share the pair code with your dealer so they can complete pairing.">
         <Button onClick={openCreate} className="rounded-sm bg-[#111827] hover:bg-[#374151] text-white" data-testid="create-device-btn">
           <Plus className="w-4 h-4 mr-2" /> Pair Screen
         </Button>
@@ -72,11 +85,12 @@ export default function ClientDevices() {
               <TableHead className="text-[11px] uppercase tracking-wider text-[#6B7280]">Orientation</TableHead>
               <TableHead className="text-[11px] uppercase tracking-wider text-[#6B7280] text-right">Brightness</TableHead>
               <TableHead className="text-[11px] uppercase tracking-wider text-[#6B7280]">Status</TableHead>
+              <TableHead className="text-[11px] uppercase tracking-wider text-[#6B7280]">Live</TableHead>
               <TableHead className="w-12"></TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
-            {items.length === 0 && <TableRow><TableCell colSpan={9} className="text-center py-10 text-sm text-[#6B7280]">No devices yet.</TableCell></TableRow>}
+            {items.length === 0 && <TableRow><TableCell colSpan={10} className="text-center py-10 text-sm text-[#6B7280]">No devices yet.</TableCell></TableRow>}
             {items.map((d) => (
               <TableRow key={d.id} data-testid={`device-row-${d.id}`}>
                 <TableCell className="font-mono text-[11px] text-[#6B7280]">{d.id}</TableCell>
@@ -99,8 +113,14 @@ export default function ClientDevices() {
                 <TableCell className="text-sm">{playlistName(d.playlist_id)}</TableCell>
                 <TableCell className="text-sm capitalize">{d.orientation || "auto"}</TableCell>
                 <TableCell className="text-right font-mono text-xs">{Number(d.brightness ?? 100)}%</TableCell>
-                <TableCell><span className="text-[11px] uppercase tracking-wider font-semibold text-[#374151]">{d.status}</span></TableCell>
+                <TableCell><StatusBadge status={d.status} /></TableCell>
+                <TableCell><DeviceLiveBadge status={d.status} lastSeen={d.last_seen} /></TableCell>
                 <TableCell>
+                  {d.status === "paired" ? (
+                    <Button size="sm" variant="outline" className="rounded-sm mr-1" onClick={() => unpair(d)} data-testid={`unpair-device-${d.id}`}>
+                      Unpair
+                    </Button>
+                  ) : null}
                   <a href={`/play/${d.pair_code}`} target="_blank" rel="noreferrer" className="inline-flex items-center text-xs px-2 py-1 border border-[#E5E7EB] rounded-sm hover:bg-[#F3F4F6] mr-1" data-testid={`open-player-${d.id}`}>
                     <ExternalLink className="w-3 h-3 mr-1" /> Player
                   </a>
@@ -108,15 +128,6 @@ export default function ClientDevices() {
                     <DropdownMenuTrigger asChild><Button variant="ghost" size="icon"><MoreVertical className="w-4 h-4" /></Button></DropdownMenuTrigger>
                     <DropdownMenuContent align="end" className="rounded-sm">
                         <DropdownMenuItem onClick={() => openEdit(d)} data-testid={`edit-device-${d.id}`}><Pencil className="w-3.5 h-3.5 mr-2" /> Edit</DropdownMenuItem>
-                        <DropdownMenuItem onClick={async () => {
-                          const code = window.prompt('Enter device-generated pair code to complete pairing:');
-                          if (!code) return;
-                          try {
-                            await api.post('/client/pair/complete', { pair_code: code.trim(), device_id: d.id });
-                            toast.success('Device paired successfully');
-                            load();
-                          } catch (e) { toast.error(formatErr(e.response?.data?.detail)); }
-                        }} data-testid={`complete-pair-${d.id}`}><Copy className="w-3.5 h-3.5 mr-2" /> Complete Pairing</DropdownMenuItem>
                         <DropdownMenuItem onClick={() => remove(d.id)} className="text-red-600" data-testid={`delete-device-${d.id}`}><Trash2 className="w-3.5 h-3.5 mr-2" /> Remove</DropdownMenuItem>
                     </DropdownMenuContent>
                   </DropdownMenu>

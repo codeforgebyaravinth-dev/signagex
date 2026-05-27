@@ -17,6 +17,7 @@ import {
 } from "../../components/ui/dropdown-menu";
 import { Plus, MoreVertical, Pencil, Trash2, Wallet, Search, Pause, Play } from "lucide-react";
 import { toast } from "sonner";
+import { formatDateTime } from "../../lib/utils";
 
 const GST_RE = /^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][0-9A-Z]Z[0-9A-Z]$/;
 
@@ -168,7 +169,13 @@ export default function AdminDealers() {
                   {d.address && <div className="text-xs text-[#9CA3AF] mt-1">{d.address}</div>}
                 </TableCell>
                 <TableCell className="font-mono text-xs">{d.gst_number || "—"}</TableCell>
-                <TableCell><PlanBadge plan={d.plan} /></TableCell>
+                <TableCell>
+                  <div className="space-y-1">
+                    <PlanBadge plan={d.plan} />
+                    <div className="text-xs text-[#6B7280]">Start {formatDateTime(d.plan_started_at || d.created_at)}</div>
+                    <div className="text-xs text-[#6B7280]">End {formatDateTime(d.plan_expires_at)}</div>
+                  </div>
+                </TableCell>
                 <TableCell><StatusBadge status={d.status} /></TableCell>
                 <TableCell className="text-right font-mono">₹ {Number(d.wallet_balance || 0).toLocaleString()}</TableCell>
                 <TableCell>

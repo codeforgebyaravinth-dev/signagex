@@ -508,6 +508,9 @@ export default function PublicBooking() {
                 <div className="absolute inset-x-0 bottom-0 p-6 text-white">
                   <div className="text-[11px] font-semibold uppercase tracking-[0.25em] text-white/65 mb-2">{providerLabel}</div>
                   <h1 className="font-display text-4xl md:text-5xl font-extrabold tracking-tighter max-w-2xl">{doc.name}</h1>
+                  {profile.specialty ? (
+                    <p className="mt-2 max-w-2xl text-sm md:text-base font-semibold text-white/90">{profile.specialty}</p>
+                  ) : null}
                   <p className="mt-3 max-w-2xl text-sm md:text-base text-white/80">{profile.description || (isSalon ? "Curated cuts, styling, and premium grooming appointments." : "Elegant appointments, trusted care, and quick booking.")}</p>
                 </div>
               </div>

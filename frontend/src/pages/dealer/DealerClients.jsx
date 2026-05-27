@@ -18,6 +18,7 @@ import {
 } from "../../components/ui/dropdown-menu";
 import { Plus, MoreVertical, Pencil, Trash2, Wallet, Search, FileVideo, Pause, Play } from "lucide-react";
 import { toast } from "sonner";
+import { formatDateTime } from "../../lib/utils";
 
 const GST_RE = /^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][0-9A-Z]Z[0-9A-Z]$/;
 
@@ -38,8 +39,9 @@ function isValidGst(value) {
 
 const empty = {
   name: "", email: "", password: "", phone: "", gst_number: "", address: "",
-  plan: "cloud", vertical: "general", wallet_balance: 0, assigned_template_ids: [],
+  plan: "cloud", plan_id: "", vertical: "general", wallet_balance: 0, assigned_template_ids: [],
 };
+
 
 const VERTICALS = [
   { value: "general", label: "General signage" },
@@ -52,6 +54,7 @@ const VERTICALS = [
 export default function DealerClients() {
   const [items, setItems] = useState([]);
   const [templates, setTemplates] = useState([]);
+  const [plans, setPlans] = useState([]);
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState(null);
   const [form, setForm] = useState(empty);
@@ -65,8 +68,8 @@ export default function DealerClients() {
 
   const load = async () => {
     try {
-      const [c, t] = await Promise.all([api.get("/dealer/clients"), api.get("/dealer/templates")]);
-      setItems(c.data); setTemplates(t.data);
+      const [c, t, p] = await Promise.all([api.get("/dealer/clients"), api.get("/dealer/templates"), api.get("/dealer/plans")]);
+      setItems(c.data); setTemplates(t.data); setPlans(p.data || []);
     } catch {}
   };
   useEffect(() => { load(); }, []);
@@ -193,7 +196,25 @@ export default function DealerClients() {
                   <div className="text-xs text-[#6B7280]">{c.email}</div>
                 </TableCell>
                 <TableCell className="font-mono text-xs">{c.gst_number || "—"}</TableCell>
-                <TableCell><PlanBadge plan={c.plan} /></TableCell>
+                <TableCell>
+                  {c.plan_id ? (
+                    (() => {
+                      const p = plans.find((x) => x.id === c.plan_id);
+                      return p ? (
+                        <div className="space-y-1">
+                          <div className="font-semibold text-sm">{p.name}</div>
+                          <div className="text-xs text-[#6B7280]">₹{Number(p.price || 0).toLocaleString()}{p.billing_cycle ? `/${p.billing_cycle}` : ''}</div>
+                          <div className="text-xs text-[#6B7280]">Start {formatDateTime(c.plan_started_at || c.created_at)}</div>
+                          <div className="text-xs text-[#6B7280]">End {formatDateTime(c.plan_expires_at || c.subscription_expires_at)}</div>
+                        </div>
+                      ) : (
+                        <PlanBadge plan={c.plan} />
+                      );
+                    })()
+                  ) : (
+                    <PlanBadge plan={c.plan} />
+                  )}
+                </TableCell>
                 <TableCell><StatusBadge status={c.status} /></TableCell>
                 <TableCell className="text-center font-mono text-sm">{c.assigned_template_ids?.length || 0}</TableCell>
                 <TableCell className="text-right font-mono">₹ {Number(c.wallet_balance || 0).toLocaleString()}</TableCell>
@@ -283,6 +304,20 @@ export default function DealerClients() {
               {errors.gst_number && <div className="mt-1 text-xs text-red-600">{errors.gst_number}</div>}
             </div>
             <div>
+              <Label className="text-xs uppercase tracking-wider text-[#6B7280]">Subscription plan</Label>
+              <Select value={form.plan_id || "__none__"} onValueChange={(v) => {
+                const plan_id = v === "__none__" ? "" : v;
+                const planType = plan_id ? (plans.find(p => p.id === plan_id) || {}).type : form.plan;
+                setForm({ ...form, plan_id: plan_id, plan: planType });
+              }}>
+                <SelectTrigger className="rounded-sm" data-testid="client-subscription-plan"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="__none__">No subscription (choose plan type)</SelectItem>
+                  {plans.map((p) => <SelectItem key={p.id} value={p.id}>{p.name} — ₹{p.price}{p.billing_cycle ? `/${p.billing_cycle}` : ''}</SelectItem>)}
+                </SelectContent>
+              </Select>
+            </div>
+            <div>
               <Label className="text-xs uppercase tracking-wider text-[#6B7280]">Plan</Label>
               <Select value={form.plan} onValueChange={(v) => setForm({ ...form, plan: v })}>
                 <SelectTrigger className="rounded-sm" data-testid="client-plan"><SelectValue /></SelectTrigger>
@@ -308,6 +343,18 @@ export default function DealerClients() {
               <div className="col-span-2">
                 <Label className="text-xs uppercase tracking-wider text-[#6B7280]">Initial Wallet ₹</Label>
                 <Input type="number" min="0" value={form.wallet_balance} onChange={(e) => setForm({ ...form, wallet_balance: parseFloat(e.target.value || 0) })} className="rounded-sm" data-testid="client-wallet" />
+              </div>
+            )}
+            {editing && (
+              <div className="col-span-2 grid grid-cols-2 gap-4">
+                <div className="rounded-sm border border-[#E5E7EB] bg-[#F9FAFB] p-3">
+                  <div className="text-[10px] uppercase tracking-wider text-[#6B7280]">Start date</div>
+                  <div className="mt-1 text-sm font-semibold">{formatDateTime(editing.plan_started_at || editing.created_at)}</div>
+                </div>
+                <div className="rounded-sm border border-[#E5E7EB] bg-[#F9FAFB] p-3">
+                  <div className="text-[10px] uppercase tracking-wider text-[#6B7280]">End date</div>
+                  <div className="mt-1 text-sm font-semibold">{formatDateTime(editing.plan_expires_at || editing.subscription_expires_at)}</div>
+                </div>
               </div>
             )}
             <div className="col-span-2">
