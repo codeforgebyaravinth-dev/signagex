@@ -2,6 +2,7 @@
 
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io' show WebSocket;
 import 'dart:math';
 
 import 'package:flutter/foundation.dart' show compute, kDebugMode, kIsWeb;
@@ -13,6 +14,7 @@ import 'package:http/http.dart' as http;
 import 'package:marquee/marquee.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:video_player/video_player.dart';
+import 'package:flutter_tts/flutter_tts.dart';
 import 'package:youtube_player_flutter/youtube_player_flutter.dart';
 
 void main() {
@@ -100,9 +102,17 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
   Timer? providerTimer;
   Timer? weatherTimer;
   Timer? menuButtonHideTimer;
+  // WebSocket + announcement state
+  WebSocket? _queueSocket;
+  Timer? _queueSocketRetryTimer;
+  int _queueSocketAttempt = 0;
+  String _lastQueueAnnouncementKey = '';
+  bool _queueAnnouncementReady = false;
+  FlutterTts? _flutterTts;
+  bool _ttsReady = false;
   String apiBase = const String.fromEnvironment(
     'BACKEND_URL',
-    defaultValue: 'https://rpsignage.com',
+    defaultValue: 'http://10.18.51.60:8000',
   );
   Size viewportSize = Size.zero;
 
@@ -113,6 +123,19 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
     _updateViewportSize();
     _loadPreferences();
     _applyAndroidKioskMode();
+    _initTts();
+  }
+
+  Future<void> _initTts() async {
+    try {
+      _flutterTts = FlutterTts();
+      await _flutterTts?.setLanguage('en-US');
+      await _flutterTts?.setSpeechRate(0.95);
+      await _flutterTts?.setPitch(1.0);
+      _ttsReady = true;
+    } catch (e) {
+      _ttsReady = false;
+    }
   }
 
   @override
@@ -122,6 +145,8 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
     providerTimer?.cancel();
     weatherTimer?.cancel();
     menuButtonHideTimer?.cancel();
+    _disconnectQueueSocket();
+    try { _flutterTts?.stop(); } catch (_) {}
     super.dispose();
   }
 
@@ -302,7 +327,7 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
 
   String _normalizedApiBase() {
     final trimmed = apiBase.trim();
-    final fallback = trimmed.isEmpty ? 'https://rpsignage.com' : trimmed;
+    final fallback = trimmed.isEmpty ? 'http://10.18.51.60:8000' : trimmed;
     final withoutSlash = fallback.replaceAll(RegExp(r'/$'), '');
     return withoutSlash.replaceAll(RegExp(r'/api$'), '');
   }
@@ -334,6 +359,10 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
           errorMessage = "";
           pairingError = "";
         });
+
+        // After payload update: attempt websocket connect and evaluate announcements
+        unawaited(_maybeAnnounceQueue());
+        unawaited(_connectQueueSocket());
 
         await _loadZonePreferences();
 
@@ -404,6 +433,128 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
         }
       }
     });
+  }
+
+  String _queueSocketUrl() {
+    final base = _normalizedApiBase();
+    final url = '$base/api/ws/queue/${Uri.encodeComponent(currentPairCode ?? '')}';
+    if (url.startsWith('https:')) return url.replaceFirst('https:', 'wss:');
+    if (url.startsWith('http:')) return url.replaceFirst('http:', 'ws:');
+    return url;
+  }
+
+  Future<void> _connectQueueSocket() async {
+    if (currentPairCode == null) return;
+    try {
+      _queueSocketRetryTimer?.cancel();
+      // If already connected, noop
+      if (_queueSocket != null) return;
+      final url = _queueSocketUrl();
+      _logDebug('connecting queue socket $url');
+      final socket = await WebSocket.connect(url).timeout(const Duration(seconds: 8));
+      _queueSocket = socket;
+      _queueSocketAttempt = 0;
+
+      // send subscribe
+      try {
+        socket.add(json.encode({'type': 'subscribe', 'client_id': currentPairCode}));
+      } catch (e) {}
+
+      socket.listen((message) {
+        unawaited(_poll());
+      }, onDone: () {
+        _logDebug('queue socket closed');
+        _queueSocket = null;
+        _scheduleQueueSocketReconnect();
+      }, onError: (err) {
+        _logDebug('queue socket error: $err');
+        _queueSocket = null;
+        _scheduleQueueSocketReconnect();
+      }, cancelOnError: true);
+    } catch (e) {
+      _logDebug('queue socket connect failed: $e');
+      _scheduleQueueSocketReconnect();
+    }
+  }
+
+  void _scheduleQueueSocketReconnect() {
+    _queueSocketRetryTimer?.cancel();
+    _queueSocketAttempt = (_queueSocketAttempt + 1).clamp(0, 6);
+    final delayMs = min(30_000, 1000 * (1 << max(0, _queueSocketAttempt - 1)));
+    _queueSocketRetryTimer = Timer(Duration(milliseconds: delayMs), () {
+      if (currentPairCode != null && !showPairing && !showSplash) {
+        unawaited(_connectQueueSocket());
+      }
+    });
+  }
+
+  void _disconnectQueueSocket() {
+    try {
+      _queueSocketRetryTimer?.cancel();
+      _queueSocketRetryTimer = null;
+      if (_queueSocket != null) {
+        try {
+          _queueSocket?.close();
+        } catch (_) {}
+        _queueSocket = null;
+      }
+    } catch (_) {}
+  }
+
+  Future<void> _maybeAnnounceQueue() async {
+    try {
+      final queuePreview = _getQueuePreview();
+      final lead = queuePreview.firstWhere((item) {
+        final status = (item['status'] ?? '').toString().toLowerCase();
+        return status == 'called';
+      }, orElse: () => queuePreview.isNotEmpty ? queuePreview.first : null);
+
+      final announcement = _buildQueueAnnouncement(lead);
+      if (announcement == null) {
+        _queueAnnouncementReady = true;
+        _lastQueueAnnouncementKey = '';
+        return;
+      }
+
+      if (!_queueAnnouncementReady) {
+        _queueAnnouncementReady = true;
+        _lastQueueAnnouncementKey = announcement['key'] ?? '';
+        return;
+      }
+
+      if (_lastQueueAnnouncementKey == (announcement['key'] ?? '')) return;
+      _lastQueueAnnouncementKey = (announcement['key'] ?? '');
+
+      final text = announcement['text'] ?? '';
+      if (text.isNotEmpty) {
+        await _speak(text);
+      }
+    } catch (e) {
+      // ignore
+    }
+  }
+
+  Map<String, String>? _buildQueueAnnouncement(dynamic entry) {
+    if (entry == null) return null;
+    final token = (entry['token'] ?? entry['token_no'] ?? entry['number'] ?? entry['queue_number'] ?? '').toString().trim();
+    if (token.isEmpty) return null;
+
+    final status = (entry['status'] ?? '').toString().toLowerCase();
+    if (status != 'called') return null;
+
+    final recallCount = int.tryParse((entry['recall_count'] ?? '0').toString()) ?? 0;
+    final isRecall = recallCount > 0 || (entry['recalled_at'] != null);
+    final key = '${token}:${status}:${recallCount}:${entry['recalled_at'] ?? ''}';
+    final text = isRecall ? 'Recall for token $token. Please return to the counter.' : 'Token $token, please proceed to the counter.';
+    return {'key': key, 'text': text};
+  }
+
+  Future<void> _speak(String text) async {
+    if (!_ttsReady || _flutterTts == null) return;
+    try {
+      await _flutterTts?.stop();
+      await _flutterTts?.speak(text);
+    } catch (_) {}
   }
 
   Future<void> _checkWeatherZones() async {
@@ -1048,12 +1199,84 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
                   Positioned.fill(
                     child: _buildMenuOverlay(zoneDefs, payloadBrightness, effectiveBrightnessPercent),
                   ),
+                // Show subscription-required takeover if subscription inactive
+                if ((payload?['subscription_active'] ?? true) == false)
+                  Positioned.fill(
+                    child: _buildSubscriptionOverlay(payload?['subscription_reason'] ?? payload?['message'] ?? 'Subscription expired'),
+                  ),
               ],
             ),
           ),
         ),
       ),
     );
+  }
+
+  Widget _buildSubscriptionOverlay(String reason) {
+    return Container(
+      color: Colors.black,
+      child: Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.block, size: 84, color: Colors.white24),
+            const SizedBox(height: 12),
+            Text(
+              reason,
+              textAlign: TextAlign.center,
+              style: const TextStyle(fontSize: 28, fontWeight: FontWeight.w900, color: Colors.white),
+            ),
+            const SizedBox(height: 8),
+            const Text(
+              'This signage player is inactive until the subscription is renewed or the account is reactivated.',
+              textAlign: TextAlign.center,
+              style: TextStyle(color: Colors.white70),
+            ),
+            const SizedBox(height: 20),
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                ElevatedButton(
+                  onPressed: () async {
+                    await _performLocalUnpair();
+                  },
+                  style: ElevatedButton.styleFrom(backgroundColor: Colors.white24, foregroundColor: Colors.white),
+                  child: const Text('Unpair Device'),
+                ),
+                const SizedBox(width: 12),
+                ElevatedButton(
+                  onPressed: () async {
+                    // Re-request pairing (show pairing screen)
+                    setState(() {
+                      showPairing = true;
+                    });
+                  },
+                  style: ElevatedButton.styleFrom(backgroundColor: Colors.transparent, foregroundColor: Colors.white),
+                  child: const Text('Re-pair'),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _performLocalUnpair() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.remove('pairCode');
+      await prefs.remove('device_fingerprint');
+      // reset local state and go to pairing
+      setState(() {
+        currentPairCode = null;
+        showPairing = true;
+        payload = null;
+      });
+      _disconnectQueueSocket();
+      // request a fresh pair code flow
+      unawaited(_requestPairCodeAndWait());
+    } catch (e) {}
   }
 
   int _normalizeRotation(dynamic value) {
@@ -4034,7 +4257,7 @@ class _MediaSlotState extends State<MediaSlot> {
       return candidate;
     }
 
-    final base = 'https://rpsignage.com';
+    final base = 'http://10.18.51.60:8000';
     if (candidate.startsWith('/')) return '$base$candidate';
     return '$base/$candidate';
   }

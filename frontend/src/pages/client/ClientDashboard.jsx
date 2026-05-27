@@ -39,9 +39,14 @@ export default function ClientDashboard() {
   }, []);
 
   const subscriptionPlan = subscription?.plan || null;
-  const subscriptionStartedAt = subscription?.started_at || subscriptionPlan?.started_at || subscriptionPlan?.plan_started_at || null;
-  const subscriptionExpiresAt = subscription?.expires_at || subscriptionPlan?.expires_at || subscriptionPlan?.valid_till || subscriptionPlan?.plan_expires_at || null;
+  const subscriptionStartedAt = subscription?.started_at || subscription?.plan_started_at || subscriptionPlan?.started_at || subscriptionPlan?.plan_started_at || null;
+  const subscriptionExpiresAt = subscription?.expires_at || subscription?.plan_expires_at || subscription?.subscription_expires_at || subscriptionPlan?.expires_at || subscriptionPlan?.valid_till || subscriptionPlan?.plan_expires_at || null;
   const subscriptionActive = subscription?.active ?? null;
+  const subscriptionStatus = subscription?.suspended
+    ? "Suspended"
+    : subscription?.expired || subscriptionActive === false
+      ? "Expired"
+      : "Active";
 
   return (
     <div data-testid="client-dashboard">
@@ -73,9 +78,9 @@ export default function ClientDashboard() {
               <div className="text-[11px] font-semibold uppercase tracking-[0.2em] text-[#6B7280] mb-1">Subscription</div>
               <h3 className="font-display text-2xl font-extrabold tracking-tight">Plan details and expiry</h3>
             </div>
-            <div className={`inline-flex items-center gap-2 rounded-full px-3 py-1.5 text-[11px] font-semibold uppercase tracking-wider ${subscriptionActive ? "bg-emerald-50 text-emerald-700 border border-emerald-200" : "bg-red-50 text-red-700 border border-red-200"}`}>
+            <div className={`inline-flex items-center gap-2 rounded-full px-3 py-1.5 text-[11px] font-semibold uppercase tracking-wider ${subscriptionStatus === "Active" ? "bg-emerald-50 text-emerald-700 border border-emerald-200" : "bg-red-50 text-red-700 border border-red-200"}`}>
               <ShieldCheck className="w-3.5 h-3.5" />
-              {subscriptionActive ? "Active" : "Inactive"}
+              {subscriptionStatus}
             </div>
           </div>
 
@@ -124,7 +129,7 @@ export default function ClientDashboard() {
             <div className="space-y-3">
               <div className="flex items-center justify-between border-b border-white/10 pb-2 text-sm">
                 <span className="text-white/70">Subscription</span>
-                <span className="font-semibold">{subscriptionActive ? "Active" : "Inactive"}</span>
+                <span className="font-semibold">{subscriptionStatus}</span>
               </div>
               <div className="flex items-center justify-between border-b border-white/10 pb-2 text-sm">
                 <span className="text-white/70">Plan</span>

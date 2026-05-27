@@ -2090,13 +2090,21 @@ async def get_client_subscription(user: dict = Depends(require_role("client", al
     if not client:
         raise HTTPException(status_code=404, detail="Client not found")
     state = await _client_funding_state(client)
+    expires_at = (
+        client.get("plan_expires_at")
+        or state["expires"]
+        or (state["plan"] or {}).get("expires_at")
+        or (state["plan"] or {}).get("valid_till")
+    )
     return {
         "active": state["active"],
         "plan": state["plan"],
         "wallet_balance": state["wallet_balance"],
         "required_amount": state["required_amount"],
         "started_at": client.get("plan_started_at"),
-        "expires_at": state["expires"],
+        "expires_at": expires_at,
+        "plan_started_at": client.get("plan_started_at"),
+        "plan_expires_at": expires_at,
         "expired": state["expired"],
         "suspended": state["suspended"],
         "client_status": state["client_status"],
