@@ -665,15 +665,21 @@ async def _resolve_public_client_ref(ref: str) -> dict:
     if not ref:
         raise HTTPException(status_code=404, detail="Provider not found")
 
-    direct = await db.clients.find_one({"id": ref}, {"_id": 0, "password_hash": 0})
+    direct = await db.clients.find_one({"id": ref}, {"id": 1, "name": 1, "public_booking_slug": 1, "vertical": 1})
     if direct:
         return direct
 
     slug = _slugify_public_ref(ref)
     if not slug:
         raise HTTPException(status_code=404, detail="Provider not found")
+    # First try explicit stored slug on the client document
+    candidate = await db.clients.find_one({"public_booking_slug": slug}, {"id": 1, "name": 1, "public_booking_slug": 1, "vertical": 1})
+    if candidate:
+        return candidate
 
-    candidates = await db.clients.find({"vertical": {"$in": ["doctor", "salon"]}}, {"_id": 0, "password_hash": 0, "name": 1}).to_list(2000)
+    # Fall back to slugifying the name and scanning all clients for a match
+    # Fetch only required fields (use inclusion-only projection to avoid MongoDB projection errors)
+    candidates = await db.clients.find({}, {"id": 1, "name": 1, "public_booking_slug": 1, "vertical": 1}).to_list(2000)
     for candidate in candidates:
         if _slugify_public_ref(candidate.get("name", "")) == slug:
             return candidate
@@ -1132,7 +1138,6 @@ async def _unpair_device(device_filter: dict):
         {"$set": {"status": "unpaired", "last_seen": None}, "$unset": {"fingerprint": "", "paired_at": ""}},
     )
     return {"ok": True, "device_id": device["id"], "status": "unpaired"}
-
 
 # Public: device requests a short-lived pairing code that must be entered in the client panel
 @public_api.post("/pair/request")

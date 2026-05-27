@@ -147,6 +147,7 @@ export default function PublicBooking() {
   const approxWaitMinutes = filteredQueuePreview.reduce((sum, item) => sum + Math.max(5, Number(item?.service_duration_mins || profile.slot_minutes || 15)), 0) + Number(selectedServiceDuration || 15);
   const availableSlots = useMemo(() => {
     const slotMinutes = Math.max(5, Number(selectedServiceDuration || profile.slot_minutes || 15));
+    const dayEndMinutes = 24 * 60;
     const occupied = filteredQueuePreview
       .map((item) => {
         const start = parseTimeToMinutes(item.assigned_time || item.preferred_time);
@@ -158,17 +159,22 @@ export default function PublicBooking() {
       .sort((a, b) => a.start - b.start);
 
     const options = [];
+    const seen = new Set();
     const zoneNow = getTimeMinutesInZone(doc?.timezone);
     let cursor = Math.ceil(zoneNow / slotMinutes) * slotMinutes;
     cursor = Math.max(cursor, zoneNow);
 
-    while (options.length < 12) {
+    while (options.length < 12 && cursor < dayEndMinutes) {
       const conflict = occupied.find((slot) => cursor < slot.end && cursor + slotMinutes > slot.start);
       if (conflict) {
         cursor = conflict.end;
         continue;
       }
-      options.push(formatMinutesToTime(cursor));
+      const label = formatMinutesToTime(cursor);
+      if (!seen.has(label)) {
+        seen.add(label);
+        options.push(label);
+      }
       cursor += slotMinutes;
     }
 

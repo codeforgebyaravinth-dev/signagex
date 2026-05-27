@@ -224,9 +224,10 @@ function ServicePanel({ vertical, label, icon: Icon }) {
     return base || me.id;
   }, [me]);
   const bookingUrl = useMemo(() => {
-    const ref = me?.id || bookingSlug || me?.public_booking_slug || "";
+    // prefer explicit slug (bookingSlug or public_booking_slug) over raw id
+    const ref = bookingSlug || me?.public_booking_slug || me?.id || "";
     return ref ? `${window.location.origin}/book/${encodeURIComponent(ref)}` : "";
-  }, [bookingSlug, me?.id, me?.public_booking_slug]);
+  }, [bookingSlug, me?.public_booking_slug, me?.id]);
   const copyLink = async () => {
     try {
       await navigator.clipboard.writeText(bookingUrl);

@@ -143,7 +143,7 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
   bool _ttsReady = false;
   String apiBase = const String.fromEnvironment(
     'BACKEND_URL',
-    defaultValue: 'http://10.18.51.60:8000',
+    defaultValue: 'https://rpsignage.com',
   );
   Size viewportSize = Size.zero;
 
@@ -359,7 +359,7 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
 
   String _normalizedApiBase() {
     final trimmed = apiBase.trim();
-    final fallback = trimmed.isEmpty ? 'http://10.18.51.60:8000' : trimmed;
+    final fallback = trimmed.isEmpty ? 'https://rpsignage.com' : trimmed;
     final withoutSlash = fallback.replaceAll(RegExp(r'/$'), '');
     return withoutSlash.replaceAll(RegExp(r'/api$'), '');
   }
@@ -4321,7 +4321,7 @@ class _MediaSlotState extends State<MediaSlot> {
       return candidate;
     }
 
-    final base = 'http://10.18.51.60:8000';
+    final base = 'https://rpsignage.com';
     if (candidate.startsWith('/')) return '$base$candidate';
     return '$base/$candidate';
   }

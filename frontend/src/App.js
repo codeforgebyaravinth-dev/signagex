@@ -35,9 +35,9 @@ function isNativePlayerShell() {
       return window.Capacitor.getPlatform() !== "web";
     }
   } catch {
-    // fall through to user agent detection
+    return false;
   }
-  return /Android|iPhone|iPad|iPod/i.test(navigator.userAgent || "");
+  return false;
 }
 
 function ProtectedRoute({ role, children }) {
