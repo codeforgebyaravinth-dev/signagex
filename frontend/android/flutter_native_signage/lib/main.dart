@@ -484,34 +484,57 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
     _connectingQueueSocket = true;
     try {
       _queueSocketRetryTimer?.cancel();
-      // If already connected, noop
-      if (_queueSocket != null) return;
+      // If already connected and open, noop
+      if (_queueSocket != null) {
+        try {
+          if (_queueSocket?.closeCode == null) {
+            _connectingQueueSocket = false;
+            return;
+          }
+        } catch (_) {}
+      }
       final url = _queueSocketUrl();
       _logDebug('connecting queue socket $url');
       final socket = await WebSocket.connect(url).timeout(const Duration(seconds: 8));
+      // enable automatic ping to keep connection alive
+      try {
+        socket.pingInterval = const Duration(seconds: 20);
+      } catch (_) {}
+
       _queueSocket = socket;
       _queueSocketAttempt = 0;
 
-      // send subscribe
+      // send subscribe (server expects this handshake)
       try {
         socket.add(json.encode({'type': 'subscribe', 'client_id': currentPairCode}));
       } catch (e) {}
 
+      // listen for messages and centralized close handling
       socket.listen((message) {
         unawaited(_handleQueueSocketMessage(message));
       }, onDone: () {
-        _logDebug('queue socket closed');
-        _queueSocket = null;
-        _scheduleQueueSocketReconnect();
+        _logDebug('queue socket onDone');
+        _handleQueueSocketClosed();
       }, onError: (err) {
-        _logDebug('queue socket error: $err');
-        _queueSocket = null;
-        _scheduleQueueSocketReconnect();
+        _logDebug('queue socket onError: $err');
+        _handleQueueSocketClosed();
       }, cancelOnError: true);
+
+      // connection established
+      _connectingQueueSocket = false;
     } catch (e) {
       _logDebug('queue socket connect failed: $e');
+      _connectingQueueSocket = false;
       _scheduleQueueSocketReconnect();
     }
+  }
+
+  void _handleQueueSocketClosed() {
+    try {
+      _queueSocket = null;
+    } catch (_) {}
+    _connectingQueueSocket = false;
+    _scheduleQueueSocketReconnect();
   }
 
   Future<void> _handleQueueSocketMessage(dynamic message) async {

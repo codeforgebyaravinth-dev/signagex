@@ -1492,6 +1492,14 @@ export default function SignagePlayer() {
           socket.onmessage = (ev) => {
             try {
               const data = typeof ev.data === "string" ? JSON.parse(ev.data) : ev.data;
+              // debug: log raw websocket payload timing for latency diagnosis
+              try {
+                if (data && data.sent_at) {
+                  console.debug('queue socket received', { sent_at: data.sent_at, received_at: new Date().toISOString(), now: Date.now(), type: data.type });
+                } else {
+                  console.debug('queue socket received (no sent_at)', { received_at: new Date().toISOString(), now: Date.now(), type: data.type });
+                }
+              } catch (e) {}
               // If server provided an announcement, speak it immediately (de-duplicated by key)
               const announcement = data && data.announcement ? data.announcement : null;
               if (announcement && announcement.text) {

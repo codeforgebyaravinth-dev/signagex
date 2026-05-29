@@ -22,6 +22,7 @@ import jwt
 import requests
 import xml.etree.ElementTree as ET
 from fastapi import FastAPI, APIRouter, HTTPException, Request, Response, Depends, UploadFile, File, Form, WebSocket, WebSocketDisconnect
+import asyncio
 from fastapi.responses import StreamingResponse
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -34,6 +35,10 @@ mongo_url = os.environ['MONGO_URL']
 client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ.get('DB_NAME', 'signage')]
 DB_READY = False
+
+# In-memory recent announcement cache to surface immediate broadcasts to polling players
+# Structure: { client_id: { "payload": {...}, "expires_at": datetime } }
+RECENT_ANNOUNCEMENTS: Dict[str, Dict[str, Any]] = {}
 
 app = FastAPI()
 api = APIRouter(prefix="/api")
@@ -49,10 +54,21 @@ APP_TIMEZONE = os.environ.get("APP_TIMEZONE", "Asia/Kolkata")
 class QueueConnectionManager:
     def __init__(self):
         self._connections: Dict[str, set] = {}
+        self._last_accept_info: Dict[str, Dict[str, Any]] = {}
 
     async def connect(self, client_id: str, websocket: WebSocket):
         await websocket.accept()
         self._connections.setdefault(client_id, set()).add(websocket)
+
+    def register(self, client_id: str, websocket: WebSocket):
+        """Register an already-accepted websocket for broadcasts.
+
+        Use this when the endpoint performs an explicit subscribe handshake before registration.
+        """
+        try:
+            self._connections.setdefault(client_id, set()).add(websocket)
+        except Exception:
+            pass
 
     def disconnect(self, client_id: str, websocket: WebSocket):
         sockets = self._connections.get(client_id)
@@ -90,7 +106,20 @@ async def _broadcast_queue_refresh(client_id: str, reason: str = "update"):
         queue_snapshot = await _build_queue_announcement_snapshot(client_id)
         if queue_snapshot:
             payload.update(queue_snapshot)
-        await queue_ws_manager.broadcast(client_id, payload)
+        # add server-sent timestamp for client-side latency measurement
+        payload["sent_at"] = now_iso()
+        # cache recent announcement payload for short time so polling players can pick it up
+        try:
+            RECENT_ANNOUNCEMENTS[client_id] = {"payload": payload, "expires_at": datetime.now(timezone.utc) + timedelta(seconds=30)}
+        except Exception:
+            pass
+
+        try:
+            asyncio.create_task(queue_ws_manager.broadcast(client_id, payload))
+            logging.getLogger('uvicorn.error').debug(f"broadcast -> scheduled async send for client {client_id}: keys={list(payload.keys())}")
+        except Exception:
+            # fallback to awaiting if scheduling fails
+            await queue_ws_manager.broadcast(client_id, payload)
 
 
 async def _build_queue_announcement_snapshot(client_id: str) -> Optional[Dict[str, Any]]:
@@ -1501,7 +1530,12 @@ async def _set_service_appointment_status(aid: str, status: str, user: dict):
                     else f"Token {token}, please proceed to the counter."
                 )
                 payload["announcement"] = {"key": key, "text": text}
-        await queue_ws_manager.broadcast(user["id"], payload)
+        payload["sent_at"] = now_iso()
+        try:
+            asyncio.create_task(queue_ws_manager.broadcast(user["id"], payload))
+            logging.getLogger('uvicorn.error').debug(f"broadcast -> scheduled immediate announcement for client {user['id']}")
+        except Exception:
+            await queue_ws_manager.broadcast(user["id"], payload)
     except Exception:
         # Fallback to existing broadcast path if direct send fails
         await _broadcast_queue_refresh(user["id"], reason=f"status:{status}")
@@ -1888,20 +1922,69 @@ async def queue_updates_socket(websocket: WebSocket, pair_code: str):
         await websocket.close(code=1008)
         return
 
-    await queue_ws_manager.connect(client_id, websocket)
-    initial_snapshot = await _build_queue_announcement_snapshot(client_id)
-    if initial_snapshot:
-        try:
-            await websocket.send_json({"type": "queue_snapshot", "client_id": client_id, "timestamp": now_iso(), **initial_snapshot})
-        except Exception:
-            pass
+    # Accept socket and perform a small subscribe handshake before registering to avoid
+    # storing transient connections that immediately close.
     try:
+        await websocket.accept()
+    except Exception:
+        return
+
+    # log remote for diagnostics
+    try:
+        client_info = getattr(websocket, 'client', None)
+        logging.getLogger('uvicorn.error').debug(f"queue socket accept for pair={pair_code} client={client_info}")
+    except Exception:
+        pass
+
+    subscribed = False
+    # limit concurrent registered sockets per client to avoid churn
+    try:
+        existing = len(queue_ws_manager._connections.get(client_id, set()))
+        MAX_ALLOWED = 2
+        if existing >= MAX_ALLOWED:
+            try:
+                await websocket.close(code=1013)
+            except Exception:
+                pass
+            logging.getLogger('uvicorn.error').warning(f"queue socket rejected: too many connections for client {client_id} (existing={existing})")
+            return
+    except Exception:
+        pass
+    try:
+        # wait briefly for a subscribe message from client; if none arrives, still register
+        try:
+            msg = await asyncio.wait_for(websocket.receive_text(), timeout=5.0)
+            try:
+                import json
+                parsed = json.loads(msg or "{}")
+                if parsed.get("type") == "subscribe" and parsed.get("client_id") == client_id:
+                    queue_ws_manager.register(client_id, websocket)
+                    subscribed = True
+            except Exception:
+                # ignore parse errors
+                pass
+        except asyncio.TimeoutError:
+            # no handshake received; register anyway
+            queue_ws_manager.register(client_id, websocket)
+            subscribed = True
+
+        # send an initial snapshot if available
+        initial_snapshot = await _build_queue_announcement_snapshot(client_id)
+        if initial_snapshot:
+            try:
+                await websocket.send_json({"type": "queue_snapshot", "client_id": client_id, "timestamp": now_iso(), **initial_snapshot})
+            except Exception:
+                pass
+
+        # keep receiving until disconnect; ignore payloads
         while True:
             await websocket.receive_text()
     except WebSocketDisconnect:
-        queue_ws_manager.disconnect(client_id, websocket)
+        if subscribed:
+            queue_ws_manager.disconnect(client_id, websocket)
     except Exception:
-        queue_ws_manager.disconnect(client_id, websocket)
+        if subscribed:
+            queue_ws_manager.disconnect(client_id, websocket)
 
 
 @api.get("/client/doctor/patients")
@@ -2830,7 +2913,7 @@ async def player_payload(pair_code: str, request: Request):
 
     await db.devices.update_one({"id": device["id"]}, {"$set": {"status": "paired", "last_seen": now_iso()}})
 
-    return {"device_id": device["id"], "device_name": device["name"],
+    result = {"device_id": device["id"], "device_name": device["name"],
             "client_id": device["client_id"],
             "weather": weather,
             "orientation": device.get("orientation", "auto"),
@@ -2838,6 +2921,28 @@ async def player_payload(pair_code: str, request: Request):
             "brightness": int(device.get("brightness", 100) or 100),
             "zones": zones, "template": template,
             "poll_after_seconds": 60}
+
+    # surface any recent announcement broadcast (so clients that missed websocket receive it on poll)
+    try:
+        recent = RECENT_ANNOUNCEMENTS.get(device.get("client_id"))
+        if recent:
+            expires_at = recent.get("expires_at")
+            if expires_at and expires_at > datetime.now(timezone.utc):
+                # embed announcement object at top-level so clients pick it up
+                payload = recent.get("payload") or {}
+                if payload.get("announcement"):
+                    result["announcement"] = payload.get("announcement")
+                    # include sent_at for latency measurement
+                    if payload.get("sent_at"):
+                        result["announcement_sent_at"] = payload.get("sent_at")
+            else:
+                # cleanup expired
+                try: RECENT_ANNOUNCEMENTS.pop(device.get("client_id"), None)
+                except Exception: pass
+    except Exception:
+        pass
+
+    return result
 
 
 @public_api.post("/player/{pair_code}/offline")
