@@ -1487,7 +1487,24 @@ async def _set_service_appointment_status(aid: str, status: str, user: dict):
     )
     if not r:
         raise HTTPException(status_code=404, detail="Appointment not found")
-    await _broadcast_queue_refresh(user["id"], reason=f"status:{status}")
+    # Broadcast immediately with an announcement when called, avoid expensive snapshot building
+    try:
+        payload = {"type": "queue_refresh", "client_id": user["id"], "reason": f"status:{status}", "timestamp": now_iso()}
+        if status == "called":
+            token = str(r.get("token") or "").strip()
+            recall_count = int(r.get("recall_count") or 0)
+            is_recall = recall_count > 0 or bool(r.get("recalled_at"))
+            if token:
+                key = f"{token}:called:{recall_count}:{r.get('recalled_at','') }"
+                text = (
+                    f"Recall for token {token}. Please return to the counter." if is_recall
+                    else f"Token {token}, please proceed to the counter."
+                )
+                payload["announcement"] = {"key": key, "text": text}
+        await queue_ws_manager.broadcast(user["id"], payload)
+    except Exception:
+        # Fallback to existing broadcast path if direct send fails
+        await _broadcast_queue_refresh(user["id"], reason=f"status:{status}")
     return r
 
 
