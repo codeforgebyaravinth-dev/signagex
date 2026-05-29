@@ -139,6 +139,7 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
   int _queueSocketAttempt = 0;
   String _lastQueueAnnouncementKey = '';
   bool _queueAnnouncementReady = false;
+  bool _connectingQueueSocket = false;
   FlutterTts? _flutterTts;
   bool _ttsReady = false;
   String apiBase = const String.fromEnvironment(
@@ -479,6 +480,8 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
     if (currentPairCode == null) return;
     // Only connect websocket for queue updates when this player has a queue zone
     if (!_hasQueueZone()) return;
+    if (_connectingQueueSocket) return;
+    _connectingQueueSocket = true;
     try {
       _queueSocketRetryTimer?.cancel();
       // If already connected, noop
@@ -495,7 +498,7 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
       } catch (e) {}
 
       socket.listen((message) {
-        unawaited(_poll());
+        unawaited(_handleQueueSocketMessage(message));
       }, onDone: () {
         _logDebug('queue socket closed');
         _queueSocket = null;
@@ -509,6 +512,34 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
       _logDebug('queue socket connect failed: $e');
       _scheduleQueueSocketReconnect();
     }
+  }
+
+  Future<void> _handleQueueSocketMessage(dynamic message) async {
+    try {
+      if (message is String && message.isNotEmpty) {
+        final decoded = json.decode(message);
+        if (decoded is Map<String, dynamic>) {
+          final announcement = decoded['announcement'];
+          if (announcement is Map) {
+            final key = announcement['key']?.toString() ?? '';
+            final text = announcement['text']?.toString() ?? '';
+            if (text.isNotEmpty && _lastQueueAnnouncementKey != key) {
+              _queueAnnouncementReady = true;
+              _lastQueueAnnouncementKey = key;
+              await _speak(text);
+            }
+          }
+          if (decoded['type'] == 'queue_refresh' || decoded['type'] == 'queue_snapshot') {
+            unawaited(_poll());
+            return;
+          }
+        }
+      }
+    } catch (e) {
+      _logDebug('queue socket message parse failed: $e');
+    }
+
+    unawaited(_poll());
   }
 
   void _scheduleQueueSocketReconnect() {
@@ -533,6 +564,7 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
         _queueSocket = null;
       }
     } catch (_) {}
+          _connectingQueueSocket = false;
   }
 
   Future<void> _maybeAnnounceQueue() async {
@@ -819,10 +851,23 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
     if (event is! KeyDownEvent) return KeyEventResult.ignored;
 
     final isMenuKey = event.logicalKey == LogicalKeyboardKey.contextMenu;
-    if (!isMenuKey) return KeyEventResult.ignored;
+    if (isMenuKey) {
+      _toggleMenu();
+      return KeyEventResult.handled;
+    }
 
-    _toggleMenu();
-    return KeyEventResult.handled;
+    if (menuOpen) {
+      return KeyEventResult.ignored;
+    }
+
+    if (event.logicalKey == LogicalKeyboardKey.arrowLeft ||
+        event.logicalKey == LogicalKeyboardKey.arrowRight ||
+        event.logicalKey == LogicalKeyboardKey.mediaRewind ||
+        event.logicalKey == LogicalKeyboardKey.mediaFastForward) {
+      return KeyEventResult.ignored;
+    }
+
+    return KeyEventResult.ignored;
   }
 
   void _resetZones() {
@@ -944,6 +989,51 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
       tickerBackgroundColorKey = key;
     });
     _saveZonePreferences();
+  }
+
+  Widget _buildPresetChoice({
+    required String label,
+    required bool selected,
+    required VoidCallback onTap,
+    IconData? icon,
+  }) {
+    return TextButton.icon(
+      onPressed: onTap,
+      icon: Icon(icon ?? Icons.circle, size: 14),
+      label: Text(
+        label,
+        style: TextStyle(
+          fontSize: 11,
+          fontWeight: FontWeight.w700,
+          letterSpacing: 1,
+          color: selected ? Colors.cyanAccent : Colors.white,
+        ),
+      ),
+      style: ButtonStyle(
+        padding: MaterialStateProperty.all(
+          const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+        ),
+        backgroundColor: MaterialStateProperty.resolveWith((states) {
+          if (states.contains(MaterialState.focused) || selected) {
+            return Colors.cyanAccent.withOpacity(0.18);
+          }
+          return Colors.white.withOpacity(0.04);
+        }),
+        foregroundColor: MaterialStateProperty.resolveWith((states) {
+          return states.contains(MaterialState.focused) || selected
+              ? Colors.cyanAccent
+              : Colors.white;
+        }),
+        shape: MaterialStateProperty.all(
+          RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(14),
+            side: BorderSide(
+              color: selected ? Colors.cyanAccent : Colors.white24,
+            ),
+          ),
+        ),
+      ),
+    );
   }
 
   String _kioskExitKey() {
@@ -1796,6 +1886,7 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
     double effectiveBrightnessPercent,
   ) {
     return FocusTraversalGroup(
+      policy: WidgetOrderTraversalPolicy(),
       child: Container(
         color: Colors.black.withOpacity(0.78),
         child: SafeArea(
@@ -1954,38 +2045,44 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
                                     ),
                                   ],
                                 ),
-                                ExcludeFocus(
-                                  child: Slider(
-                                    value: effectiveBrightnessPercent,
-                                    min: 10,
-                                    max: 100,
-                                    divisions: 18,
-                                    label: '${effectiveBrightnessPercent.round()}%',
-                                    onChanged: _setBrightnessOverride,
-                                  ),
-                                ),
                                 Wrap(
                                   spacing: 8,
                                   runSpacing: 8,
                                   children: [
-                                    _buildMenuButtonItem(
-                                      icon: Icons.brightness_low,
+                                    _buildPresetChoice(
+                                      icon: Icons.brightness_1,
+                                      label: '10%',
+                                      selected: effectiveBrightnessPercent.round() == 10,
+                                      onTap: () => _setBrightnessOverride(10),
+                                    ),
+                                    _buildPresetChoice(
+                                      icon: Icons.brightness_1,
+                                      label: '20%',
+                                      selected: effectiveBrightnessPercent.round() == 20,
+                                      onTap: () => _setBrightnessOverride(20),
+                                    ),
+                                    _buildPresetChoice(
+                                      icon: Icons.brightness_1,
                                       label: '40%',
+                                      selected: effectiveBrightnessPercent.round() == 40,
                                       onTap: () => _setBrightnessOverride(40),
                                     ),
-                                    _buildMenuButtonItem(
-                                      icon: Icons.brightness_medium,
+                                    _buildPresetChoice(
+                                      icon: Icons.brightness_1,
                                       label: '70%',
+                                      selected: effectiveBrightnessPercent.round() == 70,
                                       onTap: () => _setBrightnessOverride(70),
                                     ),
-                                    _buildMenuButtonItem(
-                                      icon: Icons.brightness_high,
+                                    _buildPresetChoice(
+                                      icon: Icons.brightness_1,
                                       label: '100%',
+                                      selected: effectiveBrightnessPercent.round() == 100 && brightnessOverridePercent != null,
                                       onTap: () => _setBrightnessOverride(100),
                                     ),
-                                    _buildMenuButtonItem(
+                                    _buildPresetChoice(
                                       icon: Icons.auto_mode,
-                                      label: 'Use Payload',
+                                      label: 'PAYLOAD',
+                                      selected: brightnessOverridePercent == null,
                                       onTap: _setAutoBrightnessFromPayload,
                                     ),
                                   ],
@@ -2020,15 +2117,48 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
                                     fontWeight: FontWeight.w600,
                                   ),
                                 ),
-                                ExcludeFocus(
-                                  child: Slider(
-                                    value: weatherClockScale,
-                                    min: 0.7,
-                                    max: 1.5,
-                                    divisions: 8,
-                                    label: '${(weatherClockScale * 100).round()}%',
-                                    onChanged: _setWeatherClockScale,
-                                  ),
+                                const SizedBox(height: 8),
+                                Wrap(
+                                  spacing: 8,
+                                  runSpacing: 8,
+                                  children: [
+                                    _buildPresetChoice(
+                                      label: '70%',
+                                      selected: (weatherClockScale - 0.7).abs() < 0.01,
+                                      onTap: () => _setWeatherClockScale(0.7),
+                                      icon: Icons.text_fields,
+                                    ),
+                                    _buildPresetChoice(
+                                      label: '85%',
+                                      selected: (weatherClockScale - 0.85).abs() < 0.01,
+                                      onTap: () => _setWeatherClockScale(0.85),
+                                      icon: Icons.text_fields,
+                                    ),
+                                    _buildPresetChoice(
+                                      label: '100%',
+                                      selected: (weatherClockScale - 1.0).abs() < 0.01,
+                                      onTap: () => _setWeatherClockScale(1.0),
+                                      icon: Icons.text_fields,
+                                    ),
+                                    _buildPresetChoice(
+                                      label: '115%',
+                                      selected: (weatherClockScale - 1.15).abs() < 0.01,
+                                      onTap: () => _setWeatherClockScale(1.15),
+                                      icon: Icons.text_fields,
+                                    ),
+                                    _buildPresetChoice(
+                                      label: '130%',
+                                      selected: (weatherClockScale - 1.3).abs() < 0.01,
+                                      onTap: () => _setWeatherClockScale(1.3),
+                                      icon: Icons.text_fields,
+                                    ),
+                                    _buildPresetChoice(
+                                      label: '150%',
+                                      selected: (weatherClockScale - 1.5).abs() < 0.01,
+                                      onTap: () => _setWeatherClockScale(1.5),
+                                      icon: Icons.text_fields,
+                                    ),
+                                  ],
                                 ),
                                 const SizedBox(height: 6),
                                 Text(
@@ -2082,15 +2212,54 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
                                     fontWeight: FontWeight.w600,
                                   ),
                                 ),
-                                ExcludeFocus(
-                                  child: Slider(
-                                    value: tickerSpeed,
-                                    min: 20,
-                                    max: 140,
-                                    divisions: 12,
-                                    label: '${tickerSpeed.round()}',
-                                    onChanged: _setTickerSpeed,
-                                  ),
+                                const SizedBox(height: 8),
+                                Wrap(
+                                  spacing: 8,
+                                  runSpacing: 8,
+                                  children: [
+                                    _buildPresetChoice(
+                                      label: '20',
+                                      selected: tickerSpeed.round() == 20,
+                                      onTap: () => _setTickerSpeed(20),
+                                      icon: Icons.speed,
+                                    ),
+                                    _buildPresetChoice(
+                                      label: '40',
+                                      selected: tickerSpeed.round() == 40,
+                                      onTap: () => _setTickerSpeed(40),
+                                      icon: Icons.speed,
+                                    ),
+                                    _buildPresetChoice(
+                                      label: '60',
+                                      selected: tickerSpeed.round() == 60,
+                                      onTap: () => _setTickerSpeed(60),
+                                      icon: Icons.speed,
+                                    ),
+                                    _buildPresetChoice(
+                                      label: '80',
+                                      selected: tickerSpeed.round() == 80,
+                                      onTap: () => _setTickerSpeed(80),
+                                      icon: Icons.speed,
+                                    ),
+                                    _buildPresetChoice(
+                                      label: '100',
+                                      selected: tickerSpeed.round() == 100,
+                                      onTap: () => _setTickerSpeed(100),
+                                      icon: Icons.speed,
+                                    ),
+                                    _buildPresetChoice(
+                                      label: '120',
+                                      selected: tickerSpeed.round() == 120,
+                                      onTap: () => _setTickerSpeed(120),
+                                      icon: Icons.speed,
+                                    ),
+                                    _buildPresetChoice(
+                                      label: '140',
+                                      selected: tickerSpeed.round() == 140,
+                                      onTap: () => _setTickerSpeed(140),
+                                      icon: Icons.speed,
+                                    ),
+                                  ],
                                 ),
                                 const SizedBox(height: 6),
                                 Text(
@@ -3049,10 +3218,7 @@ class MediaSlot extends StatefulWidget {
   static _MediaSlotState? _activeAudioState;
 
   static void _claimAudioFocus(_MediaSlotState state) {
-    final current = _activeAudioState;
-    if (current != null && !identical(current, state)) {
-      current._pausePlaybackForFocusLoss();
-    }
+    // Intentionally no-op: allow multiple video/YT zones to play simultaneously.
     _activeAudioState = state;
   }
 
@@ -3071,7 +3237,7 @@ class _MediaSlotState extends State<MediaSlot> {
   Timer? timer;
   Timer? controlsHideTimer;
   bool showFrame = true;
-  bool isMuted = true;
+  bool isMuted = false;
   bool showPlaybackControls = false;
   String? videoError;
   YoutubePlayerController? youtubeController;
@@ -3081,8 +3247,7 @@ class _MediaSlotState extends State<MediaSlot> {
   String? _activeVideoSourceKey;
 
   void _pausePlaybackForFocusLoss() {
-    youtubeController?.pause();
-    videoController?.pause();
+    // Left in place for compatibility, but we no longer pause other zones.
   }
 
   @override
@@ -3179,6 +3344,23 @@ class _MediaSlotState extends State<MediaSlot> {
       isMuted = !isMuted;
     });
     _applyMuteState();
+  }
+
+  Future<void> _seekPlayback(int seconds) async {
+    if (youtubeController != null) {
+      final current = youtubeController!.value.position;
+      final target = Duration(seconds: max(0, current.inSeconds + seconds));
+      youtubeController!.seekTo(target);
+      _showPlaybackControlsTemporarily();
+      return;
+    }
+
+    if (videoController != null && videoController!.value.isInitialized) {
+      final current = videoController!.value.position;
+      final target = Duration(seconds: max(0, current.inSeconds + seconds));
+      await videoController!.seekTo(target);
+      _showPlaybackControlsTemporarily();
+    }
   }
 
   void _showPlaybackControlsTemporarily() {
@@ -3378,93 +3560,118 @@ class _MediaSlotState extends State<MediaSlot> {
         height: 76,
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
         color: Colors.black.withOpacity(0.45),
-        child: SingleChildScrollView(
-          scrollDirection: Axis.horizontal,
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-            IconButton(
-              onPressed: () {
-                if (hasVideo) {
-                  if (videoController!.value.isPlaying) {
-                    videoController!.pause();
-                  } else {
-                    videoController!.play();
-                  }
-                } else if (hasYoutube) {
-                  if (youtubeController!.value.isPlaying) {
-                    youtubeController!.pause();
-                  } else {
-                    youtubeController!.play();
-                  }
-                }
-                setState(() {});
-                _showPlaybackControlsTemporarily();
-              },
-              icon: Icon(
-                (hasVideo && videoController!.value.isPlaying) ||
-                        (hasYoutube && youtubeController!.value.isPlaying)
-                    ? Icons.pause_circle_filled
-                    : Icons.play_circle_fill,
-                color: Colors.white,
-                size: 32,
-              ),
-            ),
-            if (hasVideo)
-              SizedBox(
-                width: 140,
-                child: VideoProgressIndicator(
-                  videoController!,
-                  allowScrubbing: true,
-                  padding: const EdgeInsets.symmetric(horizontal: 8),
-                  colors: const VideoProgressColors(
-                    playedColor: Colors.cyanAccent,
-                    bufferedColor: Colors.white24,
-                    backgroundColor: Colors.white12,
+        child: FocusTraversalGroup(
+          policy: WidgetOrderTraversalPolicy(),
+          child: SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                IconButton(
+                  onPressed: () {
+                    if (hasVideo) {
+                      if (videoController!.value.isPlaying) {
+                        videoController!.pause();
+                      } else {
+                        videoController!.play();
+                      }
+                    } else if (hasYoutube) {
+                      if (youtubeController!.value.isPlaying) {
+                        youtubeController!.pause();
+                      } else {
+                        youtubeController!.play();
+                      }
+                    }
+                    setState(() {});
+                    _showPlaybackControlsTemporarily();
+                  },
+                  icon: Icon(
+                    (hasVideo && videoController!.value.isPlaying) ||
+                            (hasYoutube && youtubeController!.value.isPlaying)
+                        ? Icons.pause_circle_filled
+                        : Icons.play_circle_fill,
+                    color: Colors.white,
+                    size: 32,
                   ),
                 ),
-              )
-            else
-              const SizedBox(width: 12),
-            IconButton(
-              onPressed: () async {
-                if (hasVideo) {
-                  await videoController!.seekTo(Duration.zero);
-                  await videoController!.play();
-                } else if (hasYoutube) {
-                  youtubeController!.seekTo(const Duration(seconds: 0));
-                  youtubeController!.play();
-                }
-                setState(() {});
-                _showPlaybackControlsTemporarily();
-              },
-              icon: const Icon(
-                Icons.replay,
-                color: Colors.white,
-                size: 28,
-              ),
-            ),
-            TextButton.icon(
-              onPressed: () {
-                _toggleMute();
-                _showPlaybackControlsTemporarily();
-              },
-              icon: Icon(
-                isMuted ? Icons.volume_off : Icons.volume_up,
-                color: Colors.white,
-                size: 18,
-              ),
-              label: Text(
-                isMuted ? 'UNMUTE' : 'MUTE',
-                style: const TextStyle(
-                  color: Colors.white,
-                  fontWeight: FontWeight.w700,
-                  fontSize: 11,
-                  letterSpacing: 0.8,
+                IconButton(
+                  onPressed: () async {
+                    await _seekPlayback(-10);
+                    setState(() {});
+                  },
+                  icon: const Icon(
+                    Icons.replay_10,
+                    color: Colors.white,
+                    size: 28,
+                  ),
                 ),
-              ),
+                if (hasVideo)
+                  SizedBox(
+                    width: 140,
+                    child: VideoProgressIndicator(
+                      videoController!,
+                      allowScrubbing: true,
+                      padding: const EdgeInsets.symmetric(horizontal: 8),
+                      colors: const VideoProgressColors(
+                        playedColor: Colors.cyanAccent,
+                        bufferedColor: Colors.white24,
+                        backgroundColor: Colors.white12,
+                      ),
+                    ),
+                  )
+                else
+                  const SizedBox(width: 12),
+                IconButton(
+                  onPressed: () async {
+                    if (hasVideo) {
+                      await videoController!.seekTo(Duration.zero);
+                      await videoController!.play();
+                    } else if (hasYoutube) {
+                      youtubeController!.seekTo(const Duration(seconds: 0));
+                      youtubeController!.play();
+                    }
+                    setState(() {});
+                    _showPlaybackControlsTemporarily();
+                  },
+                  icon: const Icon(
+                    Icons.replay,
+                    color: Colors.white,
+                    size: 28,
+                  ),
+                ),
+                IconButton(
+                  onPressed: () async {
+                    await _seekPlayback(10);
+                    setState(() {});
+                  },
+                  icon: const Icon(
+                    Icons.forward_10,
+                    color: Colors.white,
+                    size: 28,
+                  ),
+                ),
+                TextButton.icon(
+                  onPressed: () {
+                    _toggleMute();
+                    _showPlaybackControlsTemporarily();
+                  },
+                  icon: Icon(
+                    isMuted ? Icons.volume_off : Icons.volume_up,
+                    color: Colors.white,
+                    size: 18,
+                  ),
+                  label: Text(
+                    isMuted ? 'UNMUTE' : 'MUTE',
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontWeight: FontWeight.w700,
+                      fontSize: 11,
+                      letterSpacing: 0.8,
+                    ),
+                  ),
+                ),
+              ],
             ),
-            ],
           ),
         ),
       ),
@@ -3878,7 +4085,10 @@ class _MediaSlotState extends State<MediaSlot> {
       videoError = null;
       _videoCompletionHandled = false;
       _activeVideoSourceKey = sourceKey;
-      videoController = VideoPlayerController.networkUrl(Uri.parse(url))
+      videoController = VideoPlayerController.networkUrl(
+        Uri.parse(url),
+        videoPlayerOptions: VideoPlayerOptions(mixWithOthers: true),
+      )
         ..initialize().then((_) {
           if (mounted) setState(() {});
           MediaSlot._claimAudioFocus(this);

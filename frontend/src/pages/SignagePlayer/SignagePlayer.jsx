@@ -1489,7 +1489,36 @@ export default function SignagePlayer() {
             poll();
           };
 
-          socket.onmessage = () => {
+          socket.onmessage = (ev) => {
+            try {
+              const data = typeof ev.data === "string" ? JSON.parse(ev.data) : ev.data;
+              // If server provided an announcement, speak it immediately (de-duplicated by key)
+              const announcement = data && data.announcement ? data.announcement : null;
+              if (announcement && announcement.text) {
+                const key = String(announcement.key || "");
+                if (queueAnnouncementReadyRef.current && lastQueueAnnouncementKeyRef.current !== key) {
+                  lastQueueAnnouncementKeyRef.current = key;
+                  try {
+                    if (typeof window !== "undefined" && window.speechSynthesis) {
+                      const utter = new SpeechSynthesisUtterance(announcement.text);
+                      utter.lang = navigator.language || "en-US";
+                      utter.rate = 0.95;
+                      utter.pitch = 1;
+                      window.speechSynthesis.cancel();
+                      window.speechSynthesis.speak(utter);
+                    }
+                  } catch (e) {
+                    // ignore speech failures
+                  }
+                } else if (!queueAnnouncementReadyRef.current && announcement.key) {
+                  queueAnnouncementReadyRef.current = true;
+                  lastQueueAnnouncementKeyRef.current = String(announcement.key || "");
+                }
+              }
+            } catch (e) {
+              // ignore parse errors
+            }
+
             // refresh immediately and once more shortly after, so queue changes appear near-instant
             poll();
             if (queueMessageRefreshRef.current) {

@@ -66,8 +66,11 @@ class QueueConnectionManager:
         sockets = list(self._connections.get(client_id, set()))
         for websocket in sockets:
             try:
+                logging.getLogger('uvicorn.error').debug(f"broadcast -> sending to client {client_id}: keys={list(payload.keys())}")
                 await websocket.send_json(payload)
+                logging.getLogger('uvicorn.error').debug(f"broadcast -> sent to client {client_id}")
             except Exception:
+                logging.getLogger('uvicorn.error').exception(f"broadcast -> send failed for client {client_id}")
                 self.disconnect(client_id, websocket)
 
 
@@ -83,7 +86,39 @@ def _app_now() -> datetime:
 
 async def _broadcast_queue_refresh(client_id: str, reason: str = "update"):
     if client_id:
-        await queue_ws_manager.broadcast(client_id, {"type": "queue_refresh", "client_id": client_id, "reason": reason, "timestamp": now_iso()})
+        payload = {"type": "queue_refresh", "client_id": client_id, "reason": reason, "timestamp": now_iso()}
+        queue_snapshot = await _build_queue_announcement_snapshot(client_id)
+        if queue_snapshot:
+            payload.update(queue_snapshot)
+        await queue_ws_manager.broadcast(client_id, payload)
+
+
+async def _build_queue_announcement_snapshot(client_id: str) -> Optional[Dict[str, Any]]:
+    profile = await _public_service_profile(client_id)
+    if not profile:
+        return None
+
+    queue_preview = profile.get("queue_preview") or []
+    queue_length = int(profile.get("queue_length") or len(queue_preview) or 0)
+    queue_minutes = int(profile.get("queue_total_minutes") or 0)
+
+    lead = next((item for item in queue_preview if (item.get("status") or "").lower() == "called"), queue_preview[0] if queue_preview else None)
+    announcement = None
+    if lead:
+        token = str(lead.get("token") or "").strip()
+        if token:
+            recall_count = int(lead.get("recall_count") or 0)
+            is_recall = recall_count > 0 or bool(lead.get("recalled_at"))
+            key = f"{token}:{lead.get('status', '')}:{recall_count}:{lead.get('recalled_at', '')}"
+            text = f"Recall for token {token}. Please return to the counter." if is_recall else f"Token {token}, please proceed to the counter."
+            announcement = {"key": key, "text": text}
+
+    return {
+        "queue_length": queue_length,
+        "queue_total_minutes": queue_minutes,
+        "queue_preview": queue_preview[:8],
+        "announcement": announcement,
+    }
 
 
 def _weather_description(code: Optional[Any]) -> str:
@@ -1837,6 +1872,12 @@ async def queue_updates_socket(websocket: WebSocket, pair_code: str):
         return
 
     await queue_ws_manager.connect(client_id, websocket)
+    initial_snapshot = await _build_queue_announcement_snapshot(client_id)
+    if initial_snapshot:
+        try:
+            await websocket.send_json({"type": "queue_snapshot", "client_id": client_id, "timestamp": now_iso(), **initial_snapshot})
+        except Exception:
+            pass
     try:
         while True:
             await websocket.receive_text()
