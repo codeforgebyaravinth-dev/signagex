@@ -1263,7 +1263,9 @@ export default function SignagePlayer() {
   const queueSocketRef = useRef(null);
   const queueSocketAttemptRef = useRef(0);
   const queueSocketRetryRef = useRef(null);
-  const queueMessageRefreshRef = useRef(null);
+  const contentSocketRef = useRef(null);
+  const contentSocketAttemptRef = useRef(0);
+  const contentSocketRetryRef = useRef(null);
   const queueAnnouncementReadyRef = useRef(false);
   const lastQueueAnnouncementKeyRef = useRef("");
   const offlineBeaconSentRef = useRef(false);
@@ -1382,6 +1384,12 @@ export default function SignagePlayer() {
 
   const queueSocketUrl = useCallback(() => {
     const baseUrl = new URL(`${BASE}/api/ws/queue/${encodeURIComponent(currentPairCode)}`);
+    baseUrl.protocol = baseUrl.protocol === "https:" ? "wss:" : "ws:";
+    return baseUrl.toString();
+  }, [currentPairCode]);
+
+  const contentSocketUrl = useCallback(() => {
+    const baseUrl = new URL(`${BASE}/api/ws/content/${encodeURIComponent(currentPairCode)}`);
     baseUrl.protocol = baseUrl.protocol === "https:" ? "wss:" : "ws:";
     return baseUrl.toString();
   }, [currentPairCode]);
@@ -1537,28 +1545,15 @@ export default function SignagePlayer() {
       };
 
       connectSocket();
-
-      const id = setInterval(poll, 60_000);
-      const handleVisibilityChange = () => {
-        if (document.visibilityState === "visible") poll();
-      };
-
-      document.addEventListener("visibilitychange", handleVisibilityChange);
       window.addEventListener("pagehide", sendOfflineBeacon);
       window.addEventListener("beforeunload", sendOfflineBeacon);
 
       return () => {
-        clearInterval(id);
-        document.removeEventListener("visibilitychange", handleVisibilityChange);
         window.removeEventListener("pagehide", sendOfflineBeacon);
         window.removeEventListener("beforeunload", sendOfflineBeacon);
         if (queueSocketRetryRef.current) {
           window.clearTimeout(queueSocketRetryRef.current);
           queueSocketRetryRef.current = null;
-        }
-        if (queueMessageRefreshRef.current) {
-          window.clearTimeout(queueMessageRefreshRef.current);
-          queueMessageRefreshRef.current = null;
         }
         if (queueSocketRef.current) {
           try {
@@ -1571,6 +1566,92 @@ export default function SignagePlayer() {
       };
     }
   }, [poll, currentPairCode, queueSocketUrl, sendOfflineBeacon, showPairing, showSplash]);
+
+  useEffect(() => {
+    if (currentPairCode && !showPairing && !showSplash) {
+      const connectContentSocket = () => {
+        if (!currentPairCode || showPairing || showSplash || typeof window === "undefined" || typeof WebSocket === "undefined") return;
+
+        const clearRetryTimer = () => {
+          if (contentSocketRetryRef.current) {
+            window.clearTimeout(contentSocketRetryRef.current);
+            contentSocketRetryRef.current = null;
+          }
+        };
+
+        const scheduleReconnect = () => {
+          clearRetryTimer();
+          const attempt = Math.min((contentSocketAttemptRef.current || 0) + 1, 6);
+          contentSocketAttemptRef.current = attempt;
+          const delay = Math.min(30_000, 1000 * (2 ** Math.max(0, attempt - 1)));
+          contentSocketRetryRef.current = window.setTimeout(connectContentSocket, delay);
+        };
+
+        clearRetryTimer();
+
+        if (contentSocketRef.current && contentSocketRef.current.readyState < 2) {
+          return;
+        }
+
+        if (contentSocketRef.current && contentSocketRef.current.readyState >= 2) {
+          contentSocketRef.current = null;
+        }
+
+        try {
+          const socket = new WebSocket(contentSocketUrl());
+          contentSocketRef.current = socket;
+
+          socket.onopen = () => {
+            contentSocketAttemptRef.current = 0;
+            try {
+              socket.send(JSON.stringify({ type: "subscribe", client_id: currentPairCode }));
+            } catch {
+              // ignore subscribe failures
+            }
+          };
+
+          socket.onmessage = (ev) => {
+            try {
+              const data = typeof ev.data === "string" ? JSON.parse(ev.data) : ev.data;
+              if (data && data.type === "content_refresh") {
+                poll();
+              }
+            } catch (e) {
+              // ignore parse errors
+            }
+          };
+
+          socket.onerror = () => {
+            // reconnect handled by onclose
+          };
+
+          socket.onclose = () => {
+            if (!currentPairCode || showPairing || showSplash) return;
+            scheduleReconnect();
+          };
+        } catch {
+          scheduleReconnect();
+        }
+      };
+
+      connectContentSocket();
+
+      return () => {
+        if (contentSocketRetryRef.current) {
+          window.clearTimeout(contentSocketRetryRef.current);
+          contentSocketRetryRef.current = null;
+        }
+        if (contentSocketRef.current) {
+          try {
+            contentSocketRef.current.close();
+          } catch {
+            // ignore socket close failures
+          }
+          contentSocketRef.current = null;
+        }
+      };
+    }
+  }, [poll, currentPairCode, contentSocketUrl, showPairing, showSplash]);
 
   useEffect(() => {
     if (!currentPairCode || showPairing || showSplash) return;

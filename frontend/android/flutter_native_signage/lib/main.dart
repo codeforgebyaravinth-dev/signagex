@@ -129,7 +129,6 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
   bool menuButtonVisible = false;
   bool kioskModeEnabled = true;
   bool kioskProvisionWarningShown = false;
-  Timer? pollTimer;
   Timer? providerTimer;
   Timer? weatherTimer;
   Timer? menuButtonHideTimer;
@@ -137,9 +136,13 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
   WebSocket? _queueSocket;
   Timer? _queueSocketRetryTimer;
   int _queueSocketAttempt = 0;
+  WebSocket? _contentSocket;
+  Timer? _contentSocketRetryTimer;
+  int _contentSocketAttempt = 0;
   String _lastQueueAnnouncementKey = '';
   bool _queueAnnouncementReady = false;
   bool _connectingQueueSocket = false;
+  bool _connectingContentSocket = false;
   FlutterTts? _flutterTts;
   bool _ttsReady = false;
   String apiBase = const String.fromEnvironment(
@@ -174,10 +177,10 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
-    pollTimer?.cancel();
     providerTimer?.cancel();
     weatherTimer?.cancel();
     menuButtonHideTimer?.cancel();
+    _disconnectContentSocket();
     _disconnectQueueSocket();
     try { _flutterTts?.stop(); } catch (_) {}
     super.dispose();
@@ -215,7 +218,8 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
     if (state == AppLifecycleState.resumed) {
       _applyAndroidKioskMode();
       if (currentPairCode != null && !showPairing && !showSplash) {
-        _poll();
+        unawaited(_connectContentSocket());
+        unawaited(_connectQueueSocket());
       }
     }
   }
@@ -263,6 +267,7 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
       if (mounted) {
         _safeSetState(() => showSplash = false);
         _poll();
+        unawaited(_connectContentSocket());
       }
     } else {
       await Future.delayed(const Duration(seconds: 2));
@@ -393,8 +398,8 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
           pairingError = "";
         });
 
-        // After payload update: attempt websocket connect and evaluate announcements
-        unawaited(_maybeAnnounceQueue());
+        // After payload update: attempt websocket connect and let websocket events drive announcements.
+        unawaited(_connectContentSocket());
         unawaited(_connectQueueSocket());
 
         await _loadZonePreferences();
@@ -423,13 +428,6 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
       _logDebug('poll exception: $e');
       _safeSetState(() => errorMessage = "Connection error: ${e.toString()}");
     }
-
-    pollTimer?.cancel();
-    pollTimer = Timer.periodic(const Duration(seconds: 60), (_) {
-      if (currentPairCode != null && !showPairing && !showSplash) {
-        _poll();
-      }
-    });
   }
 
   Future<void> _fetchProviderData(String clientId) async {
@@ -471,6 +469,14 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
   String _queueSocketUrl() {
     final base = _normalizedApiBase();
     final url = '$base/api/ws/queue/${Uri.encodeComponent(currentPairCode ?? '')}';
+    if (url.startsWith('https:')) return url.replaceFirst('https:', 'wss:');
+    if (url.startsWith('http:')) return url.replaceFirst('http:', 'ws:');
+    return url;
+  }
+
+  String _contentSocketUrl() {
+    final base = _normalizedApiBase();
+    final url = '$base/api/ws/content/${Uri.encodeComponent(currentPairCode ?? '')}';
     if (url.startsWith('https:')) return url.replaceFirst('https:', 'wss:');
     if (url.startsWith('http:')) return url.replaceFirst('http:', 'ws:');
     return url;
@@ -527,6 +533,100 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
       _connectingQueueSocket = false;
       _scheduleQueueSocketReconnect();
     }
+  }
+
+  Future<void> _connectContentSocket() async {
+    if (currentPairCode == null) return;
+    if (_connectingContentSocket) return;
+    _connectingContentSocket = true;
+    try {
+      _contentSocketRetryTimer?.cancel();
+      if (_contentSocket != null) {
+        try {
+          if (_contentSocket?.closeCode == null) {
+            _connectingContentSocket = false;
+            return;
+          }
+        } catch (_) {}
+      }
+      final url = _contentSocketUrl();
+      _logDebug('connecting content socket $url');
+      final socket = await WebSocket.connect(url).timeout(const Duration(seconds: 8));
+      try {
+        socket.pingInterval = const Duration(seconds: 20);
+      } catch (_) {}
+
+      _contentSocket = socket;
+      _contentSocketAttempt = 0;
+
+      try {
+        socket.add(json.encode({'type': 'subscribe', 'client_id': currentPairCode}));
+      } catch (e) {}
+
+      socket.listen((message) {
+        unawaited(_handleContentSocketMessage(message));
+      }, onDone: () {
+        _logDebug('content socket onDone');
+        _handleContentSocketClosed();
+      }, onError: (err) {
+        _logDebug('content socket onError: $err');
+        _handleContentSocketClosed();
+      }, cancelOnError: true);
+
+      _connectingContentSocket = false;
+    } catch (e) {
+      _logDebug('content socket connect failed: $e');
+      _connectingContentSocket = false;
+      _scheduleContentSocketReconnect();
+    }
+  }
+
+  void _handleContentSocketClosed() {
+    try {
+      _contentSocket = null;
+    } catch (_) {}
+    _connectingContentSocket = false;
+    _scheduleContentSocketReconnect();
+  }
+
+  Future<void> _handleContentSocketMessage(dynamic message) async {
+    try {
+      if (message is String && message.isNotEmpty) {
+        final decoded = json.decode(message);
+        if (decoded is Map<String, dynamic> && decoded['type'] == 'content_refresh') {
+          _logDebug('content socket refresh reason=${decoded['reason']}');
+          await _poll();
+          return;
+        }
+      }
+    } catch (e) {
+      _logDebug('content socket message parse failed: $e');
+    }
+  }
+
+  void _scheduleContentSocketReconnect() {
+    _contentSocketRetryTimer?.cancel();
+    _contentSocketAttempt = (_contentSocketAttempt + 1).clamp(0, 6);
+    final delayMs = min(30_000, 1000 * (1 << max(0, _contentSocketAttempt - 1)));
+    _contentSocketRetryTimer = Timer(Duration(milliseconds: delayMs), () {
+      if (currentPairCode != null && !showPairing && !showSplash) {
+        unawaited(_connectContentSocket());
+      }
+    });
+  }
+
+  void _disconnectContentSocket() {
+    try {
+      _contentSocketRetryTimer?.cancel();
+      _contentSocketRetryTimer = null;
+      if (_contentSocket != null) {
+        try {
+          _contentSocket?.close();
+        } catch (_) {}
+        _contentSocket = null;
+      }
+    } catch (_) {}
+    _connectingContentSocket = false;
   }
 
   void _handleQueueSocketClosed() {

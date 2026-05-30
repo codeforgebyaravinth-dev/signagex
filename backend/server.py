@@ -91,6 +91,7 @@ class QueueConnectionManager:
 
 
 queue_ws_manager = QueueConnectionManager()
+content_ws_manager = QueueConnectionManager()
 
 
 def _app_now() -> datetime:
@@ -120,6 +121,16 @@ async def _broadcast_queue_refresh(client_id: str, reason: str = "update"):
         except Exception:
             # fallback to awaiting if scheduling fails
             await queue_ws_manager.broadcast(client_id, payload)
+
+
+async def _broadcast_content_refresh(client_id: str, reason: str = "update"):
+    if client_id:
+        payload = {"type": "content_refresh", "client_id": client_id, "reason": reason, "timestamp": now_iso(), "sent_at": now_iso()}
+        try:
+            asyncio.create_task(content_ws_manager.broadcast(client_id, payload))
+            logging.getLogger('uvicorn.error').debug(f"broadcast -> scheduled content refresh for client {client_id}: reason={reason}")
+        except Exception:
+            await content_ws_manager.broadcast(client_id, payload)
 
 
 async def _build_queue_announcement_snapshot(client_id: str) -> Optional[Dict[str, Any]]:
@@ -1994,6 +2005,61 @@ async def queue_updates_socket(websocket: WebSocket, pair_code: str):
             queue_ws_manager.disconnect(client_id, websocket)
 
 
+@api.websocket("/ws/content/{pair_code}")
+async def content_updates_socket(websocket: WebSocket, pair_code: str):
+    try:
+        await websocket.accept()
+    except Exception:
+        return
+
+    device = await db.devices.find_one({"pair_code": pair_code}, {"_id": 0, "client_id": 1})
+    client_id = str(device.get("client_id") or "") if device else ""
+    if not client_id:
+        try:
+            await websocket.close(code=1008)
+        except Exception:
+            pass
+        return
+
+    try:
+        existing = len(content_ws_manager._connections.get(client_id, set()))
+        MAX_ALLOWED = 2
+        if existing >= MAX_ALLOWED:
+            try:
+                await websocket.close(code=1013)
+            except Exception:
+                pass
+            logging.getLogger('uvicorn.error').warning(f"content socket rejected: too many connections for client {client_id} (existing={existing})")
+            return
+    except Exception:
+        pass
+
+    subscribed = False
+    try:
+        try:
+            msg = await asyncio.wait_for(websocket.receive_text(), timeout=5.0)
+            try:
+                import json
+                parsed = json.loads(msg or "{}")
+                if parsed.get("type") == "subscribe" and parsed.get("client_id") == client_id:
+                    content_ws_manager.register(client_id, websocket)
+                    subscribed = True
+            except Exception:
+                pass
+        except asyncio.TimeoutError:
+            content_ws_manager.register(client_id, websocket)
+            subscribed = True
+
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        if subscribed:
+            content_ws_manager.disconnect(client_id, websocket)
+    except Exception:
+        if subscribed:
+            content_ws_manager.disconnect(client_id, websocket)
+
+
 @api.get("/client/doctor/patients")
 async def list_doctor_patients(search: Optional[str] = None, user: dict = Depends(require_role("client"))):
     client_doc = await db.clients.find_one({"id": user["id"], "vertical": "doctor"}, {"_id": 0, "id": 1})
@@ -2315,6 +2381,8 @@ async def upload_media(
         "created_at": now_iso(),
     }
     await db.media.insert_one(doc)
+    asyncio.create_task(_broadcast_queue_refresh(user["id"], reason="media_uploaded"))
+    asyncio.create_task(_broadcast_content_refresh(user["id"], reason="media_uploaded"))
     return clean(doc)
 
 @api.get("/client/media")
@@ -2330,12 +2398,16 @@ async def update_media(mid: str, body: MediaUpdate, user: dict = Depends(require
     if not upd: raise HTTPException(status_code=400, detail="Nothing to update")
     r = await db.media.find_one_and_update({"id": mid, "client_id": user["id"]}, {"$set": upd}, return_document=True, projection={"_id": 0})
     if not r: raise HTTPException(status_code=404, detail="Media not found")
+    asyncio.create_task(_broadcast_queue_refresh(user["id"], reason="media_updated"))
+    asyncio.create_task(_broadcast_content_refresh(user["id"], reason="media_updated"))
     return r
 
 @api.delete("/client/media/{mid}")
 async def delete_media(mid: str, user: dict = Depends(require_role("client"))):
     r = await db.media.update_one({"id": mid, "client_id": user["id"]}, {"$set": {"is_deleted": True}})
     if r.matched_count == 0: raise HTTPException(status_code=404, detail="Media not found")
+    asyncio.create_task(_broadcast_queue_refresh(user["id"], reason="media_deleted"))
+    asyncio.create_task(_broadcast_content_refresh(user["id"], reason="media_deleted"))
     return {"ok": True}
 
 @api.get("/media/serve/{mid}")
@@ -2598,6 +2670,8 @@ async def create_playlist(body: PlaylistIn, user: dict = Depends(require_role("c
         "created_at": now_iso(),
     }
     await db.playlists.insert_one(doc)
+    asyncio.create_task(_broadcast_queue_refresh(user["id"], reason="playlist_created"))
+    asyncio.create_task(_broadcast_content_refresh(user["id"], reason="playlist_created"))
     return clean(doc)
 
 @api.put("/client/playlists/{pid}")
@@ -2648,6 +2722,8 @@ async def update_playlist(pid: str, body: PlaylistUpdate, user: dict = Depends(r
     if not upd: raise HTTPException(status_code=400, detail="Nothing to update")
     r = await db.playlists.find_one_and_update({"id": pid, "client_id": user["id"]}, {"$set": upd}, return_document=True, projection={"_id": 0})
     if not r: raise HTTPException(status_code=404, detail="Playlist not found")
+    asyncio.create_task(_broadcast_queue_refresh(user["id"], reason="playlist_updated"))
+    asyncio.create_task(_broadcast_content_refresh(user["id"], reason="playlist_updated"))
     return r
 
 @api.delete("/client/playlists/{pid}")
@@ -2655,6 +2731,8 @@ async def delete_playlist(pid: str, user: dict = Depends(require_role("client"))
     r = await db.playlists.delete_one({"id": pid, "client_id": user["id"]})
     if r.deleted_count == 0: raise HTTPException(status_code=404, detail="Playlist not found")
     await db.schedules.delete_many({"playlist_id": pid, "client_id": user["id"]})
+    asyncio.create_task(_broadcast_queue_refresh(user["id"], reason="playlist_deleted"))
+    asyncio.create_task(_broadcast_content_refresh(user["id"], reason="playlist_deleted"))
     return {"ok": True}
 
 # ==================== Schedules ====================
