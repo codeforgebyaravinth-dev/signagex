@@ -1918,18 +1918,23 @@ async def create_service_appointment(vertical: Literal["doctor", "salon"], body:
 
 @api.websocket("/ws/queue/{pair_code}")
 async def queue_updates_socket(websocket: WebSocket, pair_code: str):
-    device = await db.devices.find_one({"pair_code": pair_code}, {"_id": 0, "client_id": 1})
-    client_id = str(device.get("client_id") or "") if device else ""
-    if not client_id:
-        await websocket.close(code=1008)
-        return
-
-    # Accept socket and perform a small subscribe handshake before registering to avoid
-    # storing transient connections that immediately close.
+    # Accept first so handshake failures don't surface as HTTP 404s through proxies.
     try:
         await websocket.accept()
     except Exception:
         return
+
+    device = await db.devices.find_one({"pair_code": pair_code}, {"_id": 0, "client_id": 1})
+    client_id = str(device.get("client_id") or "") if device else ""
+    if not client_id:
+        try:
+            await websocket.close(code=1008)
+        except Exception:
+            pass
+        return
+
+    # Perform a small subscribe handshake before registering to avoid
+    # storing transient connections that immediately close.
 
     # log remote for diagnostics
     try:
