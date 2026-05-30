@@ -1449,21 +1449,6 @@ export default function SignagePlayer() {
           }
         };
 
-        const closeSocket = () => {
-          if (queueSocketRef.current) {
-            try {
-              queueSocketRef.current.onopen = null;
-              queueSocketRef.current.onmessage = null;
-              queueSocketRef.current.onerror = null;
-              queueSocketRef.current.onclose = null;
-              queueSocketRef.current.close();
-            } catch {
-              // ignore socket close failures
-            }
-            queueSocketRef.current = null;
-          }
-        };
-
         const scheduleReconnect = () => {
           clearRetryTimer();
           const attempt = Math.min((queueSocketAttemptRef.current || 0) + 1, 6);
@@ -1473,7 +1458,14 @@ export default function SignagePlayer() {
         };
 
         clearRetryTimer();
-        closeSocket();
+
+        if (queueSocketRef.current && queueSocketRef.current.readyState < 2) {
+          return;
+        }
+
+        if (queueSocketRef.current && queueSocketRef.current.readyState >= 2) {
+          queueSocketRef.current = null;
+        }
 
         try {
           const socket = new WebSocket(queueSocketUrl());
@@ -1486,7 +1478,6 @@ export default function SignagePlayer() {
             } catch {
               // ignore subscribe failures
             }
-            poll();
           };
 
           socket.onmessage = (ev) => {
@@ -1504,9 +1495,13 @@ export default function SignagePlayer() {
               const announcement = data && data.announcement ? data.announcement : null;
               if (announcement && announcement.text) {
                 const key = String(announcement.key || "");
-                if (queueAnnouncementReadyRef.current && lastQueueAnnouncementKeyRef.current !== key) {
+                if (lastQueueAnnouncementKeyRef.current !== key) {
                   lastQueueAnnouncementKeyRef.current = key;
                   try {
+                    if (data.sent_at) {
+                      const latencyMs = Date.now() - new Date(data.sent_at).getTime();
+                      console.debug('queue announcement latency', { latency_ms: latencyMs, sent_at: data.sent_at, received_at: new Date().toISOString(), type: data.type });
+                    }
                     if (typeof window !== "undefined" && window.speechSynthesis) {
                       const utter = new SpeechSynthesisUtterance(announcement.text);
                       utter.lang = navigator.language || "en-US";
@@ -1526,16 +1521,6 @@ export default function SignagePlayer() {
             } catch (e) {
               // ignore parse errors
             }
-
-            // refresh immediately and once more shortly after, so queue changes appear near-instant
-            poll();
-            if (queueMessageRefreshRef.current) {
-              window.clearTimeout(queueMessageRefreshRef.current);
-            }
-            queueMessageRefreshRef.current = window.setTimeout(() => {
-              poll();
-              queueMessageRefreshRef.current = null;
-            }, 700);
           };
 
           socket.onerror = () => {
@@ -1553,7 +1538,7 @@ export default function SignagePlayer() {
 
       connectSocket();
 
-      const id = setInterval(poll, hasQueueZone() ? 5_000 : 15_000);
+      const id = setInterval(poll, 60_000);
       const handleVisibilityChange = () => {
         if (document.visibilityState === "visible") poll();
       };
@@ -1585,7 +1570,7 @@ export default function SignagePlayer() {
         }
       };
     }
-  }, [poll, currentPairCode, queueSocketUrl, sendOfflineBeacon, showPairing, showSplash, hasQueueZone]);
+  }, [poll, currentPairCode, queueSocketUrl, sendOfflineBeacon, showPairing, showSplash]);
 
   useEffect(() => {
     if (!currentPairCode || showPairing || showSplash) return;

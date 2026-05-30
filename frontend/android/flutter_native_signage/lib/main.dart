@@ -549,20 +549,22 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
             if (text.isNotEmpty && _lastQueueAnnouncementKey != key) {
               _queueAnnouncementReady = true;
               _lastQueueAnnouncementKey = key;
+              final sentAt = decoded['sent_at']?.toString();
+              if (sentAt != null && sentAt.isNotEmpty) {
+                try {
+                  final latencyMs = DateTime.now().toUtc().difference(DateTime.parse(sentAt).toUtc()).inMilliseconds;
+                  _logDebug('queue announcement latency=${latencyMs}ms sent_at=$sentAt type=${decoded['type']}');
+                } catch (_) {}
+              }
               await _speak(text);
+              return;
             }
-          }
-          if (decoded['type'] == 'queue_refresh' || decoded['type'] == 'queue_snapshot') {
-            unawaited(_poll());
-            return;
           }
         }
       }
     } catch (e) {
       _logDebug('queue socket message parse failed: $e');
     }
-
-    unawaited(_poll());
   }
 
   void _scheduleQueueSocketReconnect() {

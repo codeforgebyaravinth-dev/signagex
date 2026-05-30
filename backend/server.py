@@ -1518,7 +1518,7 @@ async def _set_service_appointment_status(aid: str, status: str, user: dict):
         raise HTTPException(status_code=404, detail="Appointment not found")
     # Broadcast immediately with an announcement when called, avoid expensive snapshot building
     try:
-        payload = {"type": "queue_refresh", "client_id": user["id"], "reason": f"status:{status}", "timestamp": now_iso()}
+        payload = {"type": "queue_signal", "client_id": user["id"], "reason": f"status:{status}", "timestamp": now_iso(), "transient": True}
         if status == "called":
             token = str(r.get("token") or "").strip()
             recall_count = int(r.get("recall_count") or 0)
@@ -1536,6 +1536,8 @@ async def _set_service_appointment_status(aid: str, status: str, user: dict):
             logging.getLogger('uvicorn.error').debug(f"broadcast -> scheduled immediate announcement for client {user['id']}")
         except Exception:
             await queue_ws_manager.broadcast(user["id"], payload)
+        # Follow up with a normal refresh so the player eventually syncs the full queue snapshot.
+        asyncio.create_task(_broadcast_queue_refresh(user["id"], reason=f"status:{status}"))
     except Exception:
         # Fallback to existing broadcast path if direct send fails
         await _broadcast_queue_refresh(user["id"], reason=f"status:{status}")

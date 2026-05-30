@@ -111,7 +111,6 @@ export default function PublicBooking() {
   const selectedService = selectedServices[0] || null;
   const selectedServiceDuration = selectedServices.reduce((sum, item) => sum + Math.max(5, Number(item.duration_mins || profile.slot_minutes || 15)), 0) || Math.max(5, Number(profile.slot_minutes || 15));
   const queuePreview = useMemo(() => (Array.isArray(doc?.queue_preview) ? doc.queue_preview : []), [doc?.queue_preview]);
-  const todayBookings = useMemo(() => (Array.isArray(doc?.today_bookings_preview) ? doc.today_bookings_preview : []), [doc?.today_bookings_preview]);
   const bookingDevices = useMemo(() => (Array.isArray(doc?.booking_devices) ? doc.booking_devices : []), [doc?.booking_devices]);
   const bookingLocations = useMemo(() => {
     const fromDoc = Array.isArray(doc?.booking_locations) ? doc.booking_locations : [];
@@ -135,14 +134,11 @@ export default function PublicBooking() {
     });
   }, [form.booking_device_id, form.booking_location, queuePreview]);
 
-  const filteredTodayBookings = useMemo(() => {
-    if (!form.booking_location && !form.booking_device_id) return todayBookings;
-    return todayBookings.filter((item) => {
-      const byDevice = form.booking_device_id ? String(item?.routed_device_id || "") === String(form.booking_device_id) : true;
-      const byLocation = form.booking_location ? String(item?.routed_location || "").trim().toLowerCase() === String(form.booking_location || "").trim().toLowerCase() : true;
-      return byDevice && byLocation;
-    });
-  }, [form.booking_device_id, form.booking_location, todayBookings]);
+  const currentlyServingToken = useMemo(() => {
+    const serving = filteredQueuePreview.find((item) => String(item?.status || "").toLowerCase() === "called") || filteredQueuePreview[0] || null;
+    const token = String(serving?.token || "").trim();
+    return token || null;
+  }, [filteredQueuePreview]);
 
   const approxWaitMinutes = filteredQueuePreview.reduce((sum, item) => sum + Math.max(5, Number(item?.service_duration_mins || profile.slot_minutes || 15)), 0) + Number(selectedServiceDuration || 15);
   const availableSlots = useMemo(() => {
@@ -521,9 +517,8 @@ export default function PublicBooking() {
                 </div>
               </div>
               <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4 p-4 sm:p-6">
-                <div className="rounded-2xl bg-[#F8FAFC] p-4 border border-[#E5E7EB]"><div className="text-[10px] uppercase tracking-wider text-[#6B7280]">Live Queue</div><div className="font-display text-3xl font-extrabold mt-1">{filteredQueuePreview.length}</div><div className="text-xs text-[#6B7280]">Called + pending now</div></div>
+                <div className="rounded-2xl bg-[#F8FAFC] p-4 border border-[#E5E7EB]"><div className="text-[10px] uppercase tracking-wider text-[#6B7280]">Currently serving token</div><div className="font-display text-3xl font-extrabold mt-1">{currentlyServingToken || "—"}</div><div className="text-xs text-[#6B7280]">The token being served right now</div></div>
                 <div className="rounded-2xl bg-[#F8FAFC] p-4 border border-[#E5E7EB]"><div className="text-[10px] uppercase tracking-wider text-[#6B7280]">Live wait</div><div className="font-display text-3xl font-extrabold mt-1">~{approxWaitMinutes}m</div><div className="text-xs text-[#6B7280]">Updated every 20 sec</div></div>
-                <div className="rounded-2xl bg-[#F8FAFC] p-4 border border-[#E5E7EB]"><div className="text-[10px] uppercase tracking-wider text-[#6B7280]">Today's bookings</div><div className="font-display text-3xl font-extrabold mt-1">{Number(doc?.today_bookings_count || filteredTodayBookings.length || 0)}</div><div className="text-xs text-[#6B7280]">All statuses for today</div></div>
                 <div className="rounded-2xl bg-[#F8FAFC] p-4 border border-[#E5E7EB]"><div className="text-[10px] uppercase tracking-wider text-[#6B7280]">Hours</div><div className="font-semibold mt-1">{profile.hours || "Open daily"}</div><div className="text-xs text-[#6B7280]">Plan your visit</div></div>
                 <div className="rounded-2xl bg-[#F8FAFC] p-4 border border-[#E5E7EB]"><div className="text-[10px] uppercase tracking-wider text-[#6B7280]">Starting from</div><div className="font-display text-3xl font-extrabold mt-1">₹{Number(selectedService?.price ?? profile.fee ?? 0).toLocaleString()}</div><div className="text-xs text-[#6B7280]">Selected service</div></div>
               </div>
@@ -531,48 +526,23 @@ export default function PublicBooking() {
                 <div className="rounded-2xl border border-[#E5E7EB] bg-[#F8FAFC] p-4">
                   <div className="flex items-center justify-between gap-3 mb-3">
                     <div>
-                      <div className="text-[10px] uppercase tracking-wider text-[#6B7280]">Live queue</div>
+                      <div className="text-[10px] uppercase tracking-wider text-[#6B7280]">Currently serving token</div>
                       <div className="font-display text-xl font-extrabold tracking-tight">Now serving</div>
                     </div>
-                    <div className="text-xs text-[#6B7280]">{filteredQueuePreview.length ? `${filteredQueuePreview.length} upcoming` : "No one waiting"}</div>
+                    <div className="text-xs text-[#6B7280]">{currentlyServingToken ? `Token #${currentlyServingToken}` : "No token serving"}</div>
                   </div>
                   <div className="flex gap-2 overflow-x-auto pb-1">
-                    {filteredQueuePreview.length === 0 ? (
-                      <div className="text-sm text-[#6B7280]">The queue is empty right now.</div>
-                    ) : filteredQueuePreview.map((item) => (
-                      <div key={`${item.token}-${item.wait_after_mins}`} className="min-w-[160px] sm:min-w-[180px] rounded-xl bg-white border border-[#E5E7EB] p-3 shadow-sm">
-                        <div className="text-[10px] uppercase tracking-wider text-[#6B7280]">Token #{item.token}</div>
-                        <div className="font-semibold text-sm mt-1 truncate">{item.service_name || "Service"}</div>
-                        <div className="text-xs text-[#6B7280] mt-1">{item.service_duration_mins} min service</div>
-                        <div className="text-xs text-[#6B7280] mt-1 truncate">{item.routed_location || "Default location"}</div>
-                        <div className="text-xs font-semibold text-[#111827] mt-2">Approx start in {item.wait_after_mins}m</div>
+                    {currentlyServingToken ? (
+                      <div className="min-w-[220px] rounded-xl bg-white border border-[#E5E7EB] p-4 shadow-sm">
+                        <div className="text-[10px] uppercase tracking-wider text-[#6B7280]">Currently serving</div>
+                        <div className="font-display text-4xl font-extrabold tracking-tight text-[#111827] mt-1">Token #{currentlyServingToken}</div>
+                        <div className="text-xs text-[#6B7280] mt-2">This is the token being served on screen right now.</div>
                       </div>
-                    ))}
+                    ) : (
+                      <div className="text-sm text-[#6B7280]">The queue is empty right now.</div>
+                    )}
                   </div>
                 </div>
-              </div>
-            </div>
-
-            <div className="rounded-[1.25rem] border border-[#E5E7EB] bg-white p-4 sm:p-5">
-              <div className="flex items-center justify-between gap-3 mb-3">
-                <div>
-                  <div className="text-[10px] uppercase tracking-wider text-[#6B7280]">Today's bookings</div>
-                  <div className="font-display text-xl font-extrabold tracking-tight">Separate from live queue</div>
-                </div>
-                <div className="text-xs text-[#6B7280]">{filteredTodayBookings.length} items</div>
-              </div>
-              <div className="grid gap-2 sm:grid-cols-2">
-                {filteredTodayBookings.slice(0, 6).map((item) => (
-                  <div key={`today-booking-${item.id || item.token}`} className="rounded-xl border border-[#E5E7EB] bg-[#F8FAFC] p-3">
-                    <div className="flex items-center justify-between">
-                      <div className="text-xs uppercase tracking-wider text-[#6B7280]">Token #{item.token}</div>
-                      <div className="text-[11px] uppercase tracking-wider font-semibold text-[#374151]">{item.status}</div>
-                    </div>
-                    <div className="mt-1 font-semibold text-sm truncate">{item.patient_name || item.service_name || "Booking"}</div>
-                    <div className="mt-1 text-xs text-[#6B7280] truncate">{item.routed_location || "Default location"}</div>
-                  </div>
-                ))}
-                {filteredTodayBookings.length === 0 ? <div className="text-sm text-[#6B7280]">No bookings logged yet for this location filter.</div> : null}
               </div>
             </div>
 
