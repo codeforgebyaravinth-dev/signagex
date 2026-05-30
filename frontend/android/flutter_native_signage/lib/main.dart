@@ -129,6 +129,7 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
   bool menuButtonVisible = false;
   bool kioskModeEnabled = true;
   bool kioskProvisionWarningShown = false;
+  Timer? pollTimer;
   Timer? providerTimer;
   Timer? weatherTimer;
   Timer? menuButtonHideTimer;
@@ -177,6 +178,7 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    pollTimer?.cancel();
     providerTimer?.cancel();
     weatherTimer?.cancel();
     menuButtonHideTimer?.cancel();
@@ -218,6 +220,7 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
     if (state == AppLifecycleState.resumed) {
       _applyAndroidKioskMode();
       if (currentPairCode != null && !showPairing && !showSplash) {
+        _poll();
         unawaited(_connectContentSocket());
         unawaited(_connectQueueSocket());
       }
@@ -363,6 +366,10 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
     _poll();
   }
 
+  int _pollIntervalSeconds() {
+    return _hasQueueZone() ? 5 : 15;
+  }
+
   String _normalizedApiBase() {
     final trimmed = apiBase.trim();
     final fallback = trimmed.isEmpty ? 'https://rpsignage.com' : trimmed;
@@ -428,6 +435,13 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
       _logDebug('poll exception: $e');
       _safeSetState(() => errorMessage = "Connection error: ${e.toString()}");
     }
+
+    pollTimer?.cancel();
+    pollTimer = Timer.periodic(Duration(seconds: _pollIntervalSeconds()), (_) {
+      if (currentPairCode != null && !showPairing && !showSplash) {
+        _poll();
+      }
+    });
   }
 
   Future<void> _fetchProviderData(String clientId) async {

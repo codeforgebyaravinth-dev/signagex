@@ -339,10 +339,18 @@ function MediaSlot({ items, label, queuePreview, weatherData, zone, canvasWidth,
         },
       });
     });
+        const id = setInterval(poll, 5_000);
+        const handleVisibilityChange = () => {
+          if (document.visibilityState === "visible") poll();
+        };
+
+        document.addEventListener("visibilitychange", handleVisibilityChange);
 
     return () => {
       cancelled = true;
     };
+          clearInterval(id);
+          document.removeEventListener("visibilitychange", handleVisibilityChange);
   }, [idx, items, handleMediaEnd]);
 
   // Destroy YouTube player on component unmount
@@ -1447,12 +1455,13 @@ export default function SignagePlayer() {
   useEffect(() => {
     if (currentPairCode && !showPairing && !showSplash) {
       poll();
+      const pollIntervalMs = hasQueueZone() ? 5_000 : 15_000;
       const connectSocket = () => {
         if (!currentPairCode || showPairing || showSplash || typeof window === "undefined" || typeof WebSocket === "undefined") return;
 
         const clearRetryTimer = () => {
           if (queueSocketRetryRef.current) {
-            window.clearTimeout(queueSocketRetryRef.current);
+      const id = setInterval(poll, pollIntervalMs);
             queueSocketRetryRef.current = null;
           }
         };
