@@ -358,6 +358,7 @@ export default function ClientPlaylists() {
   const [playlists, setPlaylists] = useState([]);
   const [media, setMedia] = useState([]);
   const [templates, setTemplates] = useState([]);
+  const [branches, setBranches] = useState([]);
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState(null);
   const [activeZone, setActiveZone] = useState("");
@@ -365,10 +366,11 @@ export default function ClientPlaylists() {
 
   const load = async () => {
     try {
-      const [p, m, t] = await Promise.all([api.get("/client/playlists"), api.get("/client/media"), api.get("/client/templates")]);
+      const [p, m, t, b] = await Promise.all([api.get("/client/playlists"), api.get("/client/media"), api.get("/client/templates"), api.get("/client/branches")]);
       setPlaylists(p.data);
       setMedia(m.data);
       setTemplates(t.data);
+      setBranches(Array.isArray(b.data) ? b.data : []);
     } catch {}
   };
 
@@ -420,7 +422,7 @@ export default function ClientPlaylists() {
       if (playlist.main_items) mappedZoneItems.main = playlist.main_items;
       if (playlist.sidebar_items) mappedZoneItems.sidebar = playlist.sidebar_items;
     }
-    setForm({ name: playlist.name, template_id: templateId, zone_items: mappedZoneItems, ticker_messages: tickerMessages });
+    setForm({ name: playlist.name, branch_id: playlist.branch_id || "", template_id: templateId, zone_items: mappedZoneItems, ticker_messages: tickerMessages });
     setOpen(true);
     if (templateId) applyTemplate(templateId, { ...mappedZoneItems, ticker_messages: tickerMessages });
     setActiveZone(zoneDefs[0]?.id || "main");
@@ -431,6 +433,7 @@ export default function ClientPlaylists() {
     try {
       const payload = {
         name: form.name,
+        branch_id: form.branch_id || null,
         template_id: form.template_id || null,
         zone_items: form.zone_items,
         ticker_messages: form.ticker_messages || [],
@@ -483,6 +486,7 @@ export default function ClientPlaylists() {
                   <Button variant="ghost" size="icon" onClick={() => remove(p.id)} className="text-red-600" data-testid={`delete-playlist-${p.id}`}><Trash2 className="w-3.5 h-3.5" /></Button>
                 </div>
               </div>
+              <div className="text-xs text-[#6B7280] mb-3">Branch: <span className="font-semibold text-[#111827]">{p.branch_name || branches.find((b) => b.id === p.branch_id)?.name || "Global / no branch"}</span></div>
               <div className="text-xs text-[#6B7280] mb-3">Template: <span className="font-semibold text-[#111827]">{templates.find((t) => t.id === p.template_id)?.name || "Default"}</span></div>
               <div className="text-xs text-[#6B7280] mb-3">{total} item(s) across {Object.keys(zoneItems).length || 0} zone(s){(p.ticker_messages?.length || 0) ? ` + ${p.ticker_messages.length} ticker item(s)` : ""}</div>
               <div className="space-y-2">
@@ -509,6 +513,20 @@ export default function ClientPlaylists() {
               <div>
                 <Label className="text-xs uppercase tracking-wider text-[#6B7280]">Name</Label>
                 <Input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} required className="rounded-sm" data-testid="pl-name" />
+              </div>
+              <div>
+                <Label className="text-xs uppercase tracking-wider text-[#6B7280]">Branch</Label>
+                <Select value={form.branch_id || "none"} onValueChange={(value) => setForm({ ...form, branch_id: value === "none" ? "" : value })}>
+                  <SelectTrigger className="rounded-sm" data-testid="playlist-branch-select">
+                    <SelectValue placeholder="Global / no branch" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="none">Global / no branch</SelectItem>
+                    {branches.map((branch) => (
+                      <SelectItem key={branch.id} value={branch.id}>{branch.name || branch.id}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
               </div>
               <div>
                 <Label className="text-xs uppercase tracking-wider text-[#6B7280]">Template</Label>

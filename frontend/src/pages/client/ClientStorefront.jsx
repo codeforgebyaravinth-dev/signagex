@@ -19,6 +19,10 @@ function ServicePanel({ vertical, label, icon: Icon }) {
   const [todayBookings, setTodayBookings] = useState([]);
   const [liveQueue, setLiveQueue] = useState([]);
   const [devices, setDevices] = useState([]);
+  const [branches, setBranches] = useState([]);
+  const [selectedBranch, setSelectedBranch] = useState(null);
+  const [branchDialogOpen, setBranchDialogOpen] = useState(false);
+  const [newBranchName, setNewBranchName] = useState("");
   const [me, setMe] = useState(null);
   const [serviceOpen, setServiceOpen] = useState(false);
   const [serviceIndex, setServiceIndex] = useState(null);
@@ -50,34 +54,44 @@ function ServicePanel({ vertical, label, icon: Icon }) {
     });
   }, []);
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (branchIdOverride = null) => {
     try {
-      const [m, board, d] = await Promise.all([
+      const branchId = branchIdOverride ?? selectedBranch?.id ?? "";
+      const branchQuery = branchId ? `?branch_id=${encodeURIComponent(branchId)}` : "";
+      const [m, board, d, br] = await Promise.all([
         api.get("/client/me"),
-        api.get(`/client/${vertical}/appointments/board`),
-        api.get("/client/devices"),
+        api.get(`/client/${vertical}/appointments/board${branchQuery}`),
+        api.get(`/client/devices${branchQuery}`),
+        api.get('/client/branches'),
       ]);
       setMe(m.data);
       setApts(sortAppointments(board.data?.recent_bookings || []));
       setTodayBookings(sortAppointments(board.data?.today_bookings || []));
       setLiveQueue(sortAppointments(board.data?.live_queue || []));
       setDevices(Array.isArray(d.data) ? d.data : []);
-      if (m.data[profileKey]) {
-        const fetchedProfile = m.data[profileKey] || {};
-        setProfile((current) => ({
-          ...emptyProfile,
-          ...current,
-          ...fetchedProfile,
-          services: Array.isArray(fetchedProfile.services) ? fetchedProfile.services : (Array.isArray(current.services) ? current.services : []),
-        }));
-      }
+      const uniqueBranches = Array.from(new Map((Array.isArray(br.data) ? br.data : []).filter(Boolean).map((branch) => [branch.id, branch])).values());
+      setBranches(uniqueBranches);
+      const branchInState = selectedBranch?.id ? uniqueBranches.find((branch) => branch.id === selectedBranch.id) || null : null;
+      const nextBranch = branchInState || uniqueBranches[0] || null;
+      if (!selectedBranch?.id && nextBranch) setSelectedBranch(nextBranch);
+
+      const branchProfile = nextBranch?.profile || {};
+      const clientProfile = m.data[profileKey] || {};
+      const fetchedProfile = nextBranch?.id ? branchProfile : clientProfile;
+      setProfile((current) => ({
+        ...emptyProfile,
+        ...current,
+        ...fetchedProfile,
+        services: Array.isArray(fetchedProfile.services) ? fetchedProfile.services : (Array.isArray(current.services) ? current.services : []),
+      }));
     } catch {}
-  }, [profileKey, vertical, emptyProfile, sortAppointments]);
+  }, [profileKey, vertical, emptyProfile, sortAppointments, selectedBranch]);
   useEffect(() => { load(); }, [load]);
 
   const save = async () => {
     try {
-      await api.put(`/client/${vertical}/profile`, profile);
+      const branchQuery = activeBranchId ? `?branch_id=${encodeURIComponent(activeBranchId)}` : "";
+      await api.put(`/client/${vertical}/profile${branchQuery}`, profile);
       toast.success(`${label} profile saved`);
       load();
     } catch (e) {
@@ -111,7 +125,7 @@ function ServicePanel({ vertical, label, icon: Icon }) {
     const nextProfile = { ...profile, services: next };
     setProfile(nextProfile);
     setServiceOpen(false);
-    api.put(`/client/${vertical}/profile`, nextProfile)
+    api.put(`/client/${vertical}/profile${activeBranchId ? `?branch_id=${encodeURIComponent(activeBranchId)}` : ""}`, nextProfile)
       .then(() => {
         toast.success(serviceIndex === null ? `${label} service added` : `${label} service updated`);
         load();
@@ -125,7 +139,7 @@ function ServicePanel({ vertical, label, icon: Icon }) {
     const next = services.filter((_, i) => i !== index);
     const nextProfile = { ...profile, services: next };
     setProfile(nextProfile);
-    api.put(`/client/${vertical}/profile`, nextProfile)
+    api.put(`/client/${vertical}/profile${activeBranchId ? `?branch_id=${encodeURIComponent(activeBranchId)}` : ""}`, nextProfile)
       .then(() => {
         toast.success(`${label} service removed`);
         load();
@@ -167,7 +181,7 @@ function ServicePanel({ vertical, label, icon: Icon }) {
       const newProfile = { ...profile, image_url: data.public_url || (data.url ? `${API_BASE}${data.url}` : profile.image_url) };
       setProfile(newProfile);
       // persist immediately
-      await api.put(`/client/${vertical}/profile`, newProfile);
+      await api.put(`/client/${vertical}/profile${activeBranchId ? `?branch_id=${encodeURIComponent(activeBranchId)}` : ""}`, newProfile);
       toast.success("Cover image uploaded and saved");
     } catch (e) {
       toast.error(formatErr(e.response?.data?.detail));
@@ -197,7 +211,7 @@ function ServicePanel({ vertical, label, icon: Icon }) {
     try {
       const selected = services.filter((item) => manualForm.service_ids.includes(item.id));
       const fallback = selected.length ? selected : (services.find((item) => item.id === manualForm.service_id) ? [services.find((item) => item.id === manualForm.service_id)] : (services[0] ? [services[0]] : []));
-      await api.post(`/client/${vertical}/appointments`, {
+      await api.post(`/client/${vertical}/appointments${activeBranchId ? `?branch_id=${encodeURIComponent(activeBranchId)}` : ""}`, {
         patient_name: manualForm.patient_name,
         patient_phone: manualForm.patient_phone,
         preferred_time: manualForm.preferred_time,
@@ -226,8 +240,20 @@ function ServicePanel({ vertical, label, icon: Icon }) {
   const bookingUrl = useMemo(() => {
     // prefer explicit slug (bookingSlug or public_booking_slug) over raw id
     const ref = bookingSlug || me?.public_booking_slug || me?.id || "";
-    return ref ? `${window.location.origin}/book/${encodeURIComponent(ref)}` : "";
-  }, [bookingSlug, me?.public_booking_slug, me?.id]);
+    if (!ref) return "";
+    const base = `${window.location.origin}/book/${encodeURIComponent(ref)}`;
+    return selectedBranch && selectedBranch.id ? `${base}?branch_id=${encodeURIComponent(selectedBranch.id)}` : base;
+  }, [bookingSlug, me?.public_booking_slug, me?.id, selectedBranch]);
+  const activeBranchId = useMemo(() => {
+    const selectedId = selectedBranch?.id || "";
+    if (selectedId) return selectedId;
+    const selectedName = String(selectedBranch?.name || "").trim().toLowerCase();
+    if (selectedName) {
+      const found = branches.find((branch) => String(branch.name || "").trim().toLowerCase() === selectedName);
+      if (found?.id) return found.id;
+    }
+    return "";
+  }, [branches, selectedBranch]);
   const copyLink = async () => {
     try {
       await navigator.clipboard.writeText(bookingUrl);
@@ -237,8 +263,74 @@ function ServicePanel({ vertical, label, icon: Icon }) {
     }
   };
 
+  const createBranch = async () => {
+    try {
+      const payload = { name: newBranchName || `Branch ${Date.now()}` };
+      const { data } = await api.post('/client/branches', payload);
+      setBranchDialogOpen(false);
+      setNewBranchName('');
+      toast.success('Branch created');
+      if (data?.id) setSelectedBranch(data);
+      load(data?.id || null);
+    } catch (e) {
+      toast.error(formatErr(e.response?.data?.detail));
+    }
+  };
+
+  const deleteBranch = async () => {
+    if (!selectedBranch?.id) return;
+    if (!window.confirm(`Delete branch "${selectedBranch.name || selectedBranch.id}"? This removes branch-specific devices, bookings and playlists.`)) return;
+    try {
+      await api.delete(`/client/branches/${encodeURIComponent(selectedBranch.id)}`);
+      toast.success('Branch deleted');
+      setSelectedBranch(null);
+      load(null);
+    } catch (e) {
+      toast.error(formatErr(e.response?.data?.detail));
+    }
+  };
+
   return (
     <div className="space-y-8">
+      <div className="bg-white border border-[#E5E7EB] rounded-2xl overflow-hidden shadow-[0_24px_60px_-36px_rgba(15,23,42,0.22)]">
+        <div className="px-4 sm:px-6 py-5 border-b border-[#E5E7EB] flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4 bg-[#F9FAFB]">
+          <div>
+            <div className="text-[11px] font-semibold uppercase tracking-[0.2em] text-[#6B7280] mb-1">Branch context</div>
+            <h3 className="font-display text-2xl font-extrabold tracking-tight">Active storefront branch</h3>
+            <div className="mt-2 flex flex-wrap items-center gap-2 text-sm text-[#374151]">
+              <span className="inline-flex items-center rounded-full bg-[#111827] px-3 py-1 text-white font-semibold">{selectedBranch?.name || 'Global storefront'}</span>
+              {selectedBranch?.id ? <span className="font-mono text-xs text-[#6B7280]">{selectedBranch.id}</span> : <span className="text-xs text-[#6B7280]">No branch selected</span>}
+            </div>
+          </div>
+          <div className="flex flex-wrap items-center gap-3">
+            <Label className="text-sm font-medium text-[#374151]">Branch</Label>
+            <select
+              value={selectedBranch?.id || ''}
+              onChange={(e) => {
+                const bid = e.target.value;
+                const found = branches.find((b) => b.id === bid);
+                setSelectedBranch(found || null);
+                load(found?.id || null);
+              }}
+              className="min-w-[220px] rounded-md border border-[#D1D5DB] bg-white px-3 py-2 text-sm text-[#111827]"
+            >
+              <option value="">Global</option>
+              {branches.map((branch) => (
+                <option key={branch.id} value={branch.id}>{branch.name}</option>
+              ))}
+            </select>
+            <Button variant="outline" onClick={() => setBranchDialogOpen(true)} className="rounded-xl">
+              <Plus className="w-4 h-4 mr-2" /> Add branch
+            </Button>
+            {selectedBranch?.id ? (
+              <Button variant="outline" onClick={deleteBranch} className="rounded-xl text-red-600 border-red-200 hover:bg-red-50">
+                <Trash2 className="w-4 h-4 mr-2" /> Delete branch
+              </Button>
+            ) : null}
+          </div>
+        </div>
+      </div>
+
       {/* Bookings and tokens (moved to top) */}
       <div className="bg-white border border-[#E5E7EB] rounded-sm overflow-hidden">
         <div className="px-4 sm:px-6 py-4 border-b border-[#E5E7EB] flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
@@ -262,6 +354,7 @@ function ServicePanel({ vertical, label, icon: Icon }) {
           <TableHeader>
             <TableRow className="bg-[#F9FAFB] hover:bg-[#F9FAFB]">
               <TableHead className="text-[11px] uppercase tracking-wider text-[#6B7280]">Token</TableHead>
+              <TableHead className="text-[11px] uppercase tracking-wider text-[#6B7280]">Branch</TableHead>
               <TableHead className="text-[11px] uppercase tracking-wider text-[#6B7280]">Name</TableHead>
               <TableHead className="text-[11px] uppercase tracking-wider text-[#6B7280]">Phone</TableHead>
               <TableHead className="text-[11px] uppercase tracking-wider text-[#6B7280]">Time</TableHead>
@@ -270,10 +363,10 @@ function ServicePanel({ vertical, label, icon: Icon }) {
             </TableRow>
           </TableHeader>
           <TableBody>
-            {apts.length === 0 && <TableRow><TableCell colSpan={6} className="text-center py-10 text-sm text-[#6B7280]">No bookings yet. Share your link to start receiving tokens.</TableCell></TableRow>}
+            {apts.length === 0 && <TableRow><TableCell colSpan={7} className="text-center py-10 text-sm text-[#6B7280]">No bookings yet. Share your link to start receiving tokens.</TableCell></TableRow>}
             {apts.length > 0 && visibleAppointments.length === 0 && !showPastBookings && (
               <TableRow>
-                <TableCell colSpan={6} className="text-center py-10 text-sm text-[#6B7280]">
+                <TableCell colSpan={7} className="text-center py-10 text-sm text-[#6B7280]">
                   No bookings for today. Toggle past bookings to view older queue items.
                 </TableCell>
               </TableRow>
@@ -281,6 +374,11 @@ function ServicePanel({ vertical, label, icon: Icon }) {
             {visibleAppointments.map((a) => (
               <TableRow key={a.id}>
                 <TableCell><span className="inline-flex items-center justify-center w-9 h-9 rounded-sm bg-[#111827] text-white font-mono font-bold">{a.token}</span></TableCell>
+                <TableCell className="text-sm">
+                  <span className="inline-flex items-center rounded-full bg-[#F3F4F6] px-2.5 py-1 text-[11px] uppercase tracking-wider text-[#374151] font-semibold">
+                    {a.branch_name || selectedBranch?.name || 'Global'}
+                  </span>
+                </TableCell>
                 <TableCell>
                   <div className="font-semibold">{a.patient_name}</div>
                   <div className="text-xs text-[#6B7280]">{a.service_name || bookingCta}</div>
@@ -382,6 +480,11 @@ function ServicePanel({ vertical, label, icon: Icon }) {
             <div className="text-[11px] font-semibold uppercase tracking-[0.25em] text-white/60 mb-2">{title}</div>
             <h3 className="font-display text-3xl md:text-4xl font-extrabold tracking-tight">Public storefront</h3>
             <p className="mt-3 text-sm text-white/70 max-w-xl">Add multiple services with prices, images and duration. The same data powers the premium public booking page and your walk-in queue.</p>
+            <div className="mt-4 inline-flex items-center gap-2 rounded-full border border-white/15 bg-white/10 px-3 py-1.5 text-xs text-white/80">
+              <span className="uppercase tracking-[0.2em] text-white/50">Active branch</span>
+              <span className="font-semibold text-white">{selectedBranch?.name || 'Global storefront'}</span>
+              {selectedBranch?.id ? <span className="text-white/50">· {selectedBranch.id.slice(0, 8)}</span> : null}
+            </div>
           </div>
           <div className="flex items-center gap-3 bg-white/10 rounded-2xl px-4 py-3 border border-white/10">
             <Label className="text-xs text-white/70">Accepting bookings</Label>
@@ -480,6 +583,22 @@ function ServicePanel({ vertical, label, icon: Icon }) {
             <DialogFooter className="col-span-2">
               <Button type="button" variant="outline" onClick={() => setServiceOpen(false)} className="rounded-sm">Cancel</Button>
               <Button type="submit" className="rounded-sm bg-[#111827] hover:bg-[#374151] text-white">Save</Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={branchDialogOpen} onOpenChange={setBranchDialogOpen}>
+        <DialogContent className="rounded-2xl max-w-md">
+          <DialogHeader><DialogTitle className="font-display text-2xl font-extrabold tracking-tight">Create branch</DialogTitle></DialogHeader>
+          <form onSubmit={(e) => { e.preventDefault(); createBranch(); }} className="space-y-4">
+            <div>
+              <Label className="text-xs uppercase tracking-wider text-[#6B7280]">Branch name</Label>
+              <Input value={newBranchName} onChange={(e) => setNewBranchName(e.target.value)} required className="rounded-sm" />
+            </div>
+            <DialogFooter>
+              <Button type="button" variant="outline" onClick={() => setBranchDialogOpen(false)} className="rounded-sm">Cancel</Button>
+              <Button type="submit" className="rounded-sm bg-[#111827] hover:bg-[#374151] text-white">Create</Button>
             </DialogFooter>
           </form>
         </DialogContent>

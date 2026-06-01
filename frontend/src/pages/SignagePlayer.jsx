@@ -912,6 +912,11 @@ export default function SignagePlayer() {
   const [customPlacementEnabled, setCustomPlacementEnabled] = useState(false);
   const [zonePlacements, setZonePlacements] = useState({});
   const [zoneMediaModes, setZoneMediaModes] = useState({});
+  const [announcementBanner, setAnnouncementBanner] = useState(null);
+  const queueSocketRef = useRef(null);
+  const contentSocketRef = useRef(null);
+  const lastQueueAnnouncementKeyRef = useRef("");
+  const announcementTimerRef = useRef(null);
   const [viewportSize, setViewportSize] = useState(() => {
     if (typeof window === "undefined") return { width: 1920, height: 1080 };
     return { width: Math.max(1, window.innerWidth || 1920), height: Math.max(1, window.innerHeight || 1080) };
@@ -978,6 +983,18 @@ export default function SignagePlayer() {
       setErr(e.response?.data?.detail || "Could not load");
     }
   }, [pairCode]);
+
+  const loadProvider = useCallback(async () => {
+    if (!payload?.client_id) return;
+    try {
+      let providerUrl = `${BASE}/api/public/providers/${payload.client_id}`;
+      if (payload?.branch_id) providerUrl = `${providerUrl}/branches/${encodeURIComponent(payload.branch_id)}`;
+      const { data } = await axios.get(providerUrl);
+      setProviderData(data);
+    } catch {
+      setProviderData(null);
+    }
+  }, [payload?.client_id, payload?.branch_id]);
 
   useEffect(() => {
     poll();
@@ -1099,22 +1116,106 @@ export default function SignagePlayer() {
     if (!payload?.client_id) return;
     let mounted = true;
 
-    const loadProvider = async () => {
+    const refresh = async () => {
       try {
-        const { data } = await axios.get(`${BASE}/api/public/providers/${payload.client_id}`);
-        if (mounted) setProviderData(data);
+        await loadProvider();
       } catch {
         if (mounted) setProviderData(null);
       }
     };
 
-    loadProvider();
-    const id = setInterval(loadProvider, 20_000);
+    refresh();
+    const id = setInterval(refresh, 120_000);
     return () => {
       mounted = false;
       clearInterval(id);
     };
-  }, [payload?.client_id]);
+  }, [payload?.client_id, payload?.branch_id, loadProvider]);
+
+  useEffect(() => {
+    if (!pairCode) return;
+
+    const baseSocketUrl = (path) => {
+      const url = `${BASE}${path}`;
+      if (url.startsWith("https:")) return url.replace(/^https:/, "wss:");
+      if (url.startsWith("http:")) return url.replace(/^http:/, "ws:");
+      return url;
+    };
+
+    const speakAnnouncement = (text) => {
+      if (!text || typeof window === "undefined" || !window.speechSynthesis) return;
+      try {
+        const utter = new SpeechSynthesisUtterance(text);
+        utter.lang = navigator.language || "en-US";
+        window.speechSynthesis.cancel();
+        window.speechSynthesis.speak(utter);
+      } catch {
+        // ignore speech failures
+      }
+    };
+
+    const attachSocket = (kind, onMessage) => {
+      try {
+        const socket = new WebSocket(baseSocketUrl(`/api/ws/${kind}/${encodeURIComponent(pairCode)}`));
+        socket.onopen = () => {
+          try { console.log(`[signage] ${kind} socket open`, socket.url); } catch {}
+          try { socket.send(JSON.stringify({ type: "subscribe", client_id: pairCode })); } catch {}
+        };
+        socket.onmessage = (event) => {
+          try {
+            const decoded = JSON.parse(event.data || "{}");
+            try { console.log(`[signage] ${kind} socket message`, decoded); } catch {}
+            onMessage(decoded);
+          } catch {
+            // ignore malformed socket payloads
+          }
+        };
+        socket.onerror = (err) => {
+          try { console.error(`[signage] ${kind} socket error`, err); } catch {}
+          try { socket.close(); } catch {}
+        };
+        socket.onclose = () => {
+          try { console.log(`[signage] ${kind} socket closed`); } catch {}
+        };
+        return socket;
+      } catch {
+        return null;
+      }
+    };
+
+    queueSocketRef.current?.close?.();
+    contentSocketRef.current?.close?.();
+
+    queueSocketRef.current = attachSocket("queue", (decoded) => {
+      if (decoded?.announcement?.text) {
+        const key = decoded?.announcement?.key || decoded?.sent_at || decoded?.timestamp || "";
+        if (key && key !== lastQueueAnnouncementKeyRef.current) {
+          lastQueueAnnouncementKeyRef.current = key;
+          setAnnouncementBanner(decoded.announcement.text);
+          clearTimeout(announcementTimerRef.current);
+          announcementTimerRef.current = setTimeout(() => setAnnouncementBanner(null), 12000);
+          speakAnnouncement(decoded.announcement.text);
+        }
+      }
+      if (decoded?.type === "queue_refresh") {
+        loadProvider();
+      }
+    });
+
+    contentSocketRef.current = attachSocket("content", (decoded) => {
+      if (decoded?.type === "content_refresh") {
+        poll();
+      }
+    });
+
+    return () => {
+      clearTimeout(announcementTimerRef.current);
+      try { queueSocketRef.current?.close(); } catch {}
+      try { contentSocketRef.current?.close(); } catch {}
+      queueSocketRef.current = null;
+      contentSocketRef.current = null;
+    };
+  }, [pairCode, loadProvider, poll]);
 
   // show subscription-required overlay if provider subscription inactive
   useEffect(() => {
@@ -1680,6 +1781,12 @@ export default function SignagePlayer() {
 
   return (
     <div ref={wrapRef} className="min-h-screen bg-black text-white flex flex-col" data-testid="signage-player">
+      {announcementBanner ? (
+        <div className="fixed z-[9999] left-1/2 top-4 -translate-x-1/2 rounded-full border border-emerald-300/30 bg-emerald-500/15 px-4 py-2 text-sm font-semibold text-emerald-100 shadow-2xl backdrop-blur-md">
+          {announcementBanner}
+        </div>
+      ) : null}
+
       {voiceError ? (
         <div className="px-4 py-2 border-b border-white/10 bg-red-500/10 text-[11px] text-red-200 font-mono uppercase tracking-wider">
           {voiceError}

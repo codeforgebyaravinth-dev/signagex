@@ -2,7 +2,10 @@
 
 import 'dart:async';
 import 'dart:convert';
-import 'dart:io' show WebSocket;
+import 'dart:io' show WebSocket, File, Directory;
+import 'package:path_provider/path_provider.dart';
+import 'package:crypto/crypto.dart';
+import 'dart:typed_data';
 import 'dart:math';
 
 import 'package:flutter/foundation.dart' show compute, kDebugMode, kIsWeb;
@@ -152,6 +155,161 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
   );
   Size viewportSize = Size.zero;
 
+  // Simple on-device cache manager (manifest + LRU eviction)
+  static const int _cacheMaxBytes = 1500 * 1024 * 1024; // 1.5 GB
+
+  static class _CacheEntry {
+    final String url;
+    final String path;
+    int size;
+    DateTime lastAccess;
+    _CacheEntry(this.url, this.path, this.size, this.lastAccess);
+    Map<String, dynamic> toJson() => {
+      'url': url,
+      'path': path,
+      'size': size,
+      'lastAccess': lastAccess.toIso8601String(),
+    };
+    static _CacheEntry fromJson(Map<String, dynamic> j) => _CacheEntry(
+      j['url'] ?? '', j['path'] ?? '', (j['size'] ?? 0) as int,
+      DateTime.tryParse(j['lastAccess'] ?? '') ?? DateTime.fromMillisecondsSinceEpoch(0),
+    );
+  }
+
+  static class CacheManager {
+    static final Map<String, _CacheEntry> _manifest = {};
+    static Directory? _cacheDir;
+    static bool _initialized = false;
+    static final _downloadController = StreamController<Map<String, String>>.broadcast();
+
+    static Stream<Map<String, String>> get downloadStream => _downloadController.stream;
+
+    static Future<void> init() async {
+      if (_initialized) return;
+      try {
+        _cacheDir = await getApplicationDocumentsDirectory();
+        final dir = Directory('${_cacheDir!.path}/media_cache');
+        if (!await dir.exists()) await dir.create(recursive: true);
+        _cacheDir = dir;
+        final mf = File('${_cacheDir!.path}/cache_manifest.json');
+        if (await mf.exists()) {
+          try {
+            final text = await mf.readAsString();
+            final j = json.decode(text) as Map<String, dynamic>;
+            final entries = (j['entries'] as List<dynamic>?) ?? [];
+            for (final e in entries) {
+              try { final ce = _CacheEntry.fromJson(e as Map<String,dynamic>); _manifest[ce.url] = ce; } catch (_) {}
+            }
+          } catch (_) {}
+        }
+      } catch (_) {}
+      _initialized = true;
+    }
+
+    static String _fileNameForUrl(String url) {
+      final bytes = utf8.encode(url);
+      final digest = sha1.convert(bytes).toString();
+      final extMatch = RegExp(r"(\.[a-zA-Z0-9]{1,5})(?:\?|#|\\z)").firstMatch(url);
+      final ext = extMatch != null ? extMatch.group(1) : '';
+      return '$digest$ext';
+    }
+
+    static Future<String?> getLocalPathIfExists(String url) async {
+      await init();
+      final e = _manifest[url];
+      if (e == null) return null;
+      final f = File(e.path);
+      if (await f.exists()) {
+        e.lastAccess = DateTime.now().toUtc();
+        unawaited(_persistManifest());
+        return e.path;
+      }
+      // missing on disk: remove
+      _manifest.remove(url);
+      unawaited(_persistManifest());
+      return null;
+    }
+
+    static Future<void> ensureDownloaded(String url) async {
+      await init();
+      if (url == null || url.isEmpty) return;
+      if (_manifest.containsKey(url)) {
+        final path = _manifest[url]!.path;
+        if (await File(path).exists()) {
+          _manifest[url]!.lastAccess = DateTime.now().toUtc();
+          unawaited(_persistManifest());
+          return;
+        } else {
+          _manifest.remove(url);
+        }
+      }
+
+      // start download
+      final fname = _fileNameForUrl(url);
+      final dest = '${_cacheDir!.path}/$fname';
+      try {
+        final client = http.Client();
+        final resp = await client.send(http.Request('GET', Uri.parse(url)));
+        if (resp.statusCode != 200) { client.close(); return; }
+        final tmpPath = '$dest.part';
+        final tmpFile = File(tmpPath);
+        final raf = tmpFile.openWrite();
+        int total = 0;
+        await for (final chunk in resp.stream) {
+          raf.add(chunk);
+          total += (chunk?.length ?? 0);
+        }
+        await raf.close();
+        await tmpFile.rename(dest);
+        client.close();
+
+        // enforce size limit
+        await _enforceLimit(total);
+
+        final entry = _CacheEntry(url, dest, total, DateTime.now().toUtc());
+        _manifest[url] = entry;
+        unawaited(_persistManifest());
+        // notify listeners
+        _downloadController.add({'url': url, 'path': dest});
+      } catch (e) {
+        // ignore download errors
+      }
+    }
+
+    static Future<void> _enforceLimit(int incomingSize) async {
+      try {
+        int total = 0;
+        final entries = <_CacheEntry>[];
+        for (final e in _manifest.values) { total += e.size; entries.add(e); }
+        // if available space already enough, return
+        if (total + incomingSize <= _cacheMaxBytes) return;
+        // evict LRU
+        entries.sort((a,b) => a.lastAccess.compareTo(b.lastAccess));
+        for (final e in entries) {
+          try {
+            final f = File(e.path);
+            if (await f.exists()) {
+              await f.delete();
+            }
+          } catch (_) {}
+          total -= e.size;
+          _manifest.remove(e.url);
+          if (total + incomingSize <= _cacheMaxBytes) break;
+        }
+        unawaited(_persistManifest());
+      } catch (_) {}
+    }
+
+    static Future<void> _persistManifest() async {
+      if (_cacheDir == null) return;
+      try {
+        final mf = File('${_cacheDir!.path}/cache_manifest.json');
+        final entries = _manifest.values.map((e) => e.toJson()).toList();
+        await mf.writeAsString(json.encode({'entries': entries}));
+      } catch (_) {}
+    }
+  }
+
   @override
   void initState() {
     super.initState();
@@ -165,12 +323,26 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
   Future<void> _initTts() async {
     try {
       _flutterTts = FlutterTts();
+
       await _flutterTts?.setLanguage('en-US');
+
+      await _flutterTts?.setVolume(1.0);
+
+      await _flutterTts?.setSpeechRate(0.50);
+
+      await _flutterTts?.setPitch(1.0);
+
       await _flutterTts?.awaitSpeakCompletion(true);
-      await _flutterTts?.setSpeechRate(0.55);
-      await _flutterTts?.setPitch(0.98);
+
+      await _flutterTts?.setSharedInstance(true);
+
+      await _flutterTts?.setQueueMode(1);
+
       _ttsReady = true;
+
+      debugPrint("TTS INITIALIZED SUCCESSFULLY");
     } catch (e) {
+      debugPrint("TTS INIT ERROR: $e");
       _ttsReady = false;
     }
   }
@@ -321,7 +493,7 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
                 .timeout(const Duration(seconds: 8));
             if (statusResp.statusCode == 200) {
               final s = await compute(_decodeJsonMap, statusResp.body);
-                _logDebug('pair status: ${s.toString()}');
+              _logDebug('pair status: ${s.toString()}');
               if (s['used'] == true && (s['paired_device_id'] ?? '').toString().isNotEmpty) {
                 // Paired by the client panel — persist pair code and begin normal polling
                 final prefs = await SharedPreferences.getInstance();
@@ -387,8 +559,8 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
     _logDebug('poll start pairCode=$currentPairCode apiBase=${_normalizedApiBase()}');
 
     try {
-        final fp = await _getOrCreateFingerprint();
-        final response = await http
+      final fp = await _getOrCreateFingerprint();
+      final response = await http
           .get(_apiUri('/api/public/player/$currentPairCode'), headers: {'X-Device-Fingerprint': fp})
           .timeout(const Duration(seconds: 12));
 
@@ -404,6 +576,10 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
           errorMessage = "";
           pairingError = "";
         });
+
+        // start cache manager and kick off background downloads for media in payload
+        unawaited(CacheManager.init());
+        unawaited(_ensureMediaCached(data));
 
         // After payload update: attempt websocket connect and let websocket events drive announcements.
         unawaited(_connectContentSocket());
@@ -448,8 +624,15 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
     _logDebug('provider fetch start clientId=$clientId apiBase=${_normalizedApiBase()}');
 
     try {
+      // Use branch-scoped provider route when payload contains branch_id
+      String providerPath = '/api/public/providers/$clientId';
+      try {
+        final branchId = (payload?['branch_id'] ?? '').toString();
+        if (branchId.isNotEmpty) providerPath = '/api/public/providers/$clientId/branches/${Uri.encodeComponent(branchId)}';
+      } catch (_) {}
+
       final response = await http
-          .get(_apiUri('/api/public/providers/$clientId'))
+          .get(_apiUri(providerPath))
           .timeout(const Duration(seconds: 12));
       if (response.statusCode == 200) {
         _logDebug('provider fetch success bytes=${response.bodyBytes.length}');
@@ -463,11 +646,16 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
     }
 
     providerTimer?.cancel();
-    providerTimer = Timer.periodic(const Duration(seconds: 20), (_) async {
+    providerTimer = Timer.periodic(const Duration(seconds: 120), (_) async {
       if (currentPairCode != null && !showPairing && !showSplash) {
         try {
+          String providerPath = '/api/public/providers/$clientId';
+          try {
+            final branchId = (payload?['branch_id'] ?? '').toString();
+            if (branchId.isNotEmpty) providerPath = '/api/public/providers/$clientId/branches/${Uri.encodeComponent(branchId)}';
+          } catch (_) {}
           final response = await http
-              .get(_apiUri('/api/public/providers/$clientId'))
+              .get(_apiUri(providerPath))
               .timeout(const Duration(seconds: 12));
           if (response.statusCode == 200 && mounted) {
             final parsedProvider = await compute(_decodeJsonMap, response.body);
@@ -478,6 +666,54 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
         }
       }
     });
+  }
+
+  Future<void> _ensureMediaCached(Map<String, dynamic> data) async {
+    try {
+      if (data == null) return;
+      final zones = data['zones'] as Map<String, dynamic>?;
+      if (zones == null) return;
+      final seen = <String>{};
+      for (final zid in zones.keys) {
+        final items = (zones[zid] as List<dynamic>?) ?? [];
+        for (final it in items) {
+          if (it is Map<String, dynamic>) {
+            final url = (it['url'] ?? it['content'] ?? it['media_url'] ?? it['media'] ?? '')?.toString() ?? '';
+            if (url.isNotEmpty && !seen.contains(url)) {
+              seen.add(url);
+              unawaited(CacheManager.ensureDownloaded(url));
+            }
+          }
+        }
+      }
+    } catch (e) {
+      // ignore
+    }
+  }
+
+  Widget _cachedImage(String url, BoxFit fit) {
+    return FutureBuilder<String?>(
+      future: CacheManager.getLocalPathIfExists(url),
+      builder: (context, snap) {
+        if (snap.connectionState == ConnectionState.waiting) {
+          // ensure download started while we wait
+          unawaited(CacheManager.ensureDownloaded(url));
+          return Container(color: Colors.black, child: const Center(child: CircularProgressIndicator()));
+        }
+        final path = snap.data;
+        if (path != null && path.isNotEmpty) {
+          return Image.file(File(path), fit: fit, width: double.infinity, height: double.infinity, gaplessPlayback: true);
+        }
+        // fallback to network image and trigger background download
+        unawaited(CacheManager.ensureDownloaded(url));
+        return CachedNetworkImage(
+          imageUrl: url,
+          fit: fit,
+          placeholder: (context, url) => Container(color: Colors.black, child: const Center(child: CircularProgressIndicator())),
+          errorWidget: (context, url, error) => Container(color: Colors.black, child: const Center(child: Icon(Icons.broken_image, color: Colors.white24, size: 48))),
+        );
+      },
+    );
   }
 
   String _queueSocketUrl() {
@@ -498,8 +734,6 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
 
   Future<void> _connectQueueSocket() async {
     if (currentPairCode == null) return;
-    // Only connect websocket for queue updates when this player has a queue zone
-    if (!_hasQueueZone()) return;
     if (_connectingQueueSocket) return;
     _connectingQueueSocket = true;
     try {
@@ -656,6 +890,13 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
       if (message is String && message.isNotEmpty) {
         final decoded = json.decode(message);
         if (decoded is Map<String, dynamic>) {
+          if (decoded['type'] == 'queue_refresh') {
+            final clientId = decoded['client_id']?.toString();
+            if (clientId != null && clientId.isNotEmpty) {
+              _logDebug('queue socket refresh -> fetching provider data for clientId=$clientId');
+              unawaited(_fetchProviderData(clientId));
+            }
+          }
           final announcement = decoded['announcement'];
           if (announcement is Map) {
             final key = announcement['key']?.toString() ?? '';
@@ -703,7 +944,7 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
         _queueSocket = null;
       }
     } catch (_) {}
-          _connectingQueueSocket = false;
+    _connectingQueueSocket = false;
   }
 
   Future<void> _maybeAnnounceQueue() async {
@@ -758,13 +999,29 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
   }
 
   Future<void> _speak(String text) async {
-    if (!_ttsReady || _flutterTts == null) return;
+    if (!_ttsReady || _flutterTts == null) {
+      debugPrint("TTS NOT READY");
+      return;
+    }
+
     try {
-      await _flutterTts?.setSpeechRate(0.55);
-      await _flutterTts?.setPitch(0.98);
+      debugPrint("SPEAKING: $text");
+
       await _flutterTts?.stop();
+
+      await Future.delayed(const Duration(milliseconds: 300));
+
+      await _flutterTts?.setVolume(1.0);
+
+      await _flutterTts?.setSpeechRate(0.50);
+
+      await _flutterTts?.setPitch(1.0);
+
       await _flutterTts?.speak(text);
-    } catch (_) {}
+
+    } catch (e) {
+      debugPrint("TTS SPEAK ERROR: $e");
+    }
   }
 
   Future<void> _checkWeatherZones() async {
@@ -1417,21 +1674,50 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
         payload?['rotation'] ?? payload?['rotation_degrees'] ?? payload?['rotation_angle'] ?? payload?['rotate'] ?? 0
     );
 
-    final baseRotation = 0;
+    final baseRotation =
+    orientationOverride == 'portrait'
+        ? 90
+        : 0;
 
     final rotationDeg = _normalizeRotation(baseRotation + explicitRotation);
     final isQuarterTurn = rotationDeg == 90 || rotationDeg == 270;
-    final surfaceWidth = isQuarterTurn ? viewportSize.height : viewportSize.width;
-    final surfaceHeight = isQuarterTurn ? viewportSize.width : viewportSize.height;
+    final safeViewportWidth =
+    viewportSize.width <= 0
+        ? MediaQuery.of(context).size.width
+        : viewportSize.width;
 
-    final content = ColorFiltered(
-      colorFilter: ColorFilter.mode(
-        Colors.white.withOpacity(brightness),
-        BlendMode.modulate,
+    final safeViewportHeight =
+    viewportSize.height <= 0
+        ? MediaQuery.of(context).size.height
+        : viewportSize.height;
+
+    final surfaceWidth = isQuarterTurn
+        ? safeViewportHeight
+        : safeViewportWidth;
+
+    final surfaceHeight = isQuarterTurn
+        ? safeViewportWidth
+        : safeViewportHeight;
+
+    final content = _buildRotatedSurface(
+      rotationDeg,
+      surfaceWidth,
+      surfaceHeight,
+      ColorFiltered(
+        colorFilter: ColorFilter.mode(
+          Colors.white.withOpacity(brightness),
+          BlendMode.modulate,
+        ),
+        child: hasContent
+            ? _buildContent(
+          visibleZones,
+          canvasWidth,
+          canvasHeight,
+          surfaceWidth,
+          surfaceHeight,
+        )
+            : _buildEmptyScreen(),
       ),
-      child: hasContent
-          ? _buildContent(visibleZones, canvasWidth, canvasHeight, surfaceWidth, surfaceHeight)
-          : _buildEmptyScreen(),
     );
 
     return WillPopScope(
@@ -1450,13 +1736,10 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
                 Container(
                   color: Colors.black,
                 ),
-                ClipRect(
-                  child: SizedBox(
-                    width: surfaceWidth,
-                    height: surfaceHeight,
-                    child: _buildRotatedSurface(rotationDeg, surfaceWidth, surfaceHeight, content),
-                  ),
+                SizedBox.expand(
+                  child: content,
                 ),
+
                 if (menuButtonVisible || menuOpen)
                   Positioned(
                     top: 16,
@@ -1554,38 +1837,76 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
     return [0, 90, 180, 270].contains(normalized) ? normalized : 0;
   }
 
-  Widget _buildRotatedSurface(int rotation, double surfaceWidth, double surfaceHeight, Widget child) {
+  Widget _buildRotatedSurface(
+      int rotation,
+      double surfaceWidth,
+      double surfaceHeight,
+      Widget child,
+      ) {
+    Widget rotated;
+
     switch (rotation) {
       case 90:
-        return Transform.rotate(
+        rotated = Transform.rotate(
           angle: pi / 2,
           alignment: Alignment.topLeft,
           child: Transform.translate(
             offset: Offset(0, -surfaceHeight),
-            child: child,
+            child: SizedBox(
+              width: surfaceWidth,
+              height: surfaceHeight,
+              child: child,
+            ),
           ),
         );
+        break;
+
       case 180:
-        return Transform.rotate(
+        rotated = Transform.rotate(
           angle: pi,
           alignment: Alignment.topLeft,
           child: Transform.translate(
             offset: Offset(-surfaceWidth, -surfaceHeight),
-            child: child,
+            child: SizedBox(
+              width: surfaceWidth,
+              height: surfaceHeight,
+              child: child,
+            ),
           ),
         );
+        break;
+
       case 270:
-        return Transform.rotate(
+        rotated = Transform.rotate(
           angle: 3 * pi / 2,
           alignment: Alignment.topLeft,
           child: Transform.translate(
             offset: Offset(-surfaceWidth, 0),
-            child: child,
+            child: SizedBox(
+              width: surfaceWidth,
+              height: surfaceHeight,
+              child: child,
+            ),
           ),
         );
+        break;
+
       default:
-        return child;
+        rotated = SizedBox(
+          width: surfaceWidth,
+          height: surfaceHeight,
+          child: child,
+        );
     }
+
+    return OverflowBox(
+      minWidth: 0,
+      minHeight: 0,
+      maxWidth: double.infinity,
+      maxHeight: double.infinity,
+      alignment: Alignment.topLeft,
+      child: rotated,
+    );
   }
 
   Widget _buildEmptyScreen() {
@@ -1648,6 +1969,16 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
     final hasCustomPlacements = customPlacementEnabled && zonePlacements.isNotEmpty;
     final renderAsAbsolute = hasAbsoluteLayout || hasCustomPlacements;
     final shouldCompact = fillBlankSpaces && hiddenZoneIds.isNotEmpty && !hasCustomPlacements;
+
+    final effectiveCanvasWidth =
+    viewportWidth > viewportHeight
+        ? canvasWidth
+        : canvasHeight;
+
+    final effectiveCanvasHeight =
+    viewportWidth > viewportHeight
+        ? canvasHeight
+        : canvasWidth;
 
     _logDebug('build content absolute=$renderAsAbsolute compact=$shouldCompact canvas=${canvasWidth.toStringAsFixed(0)}x${canvasHeight.toStringAsFixed(0)} viewport=${viewportWidth.toStringAsFixed(0)}x${viewportHeight.toStringAsFixed(0)} zoneCount=${visibleZones.length}');
 
@@ -1850,16 +2181,7 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
                 color: Colors.white.withOpacity(0.05),
               ),
               padding: const EdgeInsets.all(16),
-              child: CachedNetworkImage(
-                imageUrl: logoUrl,
-                fit: BoxFit.contain,
-                placeholder: (context, url) => const CircularProgressIndicator(),
-                errorWidget: (context, url, error) => const Icon(
-                  Icons.image,
-                  size: 48,
-                  color: Colors.white24,
-                ),
-              ),
+              child: _cachedImage(logoUrl, BoxFit.contain),
             ),
           ),
         );
@@ -2020,10 +2342,10 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
   }
 
   Widget _buildMenuOverlay(
-    List<Map<String, dynamic>> zones,
-    double payloadBrightness,
-    double effectiveBrightnessPercent,
-  ) {
+      List<Map<String, dynamic>> zones,
+      double payloadBrightness,
+      double effectiveBrightnessPercent,
+      ) {
     return FocusTraversalGroup(
       policy: WidgetOrderTraversalPolicy(),
       child: Container(
@@ -2031,539 +2353,133 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
         child: SafeArea(
           child: Center(
             child: Container(
-            width: double.infinity,
-            height: double.infinity,
-            decoration: BoxDecoration(
-              color: const Color(0xFA0F172A),
-              borderRadius: BorderRadius.circular(0),
-              border: Border.all(color: Colors.white10),
-              boxShadow: [
-                BoxShadow(
-                  color: Colors.black.withOpacity(0.9),
-                  blurRadius: 90,
-                  offset: const Offset(0, 28),
-                ),
-              ],
-            ),
+              width: double.infinity,
+              height: double.infinity,
+              decoration: BoxDecoration(
+                color: const Color(0xFA0F172A),
+                borderRadius: BorderRadius.circular(0),
+                border: Border.all(color: Colors.white10),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withOpacity(0.9),
+                    blurRadius: 90,
+                    offset: const Offset(0, 28),
+                  ),
+                ],
+              ),
               child: ClipRRect(
                 borderRadius: BorderRadius.circular(0),
                 child: SingleChildScrollView(
                   child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Container(
-                      padding: const EdgeInsets.all(16),
-                      decoration: BoxDecoration(
-                        color: const Color(0xFA0F172A),
-                        border: Border(
-                          bottom: BorderSide(color: Colors.white.withOpacity(0.1)),
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Container(
+                        padding: const EdgeInsets.all(16),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFA0F172A),
+                          border: Border(
+                            bottom: BorderSide(color: Colors.white.withOpacity(0.1)),
+                          ),
+                        ),
+                        child: Row(
+                          children: [
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  const Text(
+                                    'PLAYER MENU',
+                                    style: TextStyle(
+                                      fontSize: 10,
+                                      letterSpacing: 3,
+                                      color: Colors.white38,
+                                    ),
+                                  ),
+                                  const SizedBox(height: 4),
+                                  const Text(
+                                    'Controls, brightness, and zones',
+                                    style: TextStyle(
+                                      fontSize: 14,
+                                      fontWeight: FontWeight.w600,
+                                      color: Colors.white,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                            _buildMenuButtonItem(
+                              icon: Icons.close,
+                              label: 'Close',
+                              onTap: _toggleMenu,
+                            ),
+                          ],
                         ),
                       ),
-                      child: Row(
-                        children: [
-                          Expanded(
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
+                      Padding(
+                        padding: const EdgeInsets.all(16),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            const Text(
+                              'CONTROLS',
+                              style: TextStyle(
+                                fontSize: 10,
+                                letterSpacing: 3,
+                                color: Colors.white38,
+                              ),
+                            ),
+                            const SizedBox(height: 12),
+                            Wrap(
+                              spacing: 8,
+                              runSpacing: 8,
                               children: [
-                                const Text(
-                                  'PLAYER MENU',
-                                  style: TextStyle(
-                                    fontSize: 10,
-                                    letterSpacing: 3,
-                                    color: Colors.white38,
-                                  ),
+                                _buildMenuButtonItem(
+                                  icon: Icons.fullscreen,
+                                  label: 'Fullscreen',
+                                  onTap: _goFullscreen,
                                 ),
-                                const SizedBox(height: 4),
-                                const Text(
-                                  'Controls, brightness, and zones',
-                                  style: TextStyle(
-                                    fontSize: 14,
-                                    fontWeight: FontWeight.w600,
-                                    color: Colors.white,
-                                  ),
+                                _buildMenuButtonItem(
+                                  icon: Icons.refresh,
+                                  label: 'Reload',
+                                  onTap: _poll,
+                                ),
+                                _buildMenuButtonItem(
+                                  icon: Icons.smartphone,
+                                  label: 'Change Device',
+                                  onTap: _attemptChangeDevice,
+                                ),
+                                _buildMenuButtonItem(
+                                  icon: Icons.exit_to_app,
+                                  label: 'Quit App',
+                                  onTap: _attemptQuitApp,
+                                ),
+                                _buildMenuButtonItem(
+                                  icon: Icons.restore,
+                                  label: 'Restore All Zones',
+                                  onTap: _resetZones,
+                                ),
+                                _buildMenuButtonItem(
+                                  icon: kioskModeEnabled ? Icons.lock : Icons.lock_open,
+                                  label: kioskModeEnabled ? 'Kiosk: ON' : 'Kiosk: OFF',
+                                  onTap: _toggleKioskMode,
                                 ),
                               ],
                             ),
-                          ),
-                          _buildMenuButtonItem(
-                            icon: Icons.close,
-                            label: 'Close',
-                            onTap: _toggleMenu,
-                          ),
-                        ],
-                      ),
-                    ),
-                    Padding(
-                      padding: const EdgeInsets.all(16),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          const Text(
-                            'CONTROLS',
-                            style: TextStyle(
-                              fontSize: 10,
-                              letterSpacing: 3,
-                              color: Colors.white38,
-                            ),
-                          ),
-                          const SizedBox(height: 12),
-                          Wrap(
-                            spacing: 8,
-                            runSpacing: 8,
-                            children: [
-                              _buildMenuButtonItem(
-                                icon: Icons.fullscreen,
-                                label: 'Fullscreen',
-                                onTap: _goFullscreen,
+                            const SizedBox(height: 16),
+                            const Text(
+                              'BRIGHTNESS',
+                              style: TextStyle(
+                                fontSize: 10,
+                                letterSpacing: 3,
+                                color: Colors.white38,
                               ),
-                              _buildMenuButtonItem(
-                                icon: Icons.refresh,
-                                label: 'Reload',
-                                onTap: _poll,
-                              ),
-                              _buildMenuButtonItem(
-                                icon: Icons.smartphone,
-                                label: 'Change Device',
-                                onTap: _attemptChangeDevice,
-                              ),
-                              _buildMenuButtonItem(
-                                icon: Icons.exit_to_app,
-                                label: 'Quit App',
-                                onTap: _attemptQuitApp,
-                              ),
-                              _buildMenuButtonItem(
-                                icon: Icons.restore,
-                                label: 'Restore All Zones',
-                                onTap: _resetZones,
-                              ),
-                              _buildMenuButtonItem(
-                                icon: kioskModeEnabled ? Icons.lock : Icons.lock_open,
-                                label: kioskModeEnabled ? 'Kiosk: ON' : 'Kiosk: OFF',
-                                onTap: _toggleKioskMode,
-                              ),
-                            ],
-                          ),
-                          const SizedBox(height: 16),
-                          const Text(
-                            'BRIGHTNESS',
-                            style: TextStyle(
-                              fontSize: 10,
-                              letterSpacing: 3,
-                              color: Colors.white38,
                             ),
-                          ),
-                          const SizedBox(height: 8),
-                          Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                            decoration: BoxDecoration(
-                              color: Colors.white.withOpacity(0.05),
-                              borderRadius: BorderRadius.circular(12),
-                              border: Border.all(color: Colors.white10),
-                            ),
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Row(
-                                  children: [
-                                    Text(
-                                      'Output ${effectiveBrightnessPercent.round()}%',
-                                      style: const TextStyle(
-                                        color: Colors.white,
-                                        fontWeight: FontWeight.w600,
-                                      ),
-                                    ),
-                                    const Spacer(),
-                                    Text(
-                                      brightnessOverridePercent == null
-                                          ? 'Source: Payload ${payloadBrightness.round()}%'
-                                          : 'Source: Manual',
-                                      style: TextStyle(
-                                        color: Colors.white.withOpacity(0.6),
-                                        fontSize: 11,
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                                Wrap(
-                                  spacing: 8,
-                                  runSpacing: 8,
-                                  children: [
-                                    _buildPresetChoice(
-                                      icon: Icons.brightness_1,
-                                      label: '10%',
-                                      selected: effectiveBrightnessPercent.round() == 10,
-                                      onTap: () => _setBrightnessOverride(10),
-                                    ),
-                                    _buildPresetChoice(
-                                      icon: Icons.brightness_1,
-                                      label: '20%',
-                                      selected: effectiveBrightnessPercent.round() == 20,
-                                      onTap: () => _setBrightnessOverride(20),
-                                    ),
-                                    _buildPresetChoice(
-                                      icon: Icons.brightness_1,
-                                      label: '40%',
-                                      selected: effectiveBrightnessPercent.round() == 40,
-                                      onTap: () => _setBrightnessOverride(40),
-                                    ),
-                                    _buildPresetChoice(
-                                      icon: Icons.brightness_1,
-                                      label: '70%',
-                                      selected: effectiveBrightnessPercent.round() == 70,
-                                      onTap: () => _setBrightnessOverride(70),
-                                    ),
-                                    _buildPresetChoice(
-                                      icon: Icons.brightness_1,
-                                      label: '100%',
-                                      selected: effectiveBrightnessPercent.round() == 100 && brightnessOverridePercent != null,
-                                      onTap: () => _setBrightnessOverride(100),
-                                    ),
-                                    _buildPresetChoice(
-                                      icon: Icons.auto_mode,
-                                      label: 'PAYLOAD',
-                                      selected: brightnessOverridePercent == null,
-                                      onTap: _setAutoBrightnessFromPayload,
-                                    ),
-                                  ],
-                                ),
-                              ],
-                            ),
-                          ),
-                          const SizedBox(height: 16),
-                          const Text(
-                            'WIDGET STYLE',
-                            style: TextStyle(
-                              fontSize: 10,
-                              letterSpacing: 3,
-                              color: Colors.white38,
-                            ),
-                          ),
-                          const SizedBox(height: 8),
-                          Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                            decoration: BoxDecoration(
-                              color: Colors.white.withOpacity(0.05),
-                              borderRadius: BorderRadius.circular(12),
-                              border: Border.all(color: Colors.white10),
-                            ),
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Text(
-                                  'Weather/Clock size ${(weatherClockScale * 100).round()}%',
-                                  style: const TextStyle(
-                                    color: Colors.white,
-                                    fontWeight: FontWeight.w600,
-                                  ),
-                                ),
-                                const SizedBox(height: 8),
-                                Wrap(
-                                  spacing: 8,
-                                  runSpacing: 8,
-                                  children: [
-                                    _buildPresetChoice(
-                                      label: '70%',
-                                      selected: (weatherClockScale - 0.7).abs() < 0.01,
-                                      onTap: () => _setWeatherClockScale(0.7),
-                                      icon: Icons.text_fields,
-                                    ),
-                                    _buildPresetChoice(
-                                      label: '85%',
-                                      selected: (weatherClockScale - 0.85).abs() < 0.01,
-                                      onTap: () => _setWeatherClockScale(0.85),
-                                      icon: Icons.text_fields,
-                                    ),
-                                    _buildPresetChoice(
-                                      label: '100%',
-                                      selected: (weatherClockScale - 1.0).abs() < 0.01,
-                                      onTap: () => _setWeatherClockScale(1.0),
-                                      icon: Icons.text_fields,
-                                    ),
-                                    _buildPresetChoice(
-                                      label: '115%',
-                                      selected: (weatherClockScale - 1.15).abs() < 0.01,
-                                      onTap: () => _setWeatherClockScale(1.15),
-                                      icon: Icons.text_fields,
-                                    ),
-                                    _buildPresetChoice(
-                                      label: '130%',
-                                      selected: (weatherClockScale - 1.3).abs() < 0.01,
-                                      onTap: () => _setWeatherClockScale(1.3),
-                                      icon: Icons.text_fields,
-                                    ),
-                                    _buildPresetChoice(
-                                      label: '150%',
-                                      selected: (weatherClockScale - 1.5).abs() < 0.01,
-                                      onTap: () => _setWeatherClockScale(1.5),
-                                      icon: Icons.text_fields,
-                                    ),
-                                  ],
-                                ),
-                                const SizedBox(height: 6),
-                                Text(
-                                  'Text color',
-                                  style: TextStyle(
-                                    color: Colors.white.withOpacity(0.7),
-                                    fontSize: 11,
-                                  ),
-                                ),
-                                const SizedBox(height: 8),
-                                Wrap(
-                                  spacing: 8,
-                                  runSpacing: 8,
-                                  children: _themeColors.entries.map((entry) {
-                                    final selected = weatherClockTextColorKey == entry.key;
-                                    return _buildColorChoice(
-                                      selected: selected,
-                                      color: entry.value,
-                                      label: entry.key.toUpperCase(),
-                                      onTap: () => _setWeatherClockTextColor(entry.key),
-                                    );
-                                  }).toList(),
-                                ),
-                              ],
-                            ),
-                          ),
-                          const SizedBox(height: 16),
-                          const Text(
-                            'RSS / TICKER',
-                            style: TextStyle(
-                              fontSize: 10,
-                              letterSpacing: 3,
-                              color: Colors.white38,
-                            ),
-                          ),
-                          const SizedBox(height: 8),
-                          Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                            decoration: BoxDecoration(
-                              color: Colors.white.withOpacity(0.05),
-                              borderRadius: BorderRadius.circular(12),
-                              border: Border.all(color: Colors.white10),
-                            ),
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Text(
-                                  'Ticker speed ${tickerSpeed.round()}',
-                                  style: const TextStyle(
-                                    color: Colors.white,
-                                    fontWeight: FontWeight.w600,
-                                  ),
-                                ),
-                                const SizedBox(height: 8),
-                                Wrap(
-                                  spacing: 8,
-                                  runSpacing: 8,
-                                  children: [
-                                    _buildPresetChoice(
-                                      label: '20',
-                                      selected: tickerSpeed.round() == 20,
-                                      onTap: () => _setTickerSpeed(20),
-                                      icon: Icons.speed,
-                                    ),
-                                    _buildPresetChoice(
-                                      label: '40',
-                                      selected: tickerSpeed.round() == 40,
-                                      onTap: () => _setTickerSpeed(40),
-                                      icon: Icons.speed,
-                                    ),
-                                    _buildPresetChoice(
-                                      label: '60',
-                                      selected: tickerSpeed.round() == 60,
-                                      onTap: () => _setTickerSpeed(60),
-                                      icon: Icons.speed,
-                                    ),
-                                    _buildPresetChoice(
-                                      label: '80',
-                                      selected: tickerSpeed.round() == 80,
-                                      onTap: () => _setTickerSpeed(80),
-                                      icon: Icons.speed,
-                                    ),
-                                    _buildPresetChoice(
-                                      label: '100',
-                                      selected: tickerSpeed.round() == 100,
-                                      onTap: () => _setTickerSpeed(100),
-                                      icon: Icons.speed,
-                                    ),
-                                    _buildPresetChoice(
-                                      label: '120',
-                                      selected: tickerSpeed.round() == 120,
-                                      onTap: () => _setTickerSpeed(120),
-                                      icon: Icons.speed,
-                                    ),
-                                    _buildPresetChoice(
-                                      label: '140',
-                                      selected: tickerSpeed.round() == 140,
-                                      onTap: () => _setTickerSpeed(140),
-                                      icon: Icons.speed,
-                                    ),
-                                  ],
-                                ),
-                                const SizedBox(height: 6),
-                                Text(
-                                  'Ticker text color',
-                                  style: TextStyle(
-                                    color: Colors.white.withOpacity(0.7),
-                                    fontSize: 11,
-                                  ),
-                                ),
-                                const SizedBox(height: 8),
-                                Wrap(
-                                  spacing: 8,
-                                  runSpacing: 8,
-                                  children: _themeColors.entries.map((entry) {
-                                    final selected = tickerTextColorKey == entry.key;
-                                    return _buildColorChoice(
-                                      selected: selected,
-                                      color: entry.value,
-                                      label: entry.key.toUpperCase(),
-                                      onTap: () => _setTickerTextColor(entry.key),
-                                    );
-                                  }).toList(),
-                                ),
-                                const SizedBox(height: 8),
-                                Text(
-                                  'Ticker background',
-                                  style: TextStyle(
-                                    color: Colors.white.withOpacity(0.7),
-                                    fontSize: 11,
-                                  ),
-                                ),
-                                const SizedBox(height: 8),
-                                Wrap(
-                                  spacing: 8,
-                                  runSpacing: 8,
-                                  children: [
-                                    _buildColorChoice(
-                                      selected: tickerBackgroundColorKey == 'black',
-                                      color: Colors.black,
-                                      label: 'BLACK',
-                                      onTap: () => _setTickerBackgroundColor('black'),
-                                    ),
-                                    _buildColorChoice(
-                                      selected: tickerBackgroundColorKey == 'navy',
-                                      color: const Color(0xFF0B1220),
-                                      label: 'NAVY',
-                                      onTap: () => _setTickerBackgroundColor('navy'),
-                                    ),
-                                    _buildColorChoice(
-                                      selected: tickerBackgroundColorKey == 'transparent',
-                                      color: Colors.white10,
-                                      label: 'TRANSPARENT',
-                                      onTap: () => _setTickerBackgroundColor('transparent'),
-                                    ),
-                                  ],
-                                ),
-                              ],
-                            ),
-                          ),
-                          const SizedBox(height: 16),
-                          const Text(
-                            'ORIENTATION',
-                            style: TextStyle(
-                              fontSize: 10,
-                              letterSpacing: 3,
-                              color: Colors.white38,
-                            ),
-                          ),
-                          const SizedBox(height: 8),
-                          Row(
-                            children: ['auto', 'landscape', 'portrait'].map((mode) {
-                              final isSelected = orientationOverride == mode;
-                                return Expanded(
-                                child: Padding(
-                                  padding: const EdgeInsets.symmetric(horizontal: 4),
-                                  child: TextButton(
-                                    onPressed: () => _setOrientation(mode),
-                                    style: ButtonStyle(
-                                      padding: MaterialStateProperty.all(const EdgeInsets.symmetric(vertical: 8)),
-                                      backgroundColor: MaterialStateProperty.resolveWith((states) =>
-                                        isSelected ? Colors.cyan.withOpacity(0.2) : Colors.white.withOpacity(0.05)
-                                      ),
-                                      shape: MaterialStateProperty.all(RoundedRectangleBorder(
-                                        borderRadius: BorderRadius.circular(12),
-                                        side: BorderSide(color: isSelected ? Colors.cyan.withOpacity(0.4) : Colors.white10),
-                                      )),
-                                    ),
-                                    child: Text(
-                                      mode.toUpperCase(),
-                                      textAlign: TextAlign.center,
-                                      style: TextStyle(
-                                        fontSize: 10,
-                                        fontWeight: FontWeight.w600,
-                                        letterSpacing: 2,
-                                        color: isSelected ? Colors.cyanAccent : Colors.white70,
-                                      ),
-                                    ),
-                                  ),
-                                ),
-                              );
-                            }).toList(),
-                          ),
-                          const SizedBox(height: 12),
-                          Wrap(
-                            spacing: 8,
-                            runSpacing: 8,
-                            children: [
-                              _buildMenuButtonItem(
-                                icon: fillBlankSpaces ? Icons.view_agenda : Icons.view_column,
-                                label: fillBlankSpaces ? 'FILL BLANK SPACES' : 'PACK ZONES',
-                                onTap: () => _setFillBlankSpaces(!fillBlankSpaces),
-                              ),
-                              _buildMenuButtonItem(
-                                icon: customPlacementEnabled ? Icons.place : Icons.linear_scale,
-                                label: customPlacementEnabled ? 'CUSTOM PLACEMENT ON' : 'CUSTOM PLACEMENT OFF',
-                                onTap: () => _setCustomPlacementEnabled(!customPlacementEnabled),
-                              ),
-                            ],
-                          ),
-                        ],
-                      ),
-                    ),
-                    Container(
-                      height: 1,
-                      color: Colors.white.withOpacity(0.1),
-                    ),
-                    Padding(
-                      padding: const EdgeInsets.all(16),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Row(
-                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                            children: [
-                              const Text(
-                                'ZONE SETTINGS',
-                                style: TextStyle(
-                                  fontSize: 10,
-                                  letterSpacing: 3,
-                                  color: Colors.white38,
-                                ),
-                              ),
-                              Text(
-                                '${zones.where((z) => !hiddenZoneIds.contains(z['id'])).length}/${zones.length}',
-                                style: const TextStyle(
-                                  fontSize: 10,
-                                  letterSpacing: 2,
-                                  color: Colors.white30,
-                                ),
-                              ),
-                            ],
-                          ),
-                          const SizedBox(height: 12),
-                          ...zones.map((zone) {
-                            final zoneId = zone['id']?.toString() ?? '';
-                            final zoneName = zone['name']?.toString() ?? '';
-                            final zoneRole = zone['role']?.toString() ?? '';
-                            final isHidden = hiddenZoneIds.contains(zoneId);
-
-                            return Container(
-                              margin: const EdgeInsets.only(bottom: 8),
-                              padding: const EdgeInsets.all(12),
+                            const SizedBox(height: 8),
+                            Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
                               decoration: BoxDecoration(
                                 color: Colors.white.withOpacity(0.05),
-                                borderRadius: BorderRadius.circular(16),
+                                borderRadius: BorderRadius.circular(12),
                                 border: Border.all(color: Colors.white10),
                               ),
                               child: Column(
@@ -2571,110 +2487,487 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
                                 children: [
                                   Row(
                                     children: [
-                                      Expanded(
-                                        child: Column(
-                                          crossAxisAlignment: CrossAxisAlignment.start,
-                                          children: [
-                                            Text(
-                                              zoneName,
-                                              style: const TextStyle(
-                                                color: Colors.white,
-                                                fontWeight: FontWeight.w500,
-                                              ),
-                                            ),
-                                            Text(
-                                              '$zoneRole · ${zone['width_px'] ?? 0}x${zone['height_px'] ?? 0}',
-                                              style: TextStyle(
-                                                fontSize: 11,
-                                                color: Colors.white.withOpacity(0.4),
-                                                letterSpacing: 2,
-                                              ),
-                                            ),
-                                          ],
+                                      Text(
+                                        'Output ${effectiveBrightnessPercent.round()}%',
+                                        style: const TextStyle(
+                                          color: Colors.white,
+                                          fontWeight: FontWeight.w600,
                                         ),
                                       ),
-                                      TextButton(
-                                        onPressed: () {
-                                          setState(() {
-                                            if (isHidden) {
-                                              hiddenZoneIds.remove(zoneId);
-                                            } else {
-                                              hiddenZoneIds.add(zoneId);
-                                            }
-                                          });
-                                          _saveZonePreferences();
-                                        },
-                                        style: ButtonStyle(
-                                          padding: MaterialStateProperty.all(const EdgeInsets.symmetric(
-                                            horizontal: 12,
-                                            vertical: 6,
-                                          )),
-                                          backgroundColor: MaterialStateProperty.resolveWith((states) =>
-                                            isHidden ? Colors.white.withOpacity(0.1) : Colors.red.withOpacity(0.15)
-                                          ),
-                                          shape: MaterialStateProperty.all(RoundedRectangleBorder(
-                                            borderRadius: BorderRadius.circular(20),
-                                          )),
-                                        ),
-                                        child: Row(
-                                          mainAxisSize: MainAxisSize.min,
-                                          children: [
-                                            Icon(
-                                              isHidden ? Icons.visibility : Icons.visibility_off,
-                                              size: 14,
-                                              color: isHidden ? Colors.white70 : Colors.redAccent,
-                                            ),
-                                            const SizedBox(width: 4),
-                                            Text(
-                                              isHidden ? 'SHOW' : 'HIDE',
-                                              style: TextStyle(
-                                                fontSize: 10,
-                                                fontWeight: FontWeight.w600,
-                                                letterSpacing: 2,
-                                                color: isHidden ? Colors.white70 : Colors.redAccent,
-                                              ),
-                                            ),
-                                          ],
+                                      const Spacer(),
+                                      Text(
+                                        brightnessOverridePercent == null
+                                            ? 'Source: Payload ${payloadBrightness.round()}%'
+                                            : 'Source: Manual',
+                                        style: TextStyle(
+                                          color: Colors.white.withOpacity(0.6),
+                                          fontSize: 11,
                                         ),
                                       ),
                                     ],
                                   ),
-                                  const SizedBox(height: 10),
-                                  DropdownButtonFormField<String>(
-                                    value: zoneMediaModes[zoneId] ?? _getDefaultZoneMediaMode(zone),
-                                    isDense: true,
-                                    dropdownColor: const Color(0xFF111827),
-                                    decoration: InputDecoration(
-                                      labelText: 'Media mode',
-                                      labelStyle: const TextStyle(color: Colors.white54, fontSize: 12),
-                                      contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                                      border: OutlineInputBorder(
-                                        borderRadius: BorderRadius.circular(12),
-                                        borderSide: BorderSide(color: Colors.white.withOpacity(0.1)),
+                                  Wrap(
+                                    spacing: 8,
+                                    runSpacing: 8,
+                                    children: [
+                                      _buildPresetChoice(
+                                        icon: Icons.brightness_1,
+                                        label: '10%',
+                                        selected: effectiveBrightnessPercent.round() == 10,
+                                        onTap: () => _setBrightnessOverride(10),
                                       ),
-                                      enabledBorder: OutlineInputBorder(
-                                        borderRadius: BorderRadius.circular(12),
-                                        borderSide: BorderSide(color: Colors.white.withOpacity(0.1)),
+                                      _buildPresetChoice(
+                                        icon: Icons.brightness_1,
+                                        label: '20%',
+                                        selected: effectiveBrightnessPercent.round() == 20,
+                                        onTap: () => _setBrightnessOverride(20),
+                                      ),
+                                      _buildPresetChoice(
+                                        icon: Icons.brightness_1,
+                                        label: '40%',
+                                        selected: effectiveBrightnessPercent.round() == 40,
+                                        onTap: () => _setBrightnessOverride(40),
+                                      ),
+                                      _buildPresetChoice(
+                                        icon: Icons.brightness_1,
+                                        label: '70%',
+                                        selected: effectiveBrightnessPercent.round() == 70,
+                                        onTap: () => _setBrightnessOverride(70),
+                                      ),
+                                      _buildPresetChoice(
+                                        icon: Icons.brightness_1,
+                                        label: '100%',
+                                        selected: effectiveBrightnessPercent.round() == 100 && brightnessOverridePercent != null,
+                                        onTap: () => _setBrightnessOverride(100),
+                                      ),
+                                      _buildPresetChoice(
+                                        icon: Icons.auto_mode,
+                                        label: 'PAYLOAD',
+                                        selected: brightnessOverridePercent == null,
+                                        onTap: _setAutoBrightnessFromPayload,
+                                      ),
+                                    ],
+                                  ),
+                                ],
+                              ),
+                            ),
+                            const SizedBox(height: 16),
+                            const Text(
+                              'WIDGET STYLE',
+                              style: TextStyle(
+                                fontSize: 10,
+                                letterSpacing: 3,
+                                color: Colors.white38,
+                              ),
+                            ),
+                            const SizedBox(height: 8),
+                            Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                              decoration: BoxDecoration(
+                                color: Colors.white.withOpacity(0.05),
+                                borderRadius: BorderRadius.circular(12),
+                                border: Border.all(color: Colors.white10),
+                              ),
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    'Weather/Clock size ${(weatherClockScale * 100).round()}%',
+                                    style: const TextStyle(
+                                      color: Colors.white,
+                                      fontWeight: FontWeight.w600,
+                                    ),
+                                  ),
+                                  const SizedBox(height: 8),
+                                  Wrap(
+                                    spacing: 8,
+                                    runSpacing: 8,
+                                    children: [
+                                      _buildPresetChoice(
+                                        label: '70%',
+                                        selected: (weatherClockScale - 0.7).abs() < 0.01,
+                                        onTap: () => _setWeatherClockScale(0.7),
+                                        icon: Icons.text_fields,
+                                      ),
+                                      _buildPresetChoice(
+                                        label: '85%',
+                                        selected: (weatherClockScale - 0.85).abs() < 0.01,
+                                        onTap: () => _setWeatherClockScale(0.85),
+                                        icon: Icons.text_fields,
+                                      ),
+                                      _buildPresetChoice(
+                                        label: '100%',
+                                        selected: (weatherClockScale - 1.0).abs() < 0.01,
+                                        onTap: () => _setWeatherClockScale(1.0),
+                                        icon: Icons.text_fields,
+                                      ),
+                                      _buildPresetChoice(
+                                        label: '115%',
+                                        selected: (weatherClockScale - 1.15).abs() < 0.01,
+                                        onTap: () => _setWeatherClockScale(1.15),
+                                        icon: Icons.text_fields,
+                                      ),
+                                      _buildPresetChoice(
+                                        label: '130%',
+                                        selected: (weatherClockScale - 1.3).abs() < 0.01,
+                                        onTap: () => _setWeatherClockScale(1.3),
+                                        icon: Icons.text_fields,
+                                      ),
+                                      _buildPresetChoice(
+                                        label: '150%',
+                                        selected: (weatherClockScale - 1.5).abs() < 0.01,
+                                        onTap: () => _setWeatherClockScale(1.5),
+                                        icon: Icons.text_fields,
+                                      ),
+                                    ],
+                                  ),
+                                  const SizedBox(height: 6),
+                                  Text(
+                                    'Text color',
+                                    style: TextStyle(
+                                      color: Colors.white.withOpacity(0.7),
+                                      fontSize: 11,
+                                    ),
+                                  ),
+                                  const SizedBox(height: 8),
+                                  Wrap(
+                                    spacing: 8,
+                                    runSpacing: 8,
+                                    children: _themeColors.entries.map((entry) {
+                                      final selected = weatherClockTextColorKey == entry.key;
+                                      return _buildColorChoice(
+                                        selected: selected,
+                                        color: entry.value,
+                                        label: entry.key.toUpperCase(),
+                                        onTap: () => _setWeatherClockTextColor(entry.key),
+                                      );
+                                    }).toList(),
+                                  ),
+                                ],
+                              ),
+                            ),
+                            const SizedBox(height: 16),
+                            const Text(
+                              'RSS / TICKER',
+                              style: TextStyle(
+                                fontSize: 10,
+                                letterSpacing: 3,
+                                color: Colors.white38,
+                              ),
+                            ),
+                            const SizedBox(height: 8),
+                            Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                              decoration: BoxDecoration(
+                                color: Colors.white.withOpacity(0.05),
+                                borderRadius: BorderRadius.circular(12),
+                                border: Border.all(color: Colors.white10),
+                              ),
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    'Ticker speed ${tickerSpeed.round()}',
+                                    style: const TextStyle(
+                                      color: Colors.white,
+                                      fontWeight: FontWeight.w600,
+                                    ),
+                                  ),
+                                  const SizedBox(height: 8),
+                                  Wrap(
+                                    spacing: 8,
+                                    runSpacing: 8,
+                                    children: [
+                                      _buildPresetChoice(
+                                        label: '20',
+                                        selected: tickerSpeed.round() == 20,
+                                        onTap: () => _setTickerSpeed(20),
+                                        icon: Icons.speed,
+                                      ),
+                                      _buildPresetChoice(
+                                        label: '40',
+                                        selected: tickerSpeed.round() == 40,
+                                        onTap: () => _setTickerSpeed(40),
+                                        icon: Icons.speed,
+                                      ),
+                                      _buildPresetChoice(
+                                        label: '60',
+                                        selected: tickerSpeed.round() == 60,
+                                        onTap: () => _setTickerSpeed(60),
+                                        icon: Icons.speed,
+                                      ),
+                                      _buildPresetChoice(
+                                        label: '80',
+                                        selected: tickerSpeed.round() == 80,
+                                        onTap: () => _setTickerSpeed(80),
+                                        icon: Icons.speed,
+                                      ),
+                                      _buildPresetChoice(
+                                        label: '100',
+                                        selected: tickerSpeed.round() == 100,
+                                        onTap: () => _setTickerSpeed(100),
+                                        icon: Icons.speed,
+                                      ),
+                                      _buildPresetChoice(
+                                        label: '120',
+                                        selected: tickerSpeed.round() == 120,
+                                        onTap: () => _setTickerSpeed(120),
+                                        icon: Icons.speed,
+                                      ),
+                                      _buildPresetChoice(
+                                        label: '140',
+                                        selected: tickerSpeed.round() == 140,
+                                        onTap: () => _setTickerSpeed(140),
+                                        icon: Icons.speed,
+                                      ),
+                                    ],
+                                  ),
+                                  const SizedBox(height: 6),
+                                  Text(
+                                    'Ticker text color',
+                                    style: TextStyle(
+                                      color: Colors.white.withOpacity(0.7),
+                                      fontSize: 11,
+                                    ),
+                                  ),
+                                  const SizedBox(height: 8),
+                                  Wrap(
+                                    spacing: 8,
+                                    runSpacing: 8,
+                                    children: _themeColors.entries.map((entry) {
+                                      final selected = tickerTextColorKey == entry.key;
+                                      return _buildColorChoice(
+                                        selected: selected,
+                                        color: entry.value,
+                                        label: entry.key.toUpperCase(),
+                                        onTap: () => _setTickerTextColor(entry.key),
+                                      );
+                                    }).toList(),
+                                  ),
+                                  const SizedBox(height: 8),
+                                  Text(
+                                    'Ticker background',
+                                    style: TextStyle(
+                                      color: Colors.white.withOpacity(0.7),
+                                      fontSize: 11,
+                                    ),
+                                  ),
+                                  const SizedBox(height: 8),
+                                  Wrap(
+                                    spacing: 8,
+                                    runSpacing: 8,
+                                    children: [
+                                      _buildColorChoice(
+                                        selected: tickerBackgroundColorKey == 'black',
+                                        color: Colors.black,
+                                        label: 'BLACK',
+                                        onTap: () => _setTickerBackgroundColor('black'),
+                                      ),
+                                      _buildColorChoice(
+                                        selected: tickerBackgroundColorKey == 'navy',
+                                        color: const Color(0xFF0B1220),
+                                        label: 'NAVY',
+                                        onTap: () => _setTickerBackgroundColor('navy'),
+                                      ),
+                                      _buildColorChoice(
+                                        selected: tickerBackgroundColorKey == 'transparent',
+                                        color: Colors.white10,
+                                        label: 'TRANSPARENT',
+                                        onTap: () => _setTickerBackgroundColor('transparent'),
+                                      ),
+                                    ],
+                                  ),
+                                ],
+                              ),
+                            ),
+                            const SizedBox(height: 16),
+                            const Text(
+                              'ORIENTATION',
+                              style: TextStyle(
+                                fontSize: 10,
+                                letterSpacing: 3,
+                                color: Colors.white38,
+                              ),
+                            ),
+                            const SizedBox(height: 8),
+                            Row(
+                              children: ['auto', 'landscape', 'portrait'].map((mode) {
+                                final isSelected = orientationOverride == mode;
+                                return Expanded(
+                                  child: Padding(
+                                    padding: const EdgeInsets.symmetric(horizontal: 4),
+                                    child: TextButton(
+                                      onPressed: () => _setOrientation(mode),
+                                      style: ButtonStyle(
+                                        padding: MaterialStateProperty.all(const EdgeInsets.symmetric(vertical: 8)),
+                                        backgroundColor: MaterialStateProperty.resolveWith((states) =>
+                                        isSelected ? Colors.cyan.withOpacity(0.2) : Colors.white.withOpacity(0.05)
+                                        ),
+                                        shape: MaterialStateProperty.all(RoundedRectangleBorder(
+                                          borderRadius: BorderRadius.circular(12),
+                                          side: BorderSide(color: isSelected ? Colors.cyan.withOpacity(0.4) : Colors.white10),
+                                        )),
+                                      ),
+                                      child: Text(
+                                        mode.toUpperCase(),
+                                        textAlign: TextAlign.center,
+                                        style: TextStyle(
+                                          fontSize: 10,
+                                          fontWeight: FontWeight.w600,
+                                          letterSpacing: 2,
+                                          color: isSelected ? Colors.cyanAccent : Colors.white70,
+                                        ),
                                       ),
                                     ),
-                                    style: const TextStyle(color: Colors.white, fontSize: 12),
-                                    items: const [
-                                      DropdownMenuItem(value: 'fit', child: Text('FIT')),
-                                      DropdownMenuItem(value: 'fill', child: Text('FILL')),
-                                      DropdownMenuItem(value: 'stretch', child: Text('STRETCH')),
-                                    ],
-                                    onChanged: (value) {
-                                      if (value != null) _setZoneMediaMode(zoneId, value);
-                                    },
                                   ),
-                                  if (customPlacementEnabled) ...[
+                                );
+                              }).toList(),
+                            ),
+                            const SizedBox(height: 12),
+                            Wrap(
+                              spacing: 8,
+                              runSpacing: 8,
+                              children: [
+                                _buildMenuButtonItem(
+                                  icon: fillBlankSpaces ? Icons.view_agenda : Icons.view_column,
+                                  label: fillBlankSpaces ? 'FILL BLANK SPACES' : 'PACK ZONES',
+                                  onTap: () => _setFillBlankSpaces(!fillBlankSpaces),
+                                ),
+                                _buildMenuButtonItem(
+                                  icon: customPlacementEnabled ? Icons.place : Icons.linear_scale,
+                                  label: customPlacementEnabled ? 'CUSTOM PLACEMENT ON' : 'CUSTOM PLACEMENT OFF',
+                                  onTap: () => _setCustomPlacementEnabled(!customPlacementEnabled),
+                                ),
+                              ],
+                            ),
+                          ],
+                        ),
+                      ),
+                      Container(
+                        height: 1,
+                        color: Colors.white.withOpacity(0.1),
+                      ),
+                      Padding(
+                        padding: const EdgeInsets.all(16),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Row(
+                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                              children: [
+                                const Text(
+                                  'ZONE SETTINGS',
+                                  style: TextStyle(
+                                    fontSize: 10,
+                                    letterSpacing: 3,
+                                    color: Colors.white38,
+                                  ),
+                                ),
+                                Text(
+                                  '${zones.where((z) => !hiddenZoneIds.contains(z['id'])).length}/${zones.length}',
+                                  style: const TextStyle(
+                                    fontSize: 10,
+                                    letterSpacing: 2,
+                                    color: Colors.white30,
+                                  ),
+                                ),
+                              ],
+                            ),
+                            const SizedBox(height: 12),
+                            ...zones.map((zone) {
+                              final zoneId = zone['id']?.toString() ?? '';
+                              final zoneName = zone['name']?.toString() ?? '';
+                              final zoneRole = zone['role']?.toString() ?? '';
+                              final isHidden = hiddenZoneIds.contains(zoneId);
+
+                              return Container(
+                                margin: const EdgeInsets.only(bottom: 8),
+                                padding: const EdgeInsets.all(12),
+                                decoration: BoxDecoration(
+                                  color: Colors.white.withOpacity(0.05),
+                                  borderRadius: BorderRadius.circular(16),
+                                  border: Border.all(color: Colors.white10),
+                                ),
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Row(
+                                      children: [
+                                        Expanded(
+                                          child: Column(
+                                            crossAxisAlignment: CrossAxisAlignment.start,
+                                            children: [
+                                              Text(
+                                                zoneName,
+                                                style: const TextStyle(
+                                                  color: Colors.white,
+                                                  fontWeight: FontWeight.w500,
+                                                ),
+                                              ),
+                                              Text(
+                                                '$zoneRole · ${zone['width_px'] ?? 0}x${zone['height_px'] ?? 0}',
+                                                style: TextStyle(
+                                                  fontSize: 11,
+                                                  color: Colors.white.withOpacity(0.4),
+                                                  letterSpacing: 2,
+                                                ),
+                                              ),
+                                            ],
+                                          ),
+                                        ),
+                                        TextButton(
+                                          onPressed: () {
+                                            setState(() {
+                                              if (isHidden) {
+                                                hiddenZoneIds.remove(zoneId);
+                                              } else {
+                                                hiddenZoneIds.add(zoneId);
+                                              }
+                                            });
+                                            _saveZonePreferences();
+                                          },
+                                          style: ButtonStyle(
+                                            padding: MaterialStateProperty.all(const EdgeInsets.symmetric(
+                                              horizontal: 12,
+                                              vertical: 6,
+                                            )),
+                                            backgroundColor: MaterialStateProperty.resolveWith((states) =>
+                                            isHidden ? Colors.white.withOpacity(0.1) : Colors.red.withOpacity(0.15)
+                                            ),
+                                            shape: MaterialStateProperty.all(RoundedRectangleBorder(
+                                              borderRadius: BorderRadius.circular(20),
+                                            )),
+                                          ),
+                                          child: Row(
+                                            mainAxisSize: MainAxisSize.min,
+                                            children: [
+                                              Icon(
+                                                isHidden ? Icons.visibility : Icons.visibility_off,
+                                                size: 14,
+                                                color: isHidden ? Colors.white70 : Colors.redAccent,
+                                              ),
+                                              const SizedBox(width: 4),
+                                              Text(
+                                                isHidden ? 'SHOW' : 'HIDE',
+                                                style: TextStyle(
+                                                  fontSize: 10,
+                                                  fontWeight: FontWeight.w600,
+                                                  letterSpacing: 2,
+                                                  color: isHidden ? Colors.white70 : Colors.redAccent,
+                                                ),
+                                              ),
+                                            ],
+                                          ),
+                                        ),
+                                      ],
+                                    ),
                                     const SizedBox(height: 10),
                                     DropdownButtonFormField<String>(
-                                      value: zonePlacements[zoneId] ?? 'auto',
+                                      value: zoneMediaModes[zoneId] ?? _getDefaultZoneMediaMode(zone),
                                       isDense: true,
                                       dropdownColor: const Color(0xFF111827),
                                       decoration: InputDecoration(
-                                        labelText: 'Placement',
+                                        labelText: 'Media mode',
                                         labelStyle: const TextStyle(color: Colors.white54, fontSize: 12),
                                         contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
                                         border: OutlineInputBorder(
@@ -2688,26 +2981,55 @@ class _SignagePlayerState extends State<SignagePlayer> with WidgetsBindingObserv
                                       ),
                                       style: const TextStyle(color: Colors.white, fontSize: 12),
                                       items: const [
-                                        DropdownMenuItem(value: 'auto', child: Text('AUTO')),
-                                        DropdownMenuItem(value: 'full', child: Text('FULL')),
-                                        DropdownMenuItem(value: 'left', child: Text('LEFT')),
-                                        DropdownMenuItem(value: 'right', child: Text('RIGHT')),
-                                        DropdownMenuItem(value: 'top', child: Text('TOP')),
-                                        DropdownMenuItem(value: 'bottom', child: Text('BOTTOM')),
-                                        DropdownMenuItem(value: 'center', child: Text('CENTER')),
+                                        DropdownMenuItem(value: 'fit', child: Text('FIT')),
+                                        DropdownMenuItem(value: 'fill', child: Text('FILL')),
+                                        DropdownMenuItem(value: 'stretch', child: Text('STRETCH')),
                                       ],
                                       onChanged: (value) {
-                                        if (value != null) _setZonePlacement(zoneId, value);
+                                        if (value != null) _setZoneMediaMode(zoneId, value);
                                       },
                                     ),
+                                    if (customPlacementEnabled) ...[
+                                      const SizedBox(height: 10),
+                                      DropdownButtonFormField<String>(
+                                        value: zonePlacements[zoneId] ?? 'auto',
+                                        isDense: true,
+                                        dropdownColor: const Color(0xFF111827),
+                                        decoration: InputDecoration(
+                                          labelText: 'Placement',
+                                          labelStyle: const TextStyle(color: Colors.white54, fontSize: 12),
+                                          contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                                          border: OutlineInputBorder(
+                                            borderRadius: BorderRadius.circular(12),
+                                            borderSide: BorderSide(color: Colors.white.withOpacity(0.1)),
+                                          ),
+                                          enabledBorder: OutlineInputBorder(
+                                            borderRadius: BorderRadius.circular(12),
+                                            borderSide: BorderSide(color: Colors.white.withOpacity(0.1)),
+                                          ),
+                                        ),
+                                        style: const TextStyle(color: Colors.white, fontSize: 12),
+                                        items: const [
+                                          DropdownMenuItem(value: 'auto', child: Text('AUTO')),
+                                          DropdownMenuItem(value: 'full', child: Text('FULL')),
+                                          DropdownMenuItem(value: 'left', child: Text('LEFT')),
+                                          DropdownMenuItem(value: 'right', child: Text('RIGHT')),
+                                          DropdownMenuItem(value: 'top', child: Text('TOP')),
+                                          DropdownMenuItem(value: 'bottom', child: Text('BOTTOM')),
+                                          DropdownMenuItem(value: 'center', child: Text('CENTER')),
+                                        ],
+                                        onChanged: (value) {
+                                          if (value != null) _setZonePlacement(zoneId, value);
+                                        },
+                                      ),
+                                    ],
                                   ],
-                                ],
-                              ),
-                            );
-                          }),
-                        ],
+                                ),
+                              );
+                            }),
+                          ],
+                        ),
                       ),
-                    ),
                     ],
                   ),
                 ),
@@ -3241,18 +3563,18 @@ class _PairingScreenState extends State<PairingScreen> {
                             child: Column(
                               mainAxisSize: MainAxisSize.min,
                               children: [
-                                  const SizedBox(
-                                    width: 18,
-                                    height: 18,
-                                    child: CircularProgressIndicator(strokeWidth: 2, color: Colors.cyanAccent),
-                                  ),
-                                  const SizedBox(height: 10),
-                                  Text(
-                                    widget.initialCode != null && widget.initialCode!.isNotEmpty
-                                        ? 'Waiting for client confirmation'
-                                        : 'Requesting code from server...',
-                                    style: const TextStyle(color: Colors.white54),
-                                  ),
+                                const SizedBox(
+                                  width: 18,
+                                  height: 18,
+                                  child: CircularProgressIndicator(strokeWidth: 2, color: Colors.cyanAccent),
+                                ),
+                                const SizedBox(height: 10),
+                                Text(
+                                  widget.initialCode != null && widget.initialCode!.isNotEmpty
+                                      ? 'Waiting for client confirmation'
+                                      : 'Requesting code from server...',
+                                  style: const TextStyle(color: Colors.white54),
+                                ),
                               ],
                             ),
                           ),
@@ -3726,7 +4048,7 @@ class _MediaSlotState extends State<MediaSlot> {
                   },
                   icon: Icon(
                     (hasVideo && videoController!.value.isPlaying) ||
-                            (hasYoutube && youtubeController!.value.isPlaying)
+                        (hasYoutube && youtubeController!.value.isPlaying)
                         ? Icons.pause_circle_filled
                         : Icons.play_circle_fill,
                     color: Colors.white,
@@ -4283,6 +4605,28 @@ class _MediaSlotState extends State<MediaSlot> {
             });
           }
         });
+      // start background download; when complete, switch to local file
+      CacheManager.downloadStream.listen((evt) async {
+        try {
+          final evUrl = evt['url'] ?? '';
+          final path = evt['path'] ?? '';
+          if (evUrl == url && path.isNotEmpty && mounted && _activeVideoSourceKey == sourceKey) {
+            try {
+              final pos = videoController?.value.position ?? Duration.zero;
+              final wasPlaying = videoController?.value.isPlaying ?? false;
+              await videoController?.pause();
+              await videoController?.dispose();
+              videoController = VideoPlayerController.file(File(path), videoPlayerOptions: VideoPlayerOptions(mixWithOthers: true));
+              await videoController?.initialize();
+              await videoController?.seekTo(pos);
+              videoController?.setLooping(widget.items.length == 1);
+              videoController?.setVolume(isMuted ? 0.0 : 1.0);
+              if (wasPlaying) videoController?.play();
+              if (mounted) setState(() {});
+            } catch (_) {}
+          }
+        } catch (_) {}
+      });
     } else {
       final v = videoController!.value;
       if (v.isInitialized && !v.isPlaying) {
@@ -4344,12 +4688,12 @@ class _MediaSlotState extends State<MediaSlot> {
         .take(5)
         .map((raw) => raw as Map<String, dynamic>)
         .map((entry) => {
-              'token': _queueTokenLabel(entry),
-              'name': _queuePatientLabel(entry),
-              'service': _queueServiceLabel(entry),
-              'time': entry['assigned_time']?.toString() ?? entry['preferred_time']?.toString() ?? '${entry['wait_after_mins'] ?? 0} min',
-              'status': (entry['status'] ?? 'pending').toString(),
-            })
+      'token': _queueTokenLabel(entry),
+      'name': _queuePatientLabel(entry),
+      'service': _queueServiceLabel(entry),
+      'time': entry['assigned_time']?.toString() ?? entry['preferred_time']?.toString() ?? '${entry['wait_after_mins'] ?? 0} min',
+      'status': (entry['status'] ?? 'pending').toString(),
+    })
         .toList();
 
     final tableTitle = item['title']?.toString() ?? "Today's bookings";
@@ -4414,120 +4758,120 @@ class _MediaSlotState extends State<MediaSlot> {
               ),
               child: tableEntries.isEmpty
                   ? const Center(
-                      child: Text(
-                        'No bookings yet.',
-                        style: TextStyle(color: Color(0xFF6B7280), fontSize: 15),
-                      ),
-                    )
+                child: Text(
+                  'No bookings yet.',
+                  style: TextStyle(color: Color(0xFF6B7280), fontSize: 15),
+                ),
+              )
                   : SingleChildScrollView(
-                      scrollDirection: Axis.horizontal,
-                      child: SingleChildScrollView(
-                        child: DataTable(
-                          headingRowColor: MaterialStateProperty.all(const Color(0xFFF9FAFB)),
-                          dataRowMinHeight: 56,
-                          dataRowMaxHeight: 64,
-                          columnSpacing: 28,
-                          horizontalMargin: 20,
-                          dividerThickness: 0,
-                          columns: const [
-                            DataColumn(label: Text('Token', style: TextStyle(fontSize: 11, letterSpacing: 1.2, color: Color(0xFF6B7280), fontWeight: FontWeight.w700))),
-                            DataColumn(label: Text('Name', style: TextStyle(fontSize: 11, letterSpacing: 1.2, color: Color(0xFF6B7280), fontWeight: FontWeight.w700))),
-                            DataColumn(label: Text('Service', style: TextStyle(fontSize: 11, letterSpacing: 1.2, color: Color(0xFF6B7280), fontWeight: FontWeight.w700))),
-                            DataColumn(label: Text('Time', style: TextStyle(fontSize: 11, letterSpacing: 1.2, color: Color(0xFF6B7280), fontWeight: FontWeight.w700))),
-                            DataColumn(label: Text('Status', style: TextStyle(fontSize: 11, letterSpacing: 1.2, color: Color(0xFF6B7280), fontWeight: FontWeight.w700))),
-                          ],
-                          rows: tableEntries.map((entry) {
-                            final status = entry['status'].toString().toLowerCase();
-                            final statusLabel = status == 'called' ? 'Currently serving' : status == 'completed' ? 'Completed' : status;
-                            final statusBg = status == 'called'
-                                ? const Color(0xFFECFDF5)
-                                : status == 'completed'
-                                    ? const Color(0xFFF8FAFC)
-                                    : const Color(0xFFF9FAFB);
-                            final statusFg = status == 'called'
-                                ? const Color(0xFF047857)
-                                : status == 'completed'
-                                    ? const Color(0xFF64748B)
-                                    : const Color(0xFF64748B);
+                scrollDirection: Axis.horizontal,
+                child: SingleChildScrollView(
+                  child: DataTable(
+                    headingRowColor: MaterialStateProperty.all(const Color(0xFFF9FAFB)),
+                    dataRowMinHeight: 56,
+                    dataRowMaxHeight: 64,
+                    columnSpacing: 28,
+                    horizontalMargin: 20,
+                    dividerThickness: 0,
+                    columns: const [
+                      DataColumn(label: Text('Token', style: TextStyle(fontSize: 11, letterSpacing: 1.2, color: Color(0xFF6B7280), fontWeight: FontWeight.w700))),
+                      DataColumn(label: Text('Name', style: TextStyle(fontSize: 11, letterSpacing: 1.2, color: Color(0xFF6B7280), fontWeight: FontWeight.w700))),
+                      DataColumn(label: Text('Service', style: TextStyle(fontSize: 11, letterSpacing: 1.2, color: Color(0xFF6B7280), fontWeight: FontWeight.w700))),
+                      DataColumn(label: Text('Time', style: TextStyle(fontSize: 11, letterSpacing: 1.2, color: Color(0xFF6B7280), fontWeight: FontWeight.w700))),
+                      DataColumn(label: Text('Status', style: TextStyle(fontSize: 11, letterSpacing: 1.2, color: Color(0xFF6B7280), fontWeight: FontWeight.w700))),
+                    ],
+                    rows: tableEntries.map((entry) {
+                      final status = entry['status'].toString().toLowerCase();
+                      final statusLabel = status == 'called' ? 'Currently serving' : status == 'completed' ? 'Completed' : status;
+                      final statusBg = status == 'called'
+                          ? const Color(0xFFECFDF5)
+                          : status == 'completed'
+                          ? const Color(0xFFF8FAFC)
+                          : const Color(0xFFF9FAFB);
+                      final statusFg = status == 'called'
+                          ? const Color(0xFF047857)
+                          : status == 'completed'
+                          ? const Color(0xFF64748B)
+                          : const Color(0xFF64748B);
 
-                            return DataRow(
-                              color: MaterialStateProperty.resolveWith<Color?>((states) {
-                                if (status == 'called') return const Color(0xFFECFDF5);
-                                return null;
-                              }),
-                              cells: [
-                                DataCell(
-                                  Container(
-                                    width: 36,
-                                    height: 36,
-                                    alignment: Alignment.center,
-                                    decoration: BoxDecoration(
-                                      color: const Color(0xFF111827),
-                                      borderRadius: BorderRadius.circular(4),
-                                    ),
-                                    child: Text(
-                                      entry['token']!,
-                                      style: const TextStyle(
-                                        color: Colors.white,
-                                        fontFamily: 'monospace',
-                                        fontWeight: FontWeight.w700,
-                                      ),
-                                    ),
-                                  ),
+                      return DataRow(
+                        color: MaterialStateProperty.resolveWith<Color?>((states) {
+                          if (status == 'called') return const Color(0xFFECFDF5);
+                          return null;
+                        }),
+                        cells: [
+                          DataCell(
+                            Container(
+                              width: 36,
+                              height: 36,
+                              alignment: Alignment.center,
+                              decoration: BoxDecoration(
+                                color: const Color(0xFF111827),
+                                borderRadius: BorderRadius.circular(4),
+                              ),
+                              child: Text(
+                                entry['token']!,
+                                style: const TextStyle(
+                                  color: Colors.white,
+                                  fontFamily: 'monospace',
+                                  fontWeight: FontWeight.w700,
                                 ),
-                                DataCell(
-                                  Text(
-                                    entry['name']!,
-                                    style: const TextStyle(
-                                      fontWeight: FontWeight.w600,
-                                      color: Color(0xFF0F172A),
-                                    ),
-                                  ),
+                              ),
+                            ),
+                          ),
+                          DataCell(
+                            Text(
+                              entry['name']!,
+                              style: const TextStyle(
+                                fontWeight: FontWeight.w600,
+                                color: Color(0xFF0F172A),
+                              ),
+                            ),
+                          ),
+                          DataCell(
+                            Text(
+                              entry['service']!,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                fontSize: 12,
+                                color: Color(0xFF6B7280),
+                              ),
+                            ),
+                          ),
+                          DataCell(
+                            Text(
+                              entry['time']!,
+                              style: const TextStyle(
+                                fontFamily: 'monospace',
+                                fontSize: 12,
+                                color: Color(0xFF0F172A),
+                              ),
+                            ),
+                          ),
+                          DataCell(
+                            Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                              decoration: BoxDecoration(
+                                color: statusBg,
+                                borderRadius: BorderRadius.circular(999),
+                              ),
+                              child: Text(
+                                statusLabel,
+                                style: TextStyle(
+                                  fontSize: 11,
+                                  fontWeight: FontWeight.w700,
+                                  letterSpacing: 0.6,
+                                  color: statusFg,
                                 ),
-                                DataCell(
-                                  Text(
-                                    entry['service']!,
-                                    overflow: TextOverflow.ellipsis,
-                                    style: const TextStyle(
-                                      fontSize: 12,
-                                      color: Color(0xFF6B7280),
-                                    ),
-                                  ),
-                                ),
-                                DataCell(
-                                  Text(
-                                    entry['time']!,
-                                    style: const TextStyle(
-                                      fontFamily: 'monospace',
-                                      fontSize: 12,
-                                      color: Color(0xFF0F172A),
-                                    ),
-                                  ),
-                                ),
-                                DataCell(
-                                  Container(
-                                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                                    decoration: BoxDecoration(
-                                      color: statusBg,
-                                      borderRadius: BorderRadius.circular(999),
-                                    ),
-                                    child: Text(
-                                      statusLabel,
-                                      style: TextStyle(
-                                        fontSize: 11,
-                                        fontWeight: FontWeight.w700,
-                                        letterSpacing: 0.6,
-                                        color: statusFg,
-                                      ),
-                                    ),
-                                  ),
-                                ),
-                              ],
-                            );
-                          }).toList(),
-                        ),
-                      ),
-                    ),
+                              ),
+                            ),
+                          ),
+                        ],
+                      );
+                    }).toList(),
+                  ),
+                ),
+              ),
             ),
           ),
         ],
@@ -4537,8 +4881,8 @@ class _MediaSlotState extends State<MediaSlot> {
 
   Widget _buildNotices(Map<String, dynamic> item) {
     final notices = (item['items'] as List<dynamic>?) ??
-      (item['notices'] as List<dynamic>?) ??
-      widget.notices;
+        (item['notices'] as List<dynamic>?) ??
+        widget.notices;
 
     return Container(
       width: double.infinity,
@@ -4638,20 +4982,7 @@ class _MediaSlotState extends State<MediaSlot> {
     if (url.isEmpty) return Container(color: Colors.black);
 
     if (_isImage(url)) {
-      return CachedNetworkImage(
-        imageUrl: url,
-        fit: _getMediaFit(),
-        placeholder: (context, url) => Container(
-          color: Colors.black,
-          child: const Center(child: CircularProgressIndicator()),
-        ),
-        errorWidget: (context, url, error) => Container(
-          color: Colors.black,
-          child: const Center(
-            child: Icon(Icons.broken_image, color: Colors.white24, size: 48),
-          ),
-        ),
-      );
+      return _cachedImage(url, _getMediaFit());
     }
 
     return Container(color: Colors.black);
@@ -5341,7 +5672,7 @@ class AutoWidgetZone extends StatelessWidget {
                   const Text(
                     "Today's bookings",
                     style: TextStyle(
-                    fontSize: 24,
+                      fontSize: 24,
                       fontWeight: FontWeight.w900,
                       color: Color(0xFF0F172A),
                     ),

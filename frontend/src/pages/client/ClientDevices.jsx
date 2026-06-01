@@ -13,26 +13,27 @@ import { toast } from "sonner";
 import StatusBadge from "../../components/StatusBadge";
 import DeviceLiveBadge from "../../components/DeviceLiveBadge";
 
-const empty = { name: "", location: "", pair_code: "", template_id: "", brightness: 100 };
+const empty = { name: "", location: "", pair_code: "", template_id: "", playlist_id: "", branch_id: "", orientation: "auto", brightness: 100 };
 
 export default function ClientDevices() {
   const [items, setItems] = useState([]);
   const [templates, setTemplates] = useState([]);
   const [playlists, setPlaylists] = useState([]);
+  const [branches, setBranches] = useState([]);
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState(null);
   const [form, setForm] = useState(empty);
 
   const load = async () => {
     try {
-      const [d, t, p] = await Promise.all([api.get("/client/devices"), api.get("/client/templates"), api.get("/client/playlists")]);
-      setItems(d.data); setTemplates(t.data); setPlaylists(p.data);
+      const [d, t, p, b] = await Promise.all([api.get("/client/devices"), api.get("/client/templates"), api.get("/client/playlists"), api.get("/client/branches")]);
+      setItems(d.data); setTemplates(t.data); setPlaylists(p.data); setBranches(Array.isArray(b.data) ? b.data : []);
     } catch {}
   };
   useEffect(() => { load(); }, []);
 
   const openCreate = () => { setEditing(null); setForm(empty); setOpen(true); };
-  const openEdit = (d) => { setEditing(d); setForm({ ...empty, ...d, template_id: d.template_id || "", playlist_id: d.playlist_id || "", orientation: d.orientation || "auto", brightness: Number(d.brightness ?? 100) }); setOpen(true); };
+  const openEdit = (d) => { setEditing(d); setForm({ ...empty, ...d, template_id: d.template_id || "", playlist_id: d.playlist_id || "", branch_id: d.branch_id || "", orientation: d.orientation || "auto", brightness: Number(d.brightness ?? 100) }); setOpen(true); };
 
   const submit = async (e) => {
     e.preventDefault();
@@ -64,6 +65,7 @@ export default function ClientDevices() {
 
   const tplName = (id) => templates.find((t) => t.id === id)?.name || "—";
   const playlistName = (id) => playlists.find((p) => p.id === id)?.name || "—";
+  const branchName = (id) => branches.find((b) => b.id === id)?.name || "Unassigned";
 
   return (
     <div data-testid="client-devices-page">
@@ -80,6 +82,7 @@ export default function ClientDevices() {
               <TableHead className="text-[11px] uppercase tracking-wider text-[#6B7280]">ID</TableHead>
               <TableHead className="text-[11px] uppercase tracking-wider text-[#6B7280]">Device</TableHead>
               <TableHead className="text-[11px] uppercase tracking-wider text-[#6B7280]">Pair Code</TableHead>
+              <TableHead className="text-[11px] uppercase tracking-wider text-[#6B7280]">Branch</TableHead>
               <TableHead className="text-[11px] uppercase tracking-wider text-[#6B7280]">Template</TableHead>
               <TableHead className="text-[11px] uppercase tracking-wider text-[#6B7280]">Playlist</TableHead>
               <TableHead className="text-[11px] uppercase tracking-wider text-[#6B7280]">Orientation</TableHead>
@@ -90,7 +93,7 @@ export default function ClientDevices() {
             </TableRow>
           </TableHeader>
           <TableBody>
-            {items.length === 0 && <TableRow><TableCell colSpan={10} className="text-center py-10 text-sm text-[#6B7280]">No devices yet.</TableCell></TableRow>}
+            {items.length === 0 && <TableRow><TableCell colSpan={11} className="text-center py-10 text-sm text-[#6B7280]">No devices yet.</TableCell></TableRow>}
             {items.map((d) => (
               <TableRow key={d.id} data-testid={`device-row-${d.id}`}>
                 <TableCell className="font-mono text-[11px] text-[#6B7280]">{d.id}</TableCell>
@@ -109,6 +112,7 @@ export default function ClientDevices() {
                     <button onClick={() => { navigator.clipboard.writeText(d.pair_code); toast.success("Pair code copied"); }} className="text-[#6B7280] hover:text-[#111827]" data-testid={`copy-pair-${d.id}`}><Copy className="w-3 h-3" /></button>
                   </div>
                 </TableCell>
+                <TableCell className="text-sm">{branchName(d.branch_id)}</TableCell>
                 <TableCell className="text-sm">{tplName(d.template_id)}</TableCell>
                 <TableCell className="text-sm">{playlistName(d.playlist_id)}</TableCell>
                 <TableCell className="text-sm capitalize">{d.orientation || "auto"}</TableCell>
@@ -151,6 +155,16 @@ export default function ClientDevices() {
             <div>
               <Label className="text-xs uppercase tracking-wider text-[#6B7280]">Location</Label>
               <Input value={form.location} onChange={(e) => setForm({ ...form, location: e.target.value })} placeholder="Reception, Lobby..." className="rounded-sm" data-testid="device-location" />
+            </div>
+            <div>
+              <Label className="text-xs uppercase tracking-wider text-[#6B7280]">Branch</Label>
+              <Select value={form.branch_id || "none"} onValueChange={(v) => setForm({ ...form, branch_id: v === "none" ? "" : v })}>
+                <SelectTrigger className="rounded-sm" data-testid="device-branch"><SelectValue placeholder="No branch" /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="none">No branch</SelectItem>
+                  {branches.map((b) => <SelectItem key={b.id} value={b.id}>{b.name || b.id}</SelectItem>)}
+                </SelectContent>
+              </Select>
             </div>
             {!editing && (
               <div>

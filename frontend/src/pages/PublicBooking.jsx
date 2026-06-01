@@ -59,6 +59,7 @@ function normalizePhone(value) {
 
 export default function PublicBooking() {
   const { clientId } = useParams();
+  const branchId = useMemo(() => new URLSearchParams(window.location.search).get("branch_id") || "", []);
   const [doc, setDoc] = useState(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
@@ -70,7 +71,8 @@ export default function PublicBooking() {
     let mounted = true;
     const loadDoc = async () => {
       try {
-        const { data } = await axios.get(`${BASE}/providers/${clientId}`);
+        const url = branchId ? `${BASE}/providers/${clientId}/branches/${encodeURIComponent(branchId)}` : `${BASE}/providers/${clientId}`;
+        const { data } = await axios.get(url);
         if (mounted) setDoc(data);
       } catch {
         if (mounted) setDoc(false);
@@ -84,7 +86,7 @@ export default function PublicBooking() {
       mounted = false;
       clearInterval(timer);
     };
-  }, [clientId]);
+  }, [clientId, branchId]);
 
   const profile = doc?.profile || {};
   const services = useMemo(() => {
@@ -250,7 +252,8 @@ export default function PublicBooking() {
         service_name: serviceNames.join(" + ") || form.service_name,
         service_price: Number(totalPrice || form.service_price || 0),
       };
-      const { data } = await axios.post(`${BASE}/providers/${clientId}/book`, payload);
+      const url = branchId ? `${BASE}/providers/${clientId}/branches/${encodeURIComponent(branchId)}/book` : `${BASE}/providers/${clientId}/book`;
+      const { data } = await axios.post(url, payload);
       setConfirmed(data);
       toast.success(`Token #${data.token} confirmed`);
     } catch (e) { toast.error(formatErr(e.response?.data?.detail)); }

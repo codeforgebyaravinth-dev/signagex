@@ -339,18 +339,15 @@ function MediaSlot({ items, label, queuePreview, weatherData, zone, canvasWidth,
         },
       });
     });
-        const id = setInterval(poll, 5_000);
-        const handleVisibilityChange = () => {
-          if (document.visibilityState === "visible") poll();
-        };
-
-        document.addEventListener("visibilitychange", handleVisibilityChange);
 
     return () => {
       cancelled = true;
+      if (youtubePlayerRef.current) {
+        try { youtubePlayerRef.current.destroy(); } catch {}
+        youtubePlayerRef.current = null;
+        currentYoutubeIdRef.current = null;
+      }
     };
-          clearInterval(id);
-          document.removeEventListener("visibilitychange", handleVisibilityChange);
   }, [idx, items, handleMediaEnd]);
 
   // Destroy YouTube player on component unmount
@@ -1744,7 +1741,9 @@ export default function SignagePlayer() {
 
     const loadProvider = async () => {
       try {
-        const { data } = await axios.get(`${BASE}/api/public/providers/${payload.client_id}`);
+        let providerUrl = `${BASE}/api/public/providers/${payload.client_id}`;
+        if (payload?.branch_id) providerUrl = `${providerUrl}/branches/${encodeURIComponent(payload.branch_id)}`;
+        const { data } = await axios.get(providerUrl);
         if (mounted) setProviderData(data);
       } catch {
         if (mounted) setProviderData(null);

@@ -19,6 +19,7 @@ from zoneinfo import ZoneInfo
 import bcrypt
 import boto3
 import jwt
+import json
 import requests
 import xml.etree.ElementTree as ET
 from fastapi import FastAPI, APIRouter, HTTPException, Request, Response, Depends, UploadFile, File, Form, WebSocket, WebSocketDisconnect
@@ -30,6 +31,11 @@ from pydantic import BaseModel, Field, EmailStr
 from botocore.exceptions import ClientError, BotoCoreError
 import io
 import base64
+
+try:
+    import redis.asyncio as redis
+except Exception:
+    redis = None
 
 mongo_url = os.environ['MONGO_URL']
 client = AsyncIOMotorClient(mongo_url)
@@ -49,6 +55,9 @@ PLAN_TYPES = ("cloud", "usb", "hybrid")
 VERTICALS = ("general", "doctor", "salon", "retailer", "society")
 WEATHER_CACHE: Dict[str, Dict[str, Any]] = {}
 APP_TIMEZONE = os.environ.get("APP_TIMEZONE", "Asia/Kolkata")
+REDIS_URL = os.environ.get("REDIS_URL", "").strip()
+REDIS_CLIENT = None
+REDIS_SUBSCRIBER_TASK = None
 
 
 class QueueConnectionManager:
@@ -56,38 +65,103 @@ class QueueConnectionManager:
         self._connections: Dict[str, set] = {}
         self._last_accept_info: Dict[str, Dict[str, Any]] = {}
 
-    async def connect(self, client_id: str, websocket: WebSocket):
+    async def connect(self, client_id: str, websocket: WebSocket, branch_id: Optional[str] = None):
         await websocket.accept()
-        self._connections.setdefault(client_id, set()).add(websocket)
+        self._connections.setdefault(_scope_key(client_id, branch_id), set()).add(websocket)
 
-    def register(self, client_id: str, websocket: WebSocket):
+    def register(self, client_id: str, websocket: WebSocket, branch_id: Optional[str] = None):
         """Register an already-accepted websocket for broadcasts.
 
         Use this when the endpoint performs an explicit subscribe handshake before registration.
         """
         try:
-            self._connections.setdefault(client_id, set()).add(websocket)
+            self._connections.setdefault(_scope_key(client_id, branch_id), set()).add(websocket)
         except Exception:
             pass
 
-    def disconnect(self, client_id: str, websocket: WebSocket):
-        sockets = self._connections.get(client_id)
+    def disconnect(self, client_id: str, websocket: WebSocket, branch_id: Optional[str] = None):
+        key = _scope_key(client_id, branch_id)
+        sockets = self._connections.get(key)
         if not sockets:
             return
         sockets.discard(websocket)
         if not sockets:
-            self._connections.pop(client_id, None)
+            self._connections.pop(key, None)
 
-    async def broadcast(self, client_id: str, payload: dict):
-        sockets = list(self._connections.get(client_id, set()))
+    async def broadcast(self, client_id: str, payload: dict, branch_id: Optional[str] = None):
+        key = _scope_key(client_id, branch_id)
+        sockets = list(self._connections.get(key, set()))
         for websocket in sockets:
             try:
-                logging.getLogger('uvicorn.error').debug(f"broadcast -> sending to client {client_id}: keys={list(payload.keys())}")
+                logging.getLogger('uvicorn.error').debug(f"broadcast -> sending to client {client_id} branch={branch_id}: keys={list(payload.keys())}")
                 await websocket.send_json(payload)
-                logging.getLogger('uvicorn.error').debug(f"broadcast -> sent to client {client_id}")
+                logging.getLogger('uvicorn.error').debug(f"broadcast -> sent to client {client_id} branch={branch_id}")
             except Exception:
-                logging.getLogger('uvicorn.error').exception(f"broadcast -> send failed for client {client_id}")
-                self.disconnect(client_id, websocket)
+                logging.getLogger('uvicorn.error').exception(f"broadcast -> send failed for client {client_id} branch={branch_id}")
+                self.disconnect(client_id, websocket, branch_id=branch_id)
+
+
+def _scope_key(client_id: str, branch_id: Optional[str] = None) -> str:
+    return f"{client_id}:{branch_id or 'global'}"
+
+
+def _redis_channel(kind: str, client_id: str, branch_id: Optional[str] = None) -> str:
+    return f"signage:{kind}:{client_id}:{branch_id or 'global'}"
+
+
+async def _redis_publish(kind: str, client_id: str, payload: Dict[str, Any], branch_id: Optional[str] = None):
+    if not REDIS_CLIENT:
+        return
+    try:
+        message = {"kind": kind, "client_id": client_id, "branch_id": branch_id or "", "payload": payload}
+        await REDIS_CLIENT.publish(_redis_channel(kind, client_id, branch_id), json.dumps(message, default=str))
+    except Exception:
+        logging.getLogger('uvicorn.error').debug(f"redis publish failed kind={kind} client={client_id} branch={branch_id}")
+
+
+async def _redis_event_dispatcher():
+    if not REDIS_CLIENT:
+        return
+    pubsub = REDIS_CLIENT.pubsub(ignore_subscribe_messages=True)
+    try:
+        await pubsub.psubscribe("signage:*")
+        async for message in pubsub.listen():
+            if not message:
+                continue
+            if message.get("type") not in {"pmessage", "message"}:
+                continue
+            try:
+                raw = message.get("data")
+                if isinstance(raw, (bytes, bytearray)):
+                    raw = raw.decode("utf-8", errors="ignore")
+                data = json.loads(raw or "{}")
+            except Exception:
+                continue
+
+            kind = str(data.get("kind") or "")
+            client_id = str(data.get("client_id") or "")
+            branch_id = str(data.get("branch_id") or "") or None
+            payload = data.get("payload") or {}
+            if not client_id:
+                continue
+
+            if kind == "queue_refresh":
+                try:
+                    if payload.get("announcement"):
+                        RECENT_ANNOUNCEMENTS[_scope_key(client_id, branch_id)] = {
+                            "payload": payload,
+                            "expires_at": datetime.now(timezone.utc) + timedelta(seconds=30),
+                        }
+                except Exception:
+                    pass
+                await queue_ws_manager.broadcast(client_id, payload, branch_id=branch_id)
+            elif kind == "content_refresh":
+                await content_ws_manager.broadcast(client_id, payload, branch_id=branch_id)
+    finally:
+        try:
+            await pubsub.close()
+        except Exception:
+            pass
 
 
 queue_ws_manager = QueueConnectionManager()
@@ -101,40 +175,46 @@ def _app_now() -> datetime:
         return datetime.now(timezone.utc)
 
 
-async def _broadcast_queue_refresh(client_id: str, reason: str = "update"):
+async def _broadcast_queue_refresh(client_id: str, reason: str = "update", branch_id: Optional[str] = None):
     if client_id:
-        payload = {"type": "queue_refresh", "client_id": client_id, "reason": reason, "timestamp": now_iso()}
-        queue_snapshot = await _build_queue_announcement_snapshot(client_id)
+        payload = {"type": "queue_refresh", "client_id": client_id, "reason": reason, "timestamp": now_iso(), "branch_id": branch_id or ""}
+        queue_snapshot = await _build_queue_announcement_snapshot(client_id, branch_id=branch_id)
         if queue_snapshot:
             payload.update(queue_snapshot)
         # add server-sent timestamp for client-side latency measurement
         payload["sent_at"] = now_iso()
         # cache recent announcement payload for short time so polling players can pick it up
         try:
-            RECENT_ANNOUNCEMENTS[client_id] = {"payload": payload, "expires_at": datetime.now(timezone.utc) + timedelta(seconds=30)}
+            RECENT_ANNOUNCEMENTS[_scope_key(client_id, branch_id)] = {"payload": payload, "expires_at": datetime.now(timezone.utc) + timedelta(seconds=30)}
         except Exception:
             pass
 
         try:
-            asyncio.create_task(queue_ws_manager.broadcast(client_id, payload))
-            logging.getLogger('uvicorn.error').debug(f"broadcast -> scheduled async send for client {client_id}: keys={list(payload.keys())}")
+            asyncio.create_task(queue_ws_manager.broadcast(client_id, payload, branch_id=branch_id))
+            logging.getLogger('uvicorn.error').info(
+                f"queue_refresh broadcast client={client_id} branch={branch_id} reason={reason} announcement={(payload.get('announcement') or {}).get('text', '')}"
+            )
         except Exception:
             # fallback to awaiting if scheduling fails
-            await queue_ws_manager.broadcast(client_id, payload)
+            await queue_ws_manager.broadcast(client_id, payload, branch_id=branch_id)
+
+        await _redis_publish("queue_refresh", client_id, payload, branch_id=branch_id)
 
 
-async def _broadcast_content_refresh(client_id: str, reason: str = "update"):
+async def _broadcast_content_refresh(client_id: str, reason: str = "update", branch_id: Optional[str] = None):
     if client_id:
-        payload = {"type": "content_refresh", "client_id": client_id, "reason": reason, "timestamp": now_iso(), "sent_at": now_iso()}
+        payload = {"type": "content_refresh", "client_id": client_id, "reason": reason, "timestamp": now_iso(), "sent_at": now_iso(), "branch_id": branch_id or ""}
         try:
-            asyncio.create_task(content_ws_manager.broadcast(client_id, payload))
-            logging.getLogger('uvicorn.error').debug(f"broadcast -> scheduled content refresh for client {client_id}: reason={reason}")
+            asyncio.create_task(content_ws_manager.broadcast(client_id, payload, branch_id=branch_id))
+            logging.getLogger('uvicorn.error').info(f"content_refresh broadcast client={client_id} branch={branch_id} reason={reason}")
         except Exception:
-            await content_ws_manager.broadcast(client_id, payload)
+            await content_ws_manager.broadcast(client_id, payload, branch_id=branch_id)
+
+        await _redis_publish("content_refresh", client_id, payload, branch_id=branch_id)
 
 
-async def _build_queue_announcement_snapshot(client_id: str) -> Optional[Dict[str, Any]]:
-    profile = await _public_service_profile(client_id)
+async def _build_queue_announcement_snapshot(client_id: str, branch_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    profile = await _public_service_profile(client_id, branch_id=branch_id)
     if not profile:
         return None
 
@@ -159,6 +239,25 @@ async def _build_queue_announcement_snapshot(client_id: str) -> Optional[Dict[st
         "queue_preview": queue_preview[:8],
         "announcement": announcement,
     }
+
+
+async def _resolve_appointment_scope_branch(client_id: str, appointment: Dict[str, Any]) -> Optional[str]:
+    branch_id = str(appointment.get("branch_id") or "").strip()
+    if branch_id:
+        return branch_id
+
+    candidate_device_ids = [
+        str(appointment.get("booking_device_id") or "").strip(),
+        str(appointment.get("routed_device_id") or "").strip(),
+    ]
+    for device_id in candidate_device_ids:
+        if not device_id:
+            continue
+        device = await db.devices.find_one({"id": device_id, "client_id": client_id}, {"_id": 0, "branch_id": 1})
+        if device and str(device.get("branch_id") or "").strip():
+            return str(device.get("branch_id") or "").strip()
+
+    return None
 
 
 def _weather_description(code: Optional[Any]) -> str:
@@ -448,6 +547,7 @@ class DeviceCreate(BaseModel):
     location: str = ""
     pair_code: Optional[str] = None
     template_id: Optional[str] = None
+    branch_id: Optional[str] = None
     playlist_id: Optional[str] = None
     orientation: Optional[Literal["auto", "landscape", "portrait"]] = "auto"
     brightness: Optional[int] = 100
@@ -461,6 +561,12 @@ class PairRequestIn(BaseModel):
 class PairCompleteIn(BaseModel):
     pair_code: str
     device_id: str
+
+
+class BranchIn(BaseModel):
+    name: str
+    # optional: branch id to clone data from (empty => clone global storefront)
+    clone_from_branch_id: Optional[str] = None
 
 
 async def _complete_device_pairing(device_filter: dict, pair_code: str, device_id: str):
@@ -556,6 +662,7 @@ class DeviceUpdate(BaseModel):
     status: Optional[Literal["paired", "unpaired", "offline"]] = None
     template_id: Optional[str] = None
     playlist_id: Optional[str] = None
+    branch_id: Optional[str] = None
     orientation: Optional[Literal["auto", "landscape", "portrait"]] = None
     brightness: Optional[int] = None
 
@@ -1183,25 +1290,54 @@ async def client_templates(user: dict = Depends(require_role("client"))):
     return await db.templates.find({"id": {"$in": ids}}, {"_id": 0}).to_list(1000)
 
 @api.get("/client/devices")
-async def list_client_devices(user: dict = Depends(require_role("client"))):
-    return await db.devices.find({"client_id": user["id"]}, {"_id": 0}).to_list(2000)
+async def list_client_devices(user: dict = Depends(require_role("client")), branch_id: Optional[str] = None):
+    q = {"client_id": user["id"]}
+    if branch_id:
+        q["branch_id"] = branch_id
+    devices = await db.devices.find(q, {"_id": 0}).to_list(2000)
+    branch_ids = {str(device.get("branch_id") or "").strip() for device in devices if str(device.get("branch_id") or "").strip()}
+    branch_map = {}
+    if branch_ids:
+        branches = await db.branches.find({"client_id": user["id"], "id": {"$in": list(branch_ids)}}, {"_id": 0, "id": 1, "name": 1}).to_list(1000)
+        branch_map = {str(branch.get("id") or ""): branch.get("name") or branch.get("id") or "" for branch in branches}
+    for device in devices:
+        device["branch_name"] = branch_map.get(str(device.get("branch_id") or ""), "")
+    return devices
 
 @api.post("/client/devices")
 async def create_device(body: DeviceCreate, user: dict = Depends(require_role("client"))):
     c = await db.clients.find_one({"id": user["id"]}, {"_id": 0, "dealer_id": 1})
+    branch_name = ""
+    if body.branch_id:
+        branch = await db.branches.find_one({"id": body.branch_id, "client_id": user["id"]}, {"_id": 0, "id": 1, "name": 1})
+        if not branch:
+            raise HTTPException(status_code=400, detail="Branch not assigned to you")
+        branch_name = branch.get("name") or branch.get("id") or ""
     if body.playlist_id:
         playlist = await db.playlists.find_one({"id": body.playlist_id, "client_id": user["id"]}, {"_id": 0, "id": 1})
         if not playlist:
             raise HTTPException(status_code=400, detail="Playlist not assigned to you")
     pair_code = body.pair_code or gen_pair_code()
-    doc = {"id": str(uuid.uuid4()), "name": body.name, "location": body.location,
-           "pair_code": pair_code, "status": "unpaired",
-           "client_id": user["id"], "dealer_id": c.get("dealer_id", ""),
-              "template_id": body.template_id, "paired_at": None,
+    doc = {
+        "id": str(uuid.uuid4()),
+        "name": body.name,
+        "location": body.location,
+        "pair_code": pair_code,
+        "status": "unpaired",
+        "client_id": user["id"],
+        "dealer_id": c.get("dealer_id", ""),
+        "template_id": body.template_id,
+        "paired_at": None,
         "playlist_id": body.playlist_id or "",
-        "orientation": body.orientation or "auto", "brightness": int(body.brightness or 100),
-           "created_at": now_iso()}
-    await db.devices.insert_one(doc); return clean(doc)
+        "orientation": body.orientation or "auto",
+        "brightness": int(body.brightness or 100),
+        "created_at": now_iso(),
+        "branch_id": body.branch_id or "",
+        "branch_name": branch_name,
+    }
+    await db.devices.insert_one(doc)
+    asyncio.create_task(_broadcast_content_refresh(user["id"], reason="device_created", branch_id=doc.get("branch_id") or None))
+    return clean(doc)
 
 
 async def _unpair_device(device_filter: dict):
@@ -1269,6 +1405,13 @@ async def dealer_unpair_device(did: str, user: dict = Depends(require_role("deal
 @api.put("/client/devices/{did}")
 async def update_device(did: str, body: DeviceUpdate, user: dict = Depends(require_role("client"))):
     upd = {k: v for k, v in body.model_dump(exclude_none=True).items()}
+    if "branch_id" in upd:
+        if upd["branch_id"]:
+            branch = await db.branches.find_one({"id": upd["branch_id"], "client_id": user["id"]}, {"_id": 0, "id": 1})
+            if not branch:
+                raise HTTPException(status_code=400, detail="Branch not assigned to you")
+        else:
+            upd["branch_id"] = ""
     if "template_id" in upd and upd["template_id"]:
         c = await db.clients.find_one({"id": user["id"]}, {"_id": 0, "assigned_template_ids": 1})
         if upd["template_id"] not in (c.get("assigned_template_ids") or []):
@@ -1286,14 +1429,21 @@ async def update_device(did: str, body: DeviceUpdate, user: dict = Depends(requi
         except Exception:
             upd.pop("brightness", None)
     if not upd: raise HTTPException(status_code=400, detail="Nothing to update")
+    if "branch_id" in upd:
+        upd["branch_name"] = ""
+        if upd["branch_id"]:
+            branch = await db.branches.find_one({"id": upd["branch_id"], "client_id": user["id"]}, {"_id": 0, "name": 1, "id": 1})
+            upd["branch_name"] = branch.get("name") or branch.get("id") or ""
     r = await db.devices.find_one_and_update({"id": did, "client_id": user["id"]}, {"$set": upd}, return_document=True, projection={"_id": 0})
     if not r: raise HTTPException(status_code=404, detail="Device not found")
+    asyncio.create_task(_broadcast_content_refresh(user["id"], reason="device_updated", branch_id=r.get("branch_id") or None))
     return r
 
 @api.delete("/client/devices/{did}")
 async def delete_device(did: str, user: dict = Depends(require_role("client"))):
     r = await db.devices.delete_one({"id": did, "client_id": user["id"]})
     if r.deleted_count == 0: raise HTTPException(status_code=404, detail="Device not found")
+    asyncio.create_task(_broadcast_content_refresh(user["id"], reason="device_deleted"))
     return {"ok": True}
 
 @api.get("/client/devices/{did}/zones")
@@ -1375,6 +1525,19 @@ async def _update_service_profile(vertical: str, body: DoctorProfile, user: dict
     return r.get(field, {})
 
 
+async def _update_branch_service_profile(vertical: str, body: DoctorProfile, user: dict, branch_id: str):
+    field = _service_profile_field(vertical)
+    branch = await db.branches.find_one({"id": branch_id, "client_id": user["id"]}, {"_id": 0, "profile": 1})
+    if not branch:
+        # If the branch exists in memory/state but not in this collection yet, create a minimal record.
+        branch = {"id": branch_id, "client_id": user["id"], "profile": {}}
+        await db.branches.insert_one({"id": branch_id, "client_id": user["id"], "name": branch_id, "created_at": now_iso(), "profile": {}})
+    current = branch.get("profile", {}) or {}
+    merged = {**current, **body.model_dump()}
+    await db.branches.update_one({"id": branch_id, "client_id": user["id"]}, {"$set": {"profile": merged, "profile_type": field}})
+    return merged
+
+
 async def _list_service_appointments(user: dict):
     appointments = await db.appointments.find({"client_id": user["id"]}, {"_id": 0}).to_list(500)
     return sorted(
@@ -1387,10 +1550,21 @@ async def _list_service_appointments(user: dict):
     )
 
 
-async def _build_service_appointment_board(client_id: str, recent_limit: int = 500) -> Dict[str, Any]:
+async def _build_service_appointment_board(client_id: str, recent_limit: int = 500, branch_id: Optional[str] = None) -> Dict[str, Any]:
     today = _app_now().date().isoformat()
-    today_items = await db.appointments.find({"client_id": client_id, "date": today}, {"_id": 0}).to_list(1000)
-    recent_items = await db.appointments.find({"client_id": client_id}, {"_id": 0}).sort("created_at", -1).to_list(max(20, recent_limit))
+    base_query = {"client_id": client_id}
+    if branch_id:
+        base_query["branch_id"] = branch_id
+    branches = await db.branches.find({"client_id": client_id}, {"_id": 0, "id": 1, "name": 1}).to_list(1000)
+    branch_name_map = {str(item.get("id") or ""): str(item.get("name") or "").strip() for item in branches if item.get("id")}
+    if branch_id and branch_id not in branch_name_map:
+        branch_name_map[branch_id] = "Branch"
+    today_items = await db.appointments.find({**base_query, "date": today}, {"_id": 0}).to_list(1000)
+    recent_items = await db.appointments.find(base_query, {"_id": 0}).sort("created_at", -1).to_list(max(20, recent_limit))
+
+    def _decorate(item: Dict[str, Any]) -> Dict[str, Any]:
+        branch_label = str(item.get("branch_id") or "").strip()
+        return {**item, "branch_name": branch_name_map.get(branch_label, "Global" if not branch_label else branch_label)}
 
     def _queue_time_value(value: Any) -> float:
         if not value:
@@ -1409,12 +1583,12 @@ async def _build_service_appointment_board(client_id: str, recent_limit: int = 5
         return (status_rank, int(item.get("token") or 0), item.get("created_at") or "")
 
     live_queue = sorted(
-        [item for item in today_items if item.get("status") in ("called", "pending")],
+        [_decorate(item) for item in today_items if item.get("status") in ("called", "pending")],
         key=_queue_sort_key,
     )
 
     today_bookings = sorted(
-        today_items,
+        [_decorate(item) for item in today_items],
         key=lambda item: (
             int(item.get("token") or 0),
             _appointment_status_rank(item.get("status")),
@@ -1432,7 +1606,7 @@ async def _build_service_appointment_board(client_id: str, recent_limit: int = 5
         "date": today,
         "live_queue": live_queue,
         "today_bookings": today_bookings,
-        "recent_bookings": recent_items,
+        "recent_bookings": [_decorate(item) for item in recent_items],
         "summary": {
             "live_queue_count": len(live_queue),
             "today_bookings_count": len(today_bookings),
@@ -1441,9 +1615,12 @@ async def _build_service_appointment_board(client_id: str, recent_limit: int = 5
     }
 
 
-async def _resolve_booking_route(client_id: str, booking_location: Optional[str], booking_device_id: Optional[str]) -> Dict[str, str]:
+async def _resolve_booking_route(client_id: str, booking_location: Optional[str], booking_device_id: Optional[str], branch_id: Optional[str] = None) -> Dict[str, str]:
+    device_query: Dict[str, Any] = {"client_id": client_id}
+    if branch_id:
+        device_query["branch_id"] = branch_id
     devices = await db.devices.find(
-        {"client_id": client_id},
+        device_query,
         {"_id": 0, "id": 1, "name": 1, "location": 1, "status": 1},
     ).to_list(1000)
 
@@ -1508,7 +1685,7 @@ async def _resolve_booking_route(client_id: str, booking_location: Optional[str]
 
 
 async def _set_service_appointment_status(aid: str, status: str, user: dict):
-    current = await db.appointments.find_one({"id": aid, "client_id": user["id"]}, {"_id": 0, "status": 1, "recall_count": 1})
+    current = await db.appointments.find_one({"id": aid, "client_id": user["id"]}, {"_id": 0, "status": 1, "recall_count": 1, "branch_id": 1})
     if not current:
         raise HTTPException(status_code=404, detail="Appointment not found")
 
@@ -1541,27 +1718,36 @@ async def _set_service_appointment_status(aid: str, status: str, user: dict):
                     else f"Token {token}, please proceed to the counter."
                 )
                 payload["announcement"] = {"key": key, "text": text}
+                logging.getLogger('uvicorn.error').info(
+                    f"queue announcement prepared client={user['id']} branch={await _resolve_appointment_scope_branch(user['id'], r)} token={token} recall={is_recall} text={text}"
+                )
         payload["sent_at"] = now_iso()
         try:
-            asyncio.create_task(queue_ws_manager.broadcast(user["id"], payload))
-            logging.getLogger('uvicorn.error').debug(f"broadcast -> scheduled immediate announcement for client {user['id']}")
+            branch_id = await _resolve_appointment_scope_branch(user["id"], r)
+            asyncio.create_task(queue_ws_manager.broadcast(user["id"], payload, branch_id=branch_id))
+            logging.getLogger('uvicorn.error').info(f"queue announcement broadcast scheduled client={user['id']} branch={branch_id} token={token if status == 'called' else ''}")
         except Exception:
-            await queue_ws_manager.broadcast(user["id"], payload)
+            branch_id = await _resolve_appointment_scope_branch(user["id"], r)
+            await queue_ws_manager.broadcast(user["id"], payload, branch_id=branch_id)
         # Follow up with a normal refresh so the player eventually syncs the full queue snapshot.
-        asyncio.create_task(_broadcast_queue_refresh(user["id"], reason=f"status:{status}"))
+        asyncio.create_task(_broadcast_queue_refresh(user["id"], reason=f"status:{status}", branch_id=await _resolve_appointment_scope_branch(user["id"], r)))
     except Exception:
         # Fallback to existing broadcast path if direct send fails
-        await _broadcast_queue_refresh(user["id"], reason=f"status:{status}")
+        await _broadcast_queue_refresh(user["id"], reason=f"status:{status}", branch_id=await _resolve_appointment_scope_branch(user["id"], r))
     return r
 
 
 @api.put("/client/doctor/profile")
-async def update_doc_profile(body: DoctorProfile, user: dict = Depends(require_role("client"))):
+async def update_doc_profile(body: DoctorProfile, user: dict = Depends(require_role("client")), branch_id: Optional[str] = None):
+    if branch_id:
+        return await _update_branch_service_profile("doctor", body, user, branch_id)
     return await _update_service_profile("doctor", body, user)
 
 
 @api.put("/client/salon/profile")
-async def update_salon_profile(body: DoctorProfile, user: dict = Depends(require_role("client"))):
+async def update_salon_profile(body: DoctorProfile, user: dict = Depends(require_role("client")), branch_id: Optional[str] = None):
+    if branch_id:
+        return await _update_branch_service_profile("salon", body, user, branch_id)
     return await _update_service_profile("salon", body, user)
 
 
@@ -1576,11 +1762,11 @@ async def list_salon_appointments(user: dict = Depends(require_role("client"))):
 
 
 @api.get("/client/{vertical}/appointments/board")
-async def get_service_appointment_board(vertical: Literal["doctor", "salon"], user: dict = Depends(require_role("client"))):
+async def get_service_appointment_board(vertical: Literal["doctor", "salon"], user: dict = Depends(require_role("client")), branch_id: Optional[str] = None):
     c = await db.clients.find_one({"id": user["id"], "vertical": vertical}, {"_id": 0, "id": 1})
     if not c:
         raise HTTPException(status_code=403, detail=f"Not a {_service_label(vertical).lower()} account")
-    return await _build_service_appointment_board(user["id"])
+    return await _build_service_appointment_board(user["id"], branch_id=branch_id)
 
 
 @api.post("/client/doctor/appointments/{aid}/status")
@@ -1683,11 +1869,27 @@ async def delete_notice(nid: str, user: dict = Depends(require_role("client"))):
     return {"ok": True}
 
 # ---------------- Public: Doctor / Salon booking ----------------
-async def _public_service_profile(cid: str):
+async def _public_service_profile(cid: str, branch_id: Optional[str] = None):
     c = await db.clients.find_one({"id": cid}, {"_id": 0, "password_hash": 0, "wallet_balance": 0})
     if not c:
         raise HTTPException(status_code=404, detail="Provider not found")
     vertical = c.get("vertical", "general")
+    branch_profile = {}
+    if branch_id:
+        branch = await db.branches.find_one({"id": branch_id, "client_id": cid}, {"_id": 0})
+        if branch:
+            branch_profile = branch.get("profile") or {}
+    empty_profile = {
+        "specialty": "",
+        "qualifications": "",
+        "fee": 0,
+        "hours": "",
+        "is_open": True,
+        "image_url": "",
+        "description": "",
+        "slot_minutes": 15,
+        "services": [],
+    }
     base = {
         "id": c["id"],
         "name": c["name"],
@@ -1701,11 +1903,17 @@ async def _public_service_profile(cid: str):
     # Doctor / Salon: include profile and live queue
     if vertical in ("doctor", "salon"):
         profile_field = _service_profile_field(vertical)
-        profile = _normalize_service_catalog(c.get(profile_field, {}), vertical)
-        board = await _build_service_appointment_board(cid, recent_limit=200)
+        if branch_id:
+            profile = _normalize_service_catalog(branch_profile or empty_profile, vertical)
+        else:
+            profile = _normalize_service_catalog(c.get(profile_field, {}) or empty_profile, vertical)
+        board = await _build_service_appointment_board(cid, recent_limit=200, branch_id=branch_id)
         active = board.get("live_queue") or []
         today_bookings = board.get("today_bookings") or []
-        devices = await db.devices.find({"client_id": cid}, {"_id": 0, "id": 1, "name": 1, "location": 1, "status": 1}).to_list(200)
+        dev_q = {"client_id": cid}
+        if branch_id:
+            dev_q["branch_id"] = branch_id
+        devices = await db.devices.find(dev_q, {"_id": 0, "id": 1, "name": 1, "location": 1, "status": 1}).to_list(200)
         booking_devices = [
             {
                 "id": str(item.get("id") or ""),
@@ -1811,7 +2019,7 @@ async def _resolve_service_snapshots(profile: dict, body: AppointmentCreate) -> 
     return selected
 
 
-async def _book_service(cid: str, body: AppointmentCreate, source: Optional[str] = None):
+async def _book_service(cid: str, body: AppointmentCreate, source: Optional[str] = None, branch_id: Optional[str] = None):
     patient_name = str(body.patient_name or "").strip()
     if len(patient_name) < 2:
         raise HTTPException(status_code=400, detail="Patient name must be at least 2 characters")
@@ -1840,19 +2048,21 @@ async def _book_service(cid: str, body: AppointmentCreate, source: Optional[str]
         today,
         body.preferred_time,
         int(combined_duration or c.get(_service_profile_field(c.get("vertical", "doctor")), {}).get("slot_minutes", 15) or 15),
+        branch_id=branch_id,
     )
     counter = await db.counters.find_one_and_update(
-        {"_id": f"appointment_token:{cid}:{today}"},
+        {"_id": f"appointment_token:{cid}:{branch_id or 'global'}:{today}"},
         {"$inc": {"next": 1}},
         upsert=True,
         return_document=True,
     )
     token = int(counter.get("next", 1))
     patient_phone_key = _normalize_patient_phone_key(body.patient_phone)
-    route_info = await _resolve_booking_route(cid, body.booking_location, body.booking_device_id)
+    route_info = await _resolve_booking_route(cid, body.booking_location, body.booking_device_id, branch_id=branch_id)
     doc = {
         "id": str(uuid.uuid4()),
         "client_id": cid,
+        "branch_id": branch_id or "",
         "date": today,
         "token": token,
         "patient_name": patient_name,
@@ -1902,10 +2112,22 @@ async def public_provider_profile(cid: str):
     return await _public_service_profile(client["id"])
 
 
+@public_api.get("/providers/{cid}/branches/{bid}")
+async def public_provider_branch_profile(cid: str, bid: str):
+    client = await _resolve_public_client_ref(cid)
+    return await _public_service_profile(client["id"], branch_id=bid)
+
+
 @public_api.post("/providers/{cid}/book")
 async def public_provider_book(cid: str, body: AppointmentCreate):
     client = await _resolve_public_client_ref(cid)
     return await _book_service(client["id"], body, source="public")
+
+
+@public_api.post("/providers/{cid}/branches/{bid}/book")
+async def public_provider_branch_book(cid: str, bid: str, body: AppointmentCreate):
+    client = await _resolve_public_client_ref(cid)
+    return await _book_service(client["id"], body, source="public", branch_id=bid)
 
 
 @public_api.get("/doctors/{cid}")
@@ -1913,18 +2135,28 @@ async def public_doctor_profile(cid: str):
     return await _public_service_profile(cid)
 
 
+@public_api.get("/doctors/{cid}/branches/{bid}")
+async def public_doctor_branch_profile(cid: str, bid: str):
+    return await _public_service_profile(cid, branch_id=bid)
+
+
 @public_api.post("/doctors/{cid}/book")
 async def public_doctor_book(cid: str, body: AppointmentCreate):
     return await _book_service(cid, body, source="public")
 
 
+@public_api.post("/doctors/{cid}/branches/{bid}/book")
+async def public_doctor_branch_book(cid: str, bid: str, body: AppointmentCreate):
+    return await _book_service(cid, body, source="public", branch_id=bid)
+
+
 @api.post("/client/{vertical}/appointments")
-async def create_service_appointment(vertical: Literal["doctor", "salon"], body: AppointmentCreate, user: dict = Depends(require_role("client"))):
+async def create_service_appointment(vertical: Literal["doctor", "salon"], body: AppointmentCreate, user: dict = Depends(require_role("client")), branch_id: Optional[str] = None):
     c = await db.clients.find_one({"id": user["id"], "vertical": vertical}, {"_id": 0})
     if not c:
         raise HTTPException(status_code=403, detail=f"Not a {_service_label(vertical).lower()} account")
     body.source = "manual"
-    return await _book_service(user["id"], body, source="manual")
+    return await _book_service(user["id"], body, source="manual", branch_id=branch_id)
 
 
 @api.websocket("/ws/queue/{pair_code}")
@@ -1935,8 +2167,9 @@ async def queue_updates_socket(websocket: WebSocket, pair_code: str):
     except Exception:
         return
 
-    device = await db.devices.find_one({"pair_code": pair_code}, {"_id": 0, "client_id": 1})
+    device = await db.devices.find_one({"pair_code": pair_code}, {"_id": 0, "client_id": 1, "branch_id": 1})
     client_id = str(device.get("client_id") or "") if device else ""
+    branch_id = str(device.get("branch_id") or "") if device else ""
     if not client_id:
         try:
             await websocket.close(code=1008)
@@ -1957,14 +2190,14 @@ async def queue_updates_socket(websocket: WebSocket, pair_code: str):
     subscribed = False
     # limit concurrent registered sockets per client to avoid churn
     try:
-        existing = len(queue_ws_manager._connections.get(client_id, set()))
+        existing = len(queue_ws_manager._connections.get(_scope_key(client_id, branch_id), set()))
         MAX_ALLOWED = 2
         if existing >= MAX_ALLOWED:
             try:
                 await websocket.close(code=1013)
             except Exception:
                 pass
-            logging.getLogger('uvicorn.error').warning(f"queue socket rejected: too many connections for client {client_id} (existing={existing})")
+            logging.getLogger('uvicorn.error').warning(f"queue socket rejected: too many connections for client {client_id} branch={branch_id} (existing={existing})")
             return
     except Exception:
         pass
@@ -1975,22 +2208,22 @@ async def queue_updates_socket(websocket: WebSocket, pair_code: str):
             try:
                 import json
                 parsed = json.loads(msg or "{}")
-                if parsed.get("type") == "subscribe" and parsed.get("client_id") == client_id:
-                    queue_ws_manager.register(client_id, websocket)
+                if parsed.get("type") == "subscribe":
+                    queue_ws_manager.register(client_id, websocket, branch_id=branch_id)
                     subscribed = True
             except Exception:
                 # ignore parse errors
                 pass
         except asyncio.TimeoutError:
             # no handshake received; register anyway
-            queue_ws_manager.register(client_id, websocket)
+            queue_ws_manager.register(client_id, websocket, branch_id=branch_id)
             subscribed = True
 
         # send an initial snapshot if available
-        initial_snapshot = await _build_queue_announcement_snapshot(client_id)
+        initial_snapshot = await _build_queue_announcement_snapshot(client_id, branch_id=branch_id)
         if initial_snapshot:
             try:
-                await websocket.send_json({"type": "queue_snapshot", "client_id": client_id, "timestamp": now_iso(), **initial_snapshot})
+                await websocket.send_json({"type": "queue_snapshot", "client_id": client_id, "branch_id": branch_id, "timestamp": now_iso(), **initial_snapshot})
             except Exception:
                 pass
 
@@ -1999,10 +2232,10 @@ async def queue_updates_socket(websocket: WebSocket, pair_code: str):
             await websocket.receive_text()
     except WebSocketDisconnect:
         if subscribed:
-            queue_ws_manager.disconnect(client_id, websocket)
+            queue_ws_manager.disconnect(client_id, websocket, branch_id=branch_id)
     except Exception:
         if subscribed:
-            queue_ws_manager.disconnect(client_id, websocket)
+            queue_ws_manager.disconnect(client_id, websocket, branch_id=branch_id)
 
 
 @api.websocket("/ws/content/{pair_code}")
@@ -2012,8 +2245,9 @@ async def content_updates_socket(websocket: WebSocket, pair_code: str):
     except Exception:
         return
 
-    device = await db.devices.find_one({"pair_code": pair_code}, {"_id": 0, "client_id": 1})
+    device = await db.devices.find_one({"pair_code": pair_code}, {"_id": 0, "client_id": 1, "branch_id": 1})
     client_id = str(device.get("client_id") or "") if device else ""
+    branch_id = str(device.get("branch_id") or "") if device else ""
     if not client_id:
         try:
             await websocket.close(code=1008)
@@ -2022,14 +2256,14 @@ async def content_updates_socket(websocket: WebSocket, pair_code: str):
         return
 
     try:
-        existing = len(content_ws_manager._connections.get(client_id, set()))
+        existing = len(content_ws_manager._connections.get(_scope_key(client_id, branch_id), set()))
         MAX_ALLOWED = 2
         if existing >= MAX_ALLOWED:
             try:
                 await websocket.close(code=1013)
             except Exception:
                 pass
-            logging.getLogger('uvicorn.error').warning(f"content socket rejected: too many connections for client {client_id} (existing={existing})")
+            logging.getLogger('uvicorn.error').warning(f"content socket rejected: too many connections for client {client_id} branch={branch_id} (existing={existing})")
             return
     except Exception:
         pass
@@ -2041,23 +2275,23 @@ async def content_updates_socket(websocket: WebSocket, pair_code: str):
             try:
                 import json
                 parsed = json.loads(msg or "{}")
-                if parsed.get("type") == "subscribe" and parsed.get("client_id") == client_id:
-                    content_ws_manager.register(client_id, websocket)
+                if parsed.get("type") == "subscribe":
+                    content_ws_manager.register(client_id, websocket, branch_id=branch_id)
                     subscribed = True
             except Exception:
                 pass
         except asyncio.TimeoutError:
-            content_ws_manager.register(client_id, websocket)
+            content_ws_manager.register(client_id, websocket, branch_id=branch_id)
             subscribed = True
 
         while True:
             await websocket.receive_text()
     except WebSocketDisconnect:
         if subscribed:
-            content_ws_manager.disconnect(client_id, websocket)
+            content_ws_manager.disconnect(client_id, websocket, branch_id=branch_id)
     except Exception:
         if subscribed:
-            content_ws_manager.disconnect(client_id, websocket)
+            content_ws_manager.disconnect(client_id, websocket, branch_id=branch_id)
 
 
 @api.get("/client/doctor/patients")
@@ -2560,6 +2794,7 @@ class PlaylistItem(BaseModel):
 
 class PlaylistIn(BaseModel):
     name: str
+    branch_id: Optional[str] = None
     template_id: Optional[str] = None
     zone_items: Dict[str, List[PlaylistItem]] = Field(default_factory=dict)
     # legacy single-zone fallback (kept for backward compatibility)
@@ -2571,6 +2806,7 @@ class PlaylistIn(BaseModel):
 
 class PlaylistUpdate(BaseModel):
     name: Optional[str] = None
+    branch_id: Optional[str] = None
     template_id: Optional[str] = None
     zone_items: Optional[Dict[str, List[PlaylistItem]]] = None
     main_items: Optional[List[PlaylistItem]] = None
@@ -2614,8 +2850,19 @@ def _remap_legacy_buckets_to_zone_ids(zone_ids: List[str], legacy_buckets: List[
 
 
 @api.get("/client/playlists")
-async def list_playlists(user: dict = Depends(require_role("client"))):
-    return await db.playlists.find({"client_id": user["id"]}, {"_id": 0}).sort("created_at", -1).to_list(1000)
+async def list_playlists(user: dict = Depends(require_role("client")), branch_id: Optional[str] = None):
+    q = {"client_id": user["id"]}
+    if branch_id:
+        q["branch_id"] = branch_id
+    playlists = await db.playlists.find(q, {"_id": 0}).sort("created_at", -1).to_list(1000)
+    branch_ids = {str(pl.get("branch_id") or "").strip() for pl in playlists if str(pl.get("branch_id") or "").strip()}
+    branch_map = {}
+    if branch_ids:
+        branches = await db.branches.find({"client_id": user["id"], "id": {"$in": list(branch_ids)}}, {"_id": 0, "id": 1, "name": 1}).to_list(1000)
+        branch_map = {str(branch.get("id") or ""): branch.get("name") or branch.get("id") or "" for branch in branches}
+    for pl in playlists:
+        pl["branch_name"] = branch_map.get(str(pl.get("branch_id") or ""), pl.get("branch_name") or "")
+    return playlists
 
 @api.post("/client/playlists")
 async def create_playlist(body: PlaylistIn, user: dict = Depends(require_role("client"))):
@@ -2657,9 +2904,17 @@ async def create_playlist(body: PlaylistIn, user: dict = Depends(require_role("c
 
     all_media_ids = [item.media_id for zone_list in zone_items.values() for item in (zone_list or [])]
     await _validate_media(all_media_ids, user["id"])
+    branch_name = ""
+    if body.branch_id:
+        branch = await db.branches.find_one({"id": body.branch_id, "client_id": user["id"]}, {"_id": 0, "id": 1, "name": 1})
+        if not branch:
+            raise HTTPException(status_code=400, detail="Branch not assigned to you")
+        branch_name = branch.get("name") or branch.get("id") or ""
     doc = {
         "id": str(uuid.uuid4()),
         "client_id": user["id"],
+        "branch_id": body.branch_id or "",
+        "branch_name": branch_name,
         "name": body.name,
         "template_id": body.template_id,
         "zone_items": {zone: [item.model_dump() for item in (items or [])] for zone, items in zone_items.items()},
@@ -2674,10 +2929,108 @@ async def create_playlist(body: PlaylistIn, user: dict = Depends(require_role("c
     asyncio.create_task(_broadcast_content_refresh(user["id"], reason="playlist_created"))
     return clean(doc)
 
+
+@api.post("/client/branches")
+async def create_branch(body: BranchIn, user: dict = Depends(require_role("client"))):
+    # Create a new branch for this client with placeholder storefront data.
+    bid = str(uuid.uuid4())
+    doc = {
+        "id": bid,
+        "client_id": user["id"],
+        "name": body.name,
+        "created_at": now_iso(),
+        "profile": {
+            "specialty": "",
+            "qualifications": "",
+            "fee": 0,
+            "hours": "",
+            "is_open": True,
+            "image_url": "",
+            "description": "",
+            "slot_minutes": 15,
+            "services": [],
+        },
+    }
+    await db.branches.insert_one(doc)
+    # Determine source selector: clone from provided branch_id or clone global (no branch_id)
+    if body.clone_from_branch_id:
+        tpl_filter = {"client_id": user["id"], "branch_id": body.clone_from_branch_id}
+        pl_filter = {"client_id": user["id"], "branch_id": body.clone_from_branch_id}
+    else:
+        tpl_filter = {"client_id": user["id"], "$or": [{"branch_id": {"$exists": False}}, {"branch_id": ""}]}
+        pl_filter = {"client_id": user["id"], "$or": [{"branch_id": {"$exists": False}}, {"branch_id": ""}]}
+
+    # Clone templates: keep a map of old->new ids to remap playlists
+    tpl_map: Dict[str, str] = {}
+    try:
+        templates = await db.templates.find(tpl_filter, {"_id": 0}).to_list(1000)
+        for t in templates:
+            old_id = t.get("id")
+            new_id = str(uuid.uuid4())
+            tpl_map[old_id] = new_id
+            new_t = dict(t)
+            new_t["id"] = new_id
+            new_t["branch_id"] = bid
+            new_t["created_at"] = now_iso()
+            await db.templates.insert_one(new_t)
+    except Exception:
+        pass
+
+    # Clone playlists: remap template ids where we cloned templates
+    try:
+        playlists = await db.playlists.find(pl_filter, {"_id": 0}).to_list(1000)
+        for p in playlists:
+            old_pid = p.get("id")
+            new_pid = str(uuid.uuid4())
+            new_p = dict(p)
+            new_p["id"] = new_pid
+            new_p["branch_id"] = bid
+            tpl_id = new_p.get("template_id")
+            if tpl_id and tpl_id in tpl_map:
+                new_p["template_id"] = tpl_map[tpl_id]
+            new_p["created_at"] = now_iso()
+            await db.playlists.insert_one(new_p)
+    except Exception:
+        pass
+
+    return clean(doc)
+
+
+@api.get("/client/branches")
+async def list_client_branches(user: dict = Depends(require_role("client"))):
+    return await db.branches.find({"client_id": user["id"]}, {"_id": 0}).to_list(1000)
+
+
+@api.delete("/client/branches/{bid}")
+async def delete_client_branch(bid: str, user: dict = Depends(require_role("client"))):
+    branch = await db.branches.find_one({"id": bid, "client_id": user["id"]}, {"_id": 0, "id": 1})
+    if not branch:
+        raise HTTPException(status_code=404, detail="Branch not found")
+    await db.appointments.delete_many({"client_id": user["id"], "branch_id": bid})
+    await db.devices.delete_many({"client_id": user["id"], "branch_id": bid})
+    await db.playlists.delete_many({"client_id": user["id"], "branch_id": bid})
+    await db.templates.delete_many({"client_id": user["id"], "branch_id": bid})
+    await db.branches.delete_one({"id": bid, "client_id": user["id"]})
+    try:
+        RECENT_ANNOUNCEMENTS.pop(_scope_key(user["id"], bid), None)
+    except Exception:
+        pass
+    return {"ok": True, "deleted_branch_id": bid}
+
 @api.put("/client/playlists/{pid}")
 async def update_playlist(pid: str, body: PlaylistUpdate, user: dict = Depends(require_role("client"))):
     upd: Dict[str, Any] = {}
     if body.name is not None: upd["name"] = body.name
+    if body.branch_id is not None:
+        if body.branch_id:
+            branch = await db.branches.find_one({"id": body.branch_id, "client_id": user["id"]}, {"_id": 0, "id": 1, "name": 1})
+            if not branch:
+                raise HTTPException(status_code=400, detail="Branch not assigned to you")
+            upd["branch_id"] = body.branch_id
+            upd["branch_name"] = branch.get("name") or branch.get("id") or ""
+        else:
+            upd["branch_id"] = ""
+            upd["branch_name"] = ""
     if body.template_id is not None: upd["template_id"] = body.template_id
     if body.zone_items is not None:
         # Ensure zone_items keys match the template's zone ids if possible
@@ -2764,7 +3117,9 @@ async def create_schedule(body: ScheduleIn, user: dict = Depends(require_role("c
     if not pl: raise HTTPException(status_code=400, detail="Invalid playlist")
     doc = {"id": str(uuid.uuid4()), "client_id": user["id"], **body.model_dump(),
            "created_at": now_iso()}
-    await db.schedules.insert_one(doc); return clean(doc)
+    await db.schedules.insert_one(doc)
+    asyncio.create_task(_broadcast_content_refresh(user["id"], reason="schedule_created"))
+    return clean(doc)
 
 @api.put("/client/schedules/{sid}")
 async def update_schedule(sid: str, body: ScheduleUpdate, user: dict = Depends(require_role("client"))):
@@ -2775,12 +3130,14 @@ async def update_schedule(sid: str, body: ScheduleUpdate, user: dict = Depends(r
     if not upd: raise HTTPException(status_code=400, detail="Nothing to update")
     r = await db.schedules.find_one_and_update({"id": sid, "client_id": user["id"]}, {"$set": upd}, return_document=True, projection={"_id": 0})
     if not r: raise HTTPException(status_code=404, detail="Schedule not found")
+    asyncio.create_task(_broadcast_content_refresh(user["id"], reason="schedule_updated"))
     return r
 
 @api.delete("/client/schedules/{sid}")
 async def delete_schedule(sid: str, user: dict = Depends(require_role("client"))):
     r = await db.schedules.delete_one({"id": sid, "client_id": user["id"]})
     if r.deleted_count == 0: raise HTTPException(status_code=404, detail="Schedule not found")
+    asyncio.create_task(_broadcast_content_refresh(user["id"], reason="schedule_deleted"))
     return {"ok": True}
 
 # ==================== Public Signage Player ====================
@@ -2812,14 +3169,17 @@ def _format_min_to_time(minute_value: int) -> str:
     return rendered.lstrip("0")
 
 
-async def _assign_next_available_time(cid: str, day: str, requested_time: Optional[str], service_duration_mins: int) -> Dict[str, Any]:
+async def _assign_next_available_time(cid: str, day: str, requested_time: Optional[str], service_duration_mins: int, branch_id: Optional[str] = None) -> Dict[str, Any]:
     app_now = _app_now()
     now_min = app_now.hour * 60 + app_now.minute
     requested_min = _parse_time_to_min(requested_time)
     candidate_min = max(requested_min if requested_min is not None else now_min, now_min)
 
+    active_query: Dict[str, Any] = {"client_id": cid, "date": day, "status": {"$in": ["pending", "called"]}}
+    if branch_id:
+        active_query["branch_id"] = branch_id
     active_appointments = await db.appointments.find(
-        {"client_id": cid, "date": day, "status": {"$in": ["pending", "called"]}},
+        active_query,
         {"_id": 0},
     ).sort([("token", 1), ("created_at", 1)]).to_list(200)
 
@@ -2860,6 +3220,7 @@ async def player_payload(pair_code: str, request: Request):
         raise HTTPException(status_code=403, detail="Device not paired with a fingerprint. Pairing required.")
     if not provided_fp or provided_fp != saved_fp:
         raise HTTPException(status_code=403, detail="Device not authorized. Fingerprint mismatch.")
+    device_branch_id = str(device.get("branch_id") or "")
     # enforce subscription: do not return playlist if client's subscription is inactive
     client = await db.clients.find_one({"id": device.get("client_id")}, {"_id": 0})
     weather = _resolve_weather_snapshot(client.get("address", "")) if client else None
@@ -2887,25 +3248,12 @@ async def player_payload(pair_code: str, request: Request):
         if _hhmm_to_min(s.get("start_time", "00:00")) <= cur_min <= _hhmm_to_min(s.get("end_time", "23:59")):
             active_schedules.append(s)
 
-    template = None
-    zone_defs = []
-    if device.get("template_id"):
-        template = await db.templates.find_one({"id": device["template_id"]}, {"_id": 0, "layout": 1, "name": 1})
-        if template:
-            zone_defs = template.get("layout", {}).get("zones", []) or []
-            if not zone_defs:
-                layout = template.get("layout", {})
-                if layout.get("main"): zone_defs.append({"id": "main", "name": layout.get("main", "Main")})
-                if layout.get("sidebar"): zone_defs.append({"id": "sidebar", "name": layout.get("sidebar", "Sidebar")})
-                if layout.get("ticker"): zone_defs.append({"id": "ticker", "name": layout.get("ticker", "Ticker")})
-    if not zone_defs:
-        zone_defs = [
-            {"id": "main", "name": "Main"},
-            {"id": "sidebar", "name": "Sidebar"},
-            {"id": "ticker", "name": "Ticker"},
-        ]
-
-    zones = {z["id"]: [] for z in zone_defs}
+    def _playlist_allowed(pl: Optional[dict]) -> bool:
+        if not pl:
+            return False
+        if not device_branch_id:
+            return True
+        return str(pl.get("branch_id") or "") == device_branch_id
 
     async def _hydrate_items(items):
         out = []
@@ -2981,35 +3329,76 @@ async def player_payload(pair_code: str, request: Request):
             elif isinstance(msg, str) and msg.strip():
                 zones.setdefault(ticker_zone_id, []).append({"kind": "text", "text": msg.strip(), "duration": 6})
 
-    seen = set()
-    for s in active_schedules:
-        if s["playlist_id"] in seen: continue
-        seen.add(s["playlist_id"])
-        await _ingest(await db.playlists.find_one({"id": s["playlist_id"]}, {"_id": 0}))
+    def _schedule_sort_key(schedule: dict):
+        return (
+            str(schedule.get("created_at") or ""),
+            str(schedule.get("updated_at") or ""),
+            str(schedule.get("playlist_id") or ""),
+        )
 
-    # device-level direct assignment fallback
-    if not any(zones.values()) and device.get("playlist_id"):
-        await _ingest(await db.playlists.find_one({"id": device["playlist_id"]}, {"_id": 0}))
+    chosen_playlist = None
+
+    # device-level direct assignment should win when present
+    if device.get("playlist_id"):
+        pl = await db.playlists.find_one({"id": device["playlist_id"], "client_id": device["client_id"]}, {"_id": 0})
+        if _playlist_allowed(pl):
+            chosen_playlist = pl
+
+    if not chosen_playlist:
+        active_schedules.sort(key=_schedule_sort_key, reverse=True)
+        for s in active_schedules:
+            pl = await db.playlists.find_one({"id": s["playlist_id"], "client_id": device["client_id"]}, {"_id": 0})
+            if _playlist_allowed(pl):
+                chosen_playlist = pl
+                break
 
     # fallback to latest playlist if no schedule
-    if not any(zones.values()):
-        pl = await db.playlists.find_one({"client_id": device["client_id"]}, {"_id": 0}, sort=[("created_at", -1)])
-        await _ingest(pl)
+    if not chosen_playlist:
+        latest_query: Dict[str, Any] = {"client_id": device["client_id"]}
+        if device_branch_id:
+            latest_query["branch_id"] = device_branch_id
+        chosen_playlist = await db.playlists.find_one(latest_query, {"_id": 0}, sort=[("created_at", -1)])
+
+    effective_template_id = str((chosen_playlist or {}).get("template_id") or device.get("template_id") or "")
+    template = None
+    zone_defs = []
+    if effective_template_id:
+        template = await db.templates.find_one({"id": effective_template_id}, {"_id": 0, "layout": 1, "name": 1})
+        if template:
+            zone_defs = template.get("layout", {}).get("zones", []) or []
+            if not zone_defs:
+                layout = template.get("layout", {})
+                if layout.get("main"): zone_defs.append({"id": "main", "name": layout.get("main", "Main")})
+                if layout.get("sidebar"): zone_defs.append({"id": "sidebar", "name": layout.get("sidebar", "Sidebar")})
+                if layout.get("ticker"): zone_defs.append({"id": "ticker", "name": layout.get("ticker", "Ticker")})
+    if not zone_defs:
+        zone_defs = [
+            {"id": "main", "name": "Main"},
+            {"id": "sidebar", "name": "Sidebar"},
+            {"id": "ticker", "name": "Ticker"},
+        ]
+
+    zones = {z["id"]: [] for z in zone_defs}
+
+    await _ingest(chosen_playlist)
 
     await db.devices.update_one({"id": device["id"]}, {"$set": {"status": "paired", "last_seen": now_iso()}})
 
     result = {"device_id": device["id"], "device_name": device["name"],
             "client_id": device["client_id"],
+            "branch_id": device_branch_id,
             "weather": weather,
             "orientation": device.get("orientation", "auto"),
-            "playlist_id": device.get("playlist_id", ""),
+            "playlist_id": (chosen_playlist or {}).get("id") or device.get("playlist_id", ""),
             "brightness": int(device.get("brightness", 100) or 100),
             "zones": zones, "template": template,
             "poll_after_seconds": 60}
 
     # surface any recent announcement broadcast (so clients that missed websocket receive it on poll)
     try:
-        recent = RECENT_ANNOUNCEMENTS.get(device.get("client_id"))
+        recent = RECENT_ANNOUNCEMENTS.get(_scope_key(device.get("client_id"), device.get("branch_id")))
+        if recent is None and not device_branch_id:
+            recent = RECENT_ANNOUNCEMENTS.get(device.get("client_id"))
         if recent:
             expires_at = recent.get("expires_at")
             if expires_at and expires_at > datetime.now(timezone.utc):
@@ -3022,7 +3411,7 @@ async def player_payload(pair_code: str, request: Request):
                         result["announcement_sent_at"] = payload.get("sent_at")
             else:
                 # cleanup expired
-                try: RECENT_ANNOUNCEMENTS.pop(device.get("client_id"), None)
+                try: RECENT_ANNOUNCEMENTS.pop(_scope_key(device.get("client_id"), device.get("branch_id")), None)
                 except Exception: pass
     except Exception:
         pass
@@ -3359,6 +3748,19 @@ async def on_startup():
         # ensure existing seeded demo accounts default to active (back-compat)
         await db.users.update_many({"role": "dealer", "status": {"$exists": False}}, {"$set": {"status": "active"}})
         await db.clients.update_many({"status": {"$exists": False}}, {"$set": {"status": "active"}})
+
+        global REDIS_CLIENT, REDIS_SUBSCRIBER_TASK
+        if REDIS_URL and redis is not None:
+            try:
+                REDIS_CLIENT = redis.from_url(REDIS_URL, decode_responses=True)
+                await REDIS_CLIENT.ping()
+                REDIS_SUBSCRIBER_TASK = asyncio.create_task(_redis_event_dispatcher())
+                logger.info("Redis pub/sub enabled")
+            except Exception as e:
+                REDIS_CLIENT = None
+                REDIS_SUBSCRIBER_TASK = None
+                logger.warning(f"Redis disabled: {e}")
+
         global DB_READY
         DB_READY = True
     except Exception as e:
@@ -3366,6 +3768,19 @@ async def on_startup():
 
 @app.on_event("shutdown")
 async def on_shutdown():
+    global REDIS_CLIENT, REDIS_SUBSCRIBER_TASK
+    try:
+        if REDIS_SUBSCRIBER_TASK:
+            REDIS_SUBSCRIBER_TASK.cancel()
+            REDIS_SUBSCRIBER_TASK = None
+    except Exception:
+        pass
+    try:
+        if REDIS_CLIENT is not None:
+            await REDIS_CLIENT.close()
+            REDIS_CLIENT = None
+    except Exception:
+        pass
     client.close()
 
 

@@ -4,6 +4,7 @@ This deployment uses Docker Compose with:
 
 - MongoDB in a container
 - MinIO as the S3-compatible object store
+- Redis for websocket/event fan-out
 - FastAPI backend
 - React frontend served by Nginx
 - Public Nginx reverse proxy for `rpsignage.com` and `rpsignage.in`
@@ -61,7 +62,7 @@ What the script does:
 
 1. Generates a temporary self-signed certificate if one does not exist yet.
 2. Builds the backend, frontend, and Nginx images.
-3. Starts MongoDB, MinIO, backend, frontend, and public Nginx.
+3. Starts MongoDB, MinIO, Redis, backend, frontend, and public Nginx.
 4. Requests a real Let's Encrypt certificate for both domains.
 5. Restarts Nginx after certificates are issued.
 
@@ -69,6 +70,7 @@ What the script does:
 
 - `mongodb` stores application data.
 - `minio` stores uploaded media.
+- `redis` carries announcement and payload refresh events.
 - `backend` serves `/api/*` and streams media from MinIO.
 - `frontend` serves the React SPA.
 - `nginx` terminates TLS and routes both domains to the same app.
